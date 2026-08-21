@@ -27,27 +27,15 @@ export async function buildApp(): Promise<FastifyInstance> {
           : { level: 'info', redact },
   });
 
-  await app.register(cors, {
-    origin: env.CORS_ORIGINS,
-    credentials: true,
-  });
-  await app.register(cookie);
-  await app.register(prismaPlugin);
-  await app.register(authPlugin);
-
-  await app.register(authRoutes);
-
-  app.get('/health', async () => ({ status: 'ok' }));
-
-  // Minimaal voorbeeld dat aantoont dat authenticate + requireRole end-to-end
-  // samenwerken over een echte HTTP-route (zie test/auth.integration.test.ts).
-  // Vanaf Phase 3+ vervangen echte admin-routes (bv. /admin/sync/projects) dit patroon.
-  app.get(
-    '/admin/ping',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
-    async () => ({ pong: true }),
-  );
-
+  // BELANGRIJK: setErrorHandler moet vóór app.register(...) van elke plugin/route
+  // staan. Fastify's plugin-encapsulatie "bevriest" welke errorHandler een
+  // child-context gebruikt op het moment dat die child-plugin boot (tijdens
+  // `await app.register(...)`) — niet dynamisch bij elk request. Stond deze
+  // handler hier ná de register()-calls (zoals eerder), dan hadden authPlugin/
+  // authRoutes bij het booten nog Fastify's eigen default errorHandler te pakken
+  // gekregen, en bleef ons `{ error: { code, message } }`-formaat onbereikbaar
+  // voor fouten die daarbinnen gegooid worden — reproduceerbaar bevestigd met
+  // een losstaand Fastify-testscript vóór deze fix.
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ApiError) {
       const body: ApiErrorBody = { error: { code: error.code, message: error.message } };
@@ -77,6 +65,26 @@ export async function buildApp(): Promise<FastifyInstance> {
     };
     reply.code(500).send(body);
   });
+
+  await app.register(cors, {
+    origin: env.CORS_ORIGINS,
+    credentials: true,
+  });
+  await app.register(cookie);
+  await app.register(prismaPlugin);
+  await app.register(authPlugin);
+  await app.register(authRoutes);
+
+  app.get('/health', async () => ({ status: 'ok' }));
+
+  // Minimaal voorbeeld dat aantoont dat authenticate + requireRole end-to-end
+  // samenwerken over een echte HTTP-route (zie test/auth.integration.test.ts).
+  // Vanaf Phase 3+ vervangen echte admin-routes (bv. /admin/sync/projects) dit patroon.
+  app.get(
+    '/admin/ping',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async () => ({ pong: true }),
+  );
 
   return app;
 }
