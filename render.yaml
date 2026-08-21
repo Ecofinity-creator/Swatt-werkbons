@@ -1,0 +1,37 @@
+# Render Blueprint — Phase 1: enkel de API + Postgres.
+# Redis en de achtergrondwerkers (BullMQ, PDF-service) worden toegevoegd in
+# Phase 9 (Teamleader-sync) resp. Phase 8 (PDF), zoals gepland in Stap 6 —
+# bewust niet vooruit provisioneren wat nog niet gebruikt wordt.
+databases:
+  - name: swatt-postgres
+    plan: starter
+    region: frankfurt
+    postgresMajorVersion: '16'
+
+services:
+  - type: web
+    name: swatt-api
+    runtime: node
+    plan: starter
+    region: frankfurt
+    # Geen `rootDir`: dit is een npm-workspaces monorepo, dus `npm ci`/build
+    # moeten vanuit de repo-root draaien zodat workspace-package @swatt/shared-types
+    # correct gelinkt wordt in node_modules.
+    buildCommand: npm ci && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
+    startCommand: npm run prisma:migrate:deploy --workspace=apps/api && npm start --workspace=apps/api
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: swatt-postgres
+          property: connectionString
+      - key: SESSION_COOKIE_SECRET
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: 'true'
+      - key: CORS_ORIGINS
+        # Na de eerste Vercel-deploy hier de echte productie-URL invullen
+        # (en elke Vercel-preview-URL toevoegen tijdens ontwikkeling).
+        value: 'https://swatt-app.vercel.app'

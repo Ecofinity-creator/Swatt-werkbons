@@ -1,0 +1,78 @@
+// Phase 1 (Foundation): enkel de tabellen die de auth/RBAC-flow nodig heeft.
+// Verdere entities (Customer, Project, TimeEntry, WorkOrder, ...) komen in latere
+// fases (zie Stap 6 — development roadmap) — bewust niet allemaal in één keer,
+// conform "werk iteratief, kleine gecontroleerde wijzigingen" (ontwikkelregels).
+//
+// Kolomnamen/tabelnamen zijn bewust identiek aan het datamodel uit Stap 4
+// (snake_case tabellen/kolommen via @@map/@map) zodat dit schema en dat
+// ontwerpdocument nooit uit elkaar kunnen groeien.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgcrypto, citext]
+}
+
+enum UserRole {
+  EMPLOYEE
+  SUPERVISOR
+  ADMIN
+
+  @@map("user_role")
+}
+
+model User {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String   @unique @db.Citext
+  passwordHash String   @map("password_hash")
+  role         UserRole @default(EMPLOYEE)
+  isActive     Boolean  @default(true) @map("is_active")
+
+  /// Extern Teamleader user-ID; nullable tot gekoppeld (zie ProjectSyncService, Phase 3).
+  teamleaderUserId String? @unique @map("teamleader_user_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  employee Employee?
+  sessions Session[]
+
+  @@index([role])
+  @@map("user")
+}
+
+model Employee {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String  @unique @map("user_id") @db.Uuid
+  displayName String  @map("display_name")
+  phone       String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("employee")
+}
+
+/// Server-side sessieopslag (niet in het oorspronkelijke Stap 4-datamodel, maar
+/// noodzakelijk voor de gekozen auth-aanpak: httpOnly cookie + server-side sessie
+/// i.p.v. een JWT in de browser, zodat een sessie op elk moment serverzijdig
+/// ingetrokken kan worden — bv. bij het deactiveren van een gebruiker).
+model Session {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("session")
+}
