@@ -49,3 +49,16 @@ export interface ApiErrorBody {
     message: string;
   };
 }
+
+/** Phase 2 — Teamleader OAuth. Zie apps/api/src/modules/teamleader/. */
+export const TEAMLEADER_CONNECTION_STATUSES = ['DISCONNECTED', 'CONNECTED', 'ERROR'] as const;
+
+export type TeamleaderConnectionStatus = (typeof TEAMLEADER_CONNECTION_STATUSES)[number];
+
+/** Response van GET /teamleader/status — data-only (nooit tokens), datums als ISO-strings over de wire. */
+export interface TeamleaderStatusResponseBody {
+  status: TeamleaderConnectionStatus;
+  connectedAt: string | null;
+  tokenExpiresAt: string | null;
+  lastError: string | null;
+}
