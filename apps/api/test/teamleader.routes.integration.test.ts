@@ -128,4 +128,125 @@ describe('Teamleader OAuth-routes', () => {
     expect(response.json()).toMatchObject({ status: 'DISCONNECTED', lastError: null });
   });
 
-  it('GET
+  it('GET /teamleader/oauth/authorize stuurt een ADMIN naar Teamleader met een state-cookie', async () => {
+    const { cookie } = await loginAsAdmin();
+    const response = await app.inject({ method: 'GET', url: '/teamleader/oauth/authorize', headers: { cookie } });
+
+    expect(response.statusCode).toBe(302);
+    const location = response.headers['location'] as string;
+    expect(location.startsWith('https://focus.teamleader.eu/oauth2/authorize')).toBe(true);
+    expect(location).toContain('response_type=code');
+    expect(location).toContain('state=');
+
+    const stateCookieValue = extractCookieValueByName(response.headers['set-cookie'], 'swatt_tl_oauth_state');
+    expect(stateCookieValue.length).toBeGreaterThan(10);
+  });
+
+  it('GET /teamleader/oauth/authorize weigert een niet-ADMIN', async () => {
+    await createUser({ email: 'technieker3@swatt.be', password: 'werfwachtwoord', role: 'EMPLOYEE' });
+    const loginResponse = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { email: 'technieker3@swatt.be', password: 'werfwachtwoord' },
+    });
+    const cookie = extractSessionCookie(loginResponse.headers['set-cookie']);
+
+    const response = await app.inject({ method: 'GET', url: '/teamleader/oauth/authorize', headers: { cookie } });
+    expect(response.statusCode).toBe(403);
+  });
+
+  it('volledige koppeling: authorize → callback → status CONNECTED, met correcte connectedByUserId', async () => {
+    const { cookie, userId } = await loginAsAdmin();
+
+    const authorizeResponse = await app.inject({
+      method: 'GET',
+      url: '/teamleader/oauth/authorize',
+      headers: { cookie },
+    });
+    const stateCookie = `swatt_tl_oauth_state=${extractCookieValueByName(
+      authorizeResponse.headers['set-cookie'],
+      'swatt_tl_oauth_state',
+    )}`;
+    const location = new URL(authorizeResponse.headers['location'] as string);
+    const state = location.searchParams.get('state');
+    expect(state).toBeTruthy();
+
+    mockSuccessfulTokenExchange();
+
+    const callbackResponse = await app.inject({
+      method: 'GET',
+      url: `/teamleader/oauth/callback?code=test-code&state=${state}`,
+      headers: { cookie: `${cookie}; ${stateCookie}` },
+    });
+
+    expect(callbackResponse.statusCode).toBe(302);
+    expect(callbackResponse.headers['location']).toContain('teamleaderConnected=1');
+
+    const statusResponse = await app.inject({ method: 'GET', url: '/teamleader/status', headers: { cookie } });
+    expect(statusResponse.json()).toMatchObject({ status: 'CONNECTED' });
+
+    const row = await prisma.teamleaderConnection.findFirst();
+    expect(row?.connectedByUserId).toBe(userId);
+    // Nooit de platte tokenwaarde in de database.
+    expect(row?.accessTokenEncrypted?.toString('utf8')).not.toContain('access-test');
+  });
+
+  it('callback met een verkeerde state redirect met teamleaderError=STATE_MISMATCH (CSRF-bescherming)', async () => {
+    const { cookie } = await loginAsAdmin();
+
+    const authorizeResponse = await app.inject({
+      method: 'GET',
+      url: '/teamleader/oauth/authorize',
+      headers: { cookie },
+    });
+    const stateCookie = `swatt_tl_oauth_state=${extractCookieValueByName(
+      authorizeResponse.headers['set-cookie'],
+      'swatt_tl_oauth_state',
+    )}`;
+
+    const callbackResponse = await app.inject({
+      method: 'GET',
+      url: '/teamleader/oauth/callback?code=test-code&state=dit-klopt-niet',
+      headers: { cookie: `${cookie}; ${stateCookie}` },
+    });
+
+    expect(callbackResponse.statusCode).toBe(302);
+    expect(callbackResponse.headers['location']).toContain('teamleaderError=STATE_MISMATCH');
+
+    const status = await prisma.teamleaderConnection.findFirst();
+    expect(status).toBeNull();
+  });
+
+  it('callback met error=access_denied (klant weigert in Teamleader) redirect met teamleaderError=DENIED', async () => {
+    const response = await app.inject({ method: 'GET', url: '/teamleader/oauth/callback?error=access_denied' });
+    expect(response.statusCode).toBe(302);
+    expect(response.headers['location']).toContain('teamleaderError=DENIED');
+  });
+
+  it('POST /teamleader/oauth/disconnect vereist ADMIN en verbreekt daarna de koppeling', async () => {
+    await createUser({ email: 'technieker4@swatt.be', password: 'werfwachtwoord', role: 'EMPLOYEE' });
+    const employeeLogin = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { email: 'technieker4@swatt.be', password: 'werfwachtwoord' },
+    });
+    const employeeCookie = extractSessionCookie(employeeLogin.headers['set-cookie']);
+    const forbidden = await app.inject({
+      method: 'POST',
+      url: '/teamleader/oauth/disconnect',
+      headers: { cookie: employeeCookie },
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    const { cookie } = await loginAsAdmin();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/teamleader/oauth/disconnect',
+      headers: { cookie },
+    });
+    expect(response.statusCode).toBe(204);
+
+    const status = await app.inject({ method: 'GET', url: '/teamleader/status', headers: { cookie } });
+    expect(status.json()).toMatchObject({ status: 'DISCONNECTED' });
+  });
+});
