@@ -31,3 +31,24 @@ export const AuthErrors = {
   insufficientRole: () =>
     new ApiError(403, 'INSUFFICIENT_ROLE', 'Je hebt geen rechten voor deze actie.'),
 };
+
+export const TeamleaderErrors = {
+  notConfigured: () =>
+    new ApiError(
+      503,
+      'TEAMLEADER_NOT_CONFIGURED',
+      'De Teamleader-integratie is nog niet geconfigureerd. Neem contact op met de beheerder.',
+    ),
+  notConnected: () =>
+    new ApiError(
+      409,
+      'TEAMLEADER_NOT_CONNECTED',
+      'Er is nog geen actieve Teamleader-koppeling. Verbind eerst met Teamleader via de instellingen.',
+    ),
+  reconnectRequired: () =>
+    new ApiError(
+      409,
+      'TEAMLEADER_RECONNECT_REQUIRED',
+      'De Teamleader-koppeling is verlopen of ingetrokken. Verbind opnieuw via de instellingen.',
+    ),
+};
