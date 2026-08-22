@@ -28,6 +28,29 @@ export async function buildApp(): Promise<FastifyInstance> {
           : { level: 'info', redact },
   });
 
+  // Render's edge/routing geeft (bevestigd via uitgebreid onderzoek — lokale
+  // reproducties met identieke Fastify+@fastify/cors-configuratie werken
+  // altijd correct) een kale, niet-JSON 404 terug op de CORS-preflight
+  // (OPTIONS) voor onze routes, ook wanneer de dienst al wakker/warm is —
+  // dus vóór onze eigen applicatiecode ooit bereikt wordt. In plaats van te
+  // vertrouwen op een platform-detail buiten onze controle, vermijden we de
+  // preflight structureel: een cross-origin request met `Content-Type:
+  // text/plain` (i.p.v. `application/json`) is een CORS-"simple request" en
+  // triggert nooit een preflight. De frontend (zie apps/web/src/api/client.ts)
+  // stuurt daarom voortaan `text/plain`, met dezelfde JSON-payload — deze
+  // parser zorgt dat die nog steeds als gewoon JSON binnenkomt.
+  app.addContentTypeParser('text/plain', { parseAs: 'string' }, (_request, body, done) => {
+    if (typeof body !== 'string' || body.length === 0) {
+      done(null, undefined);
+      return;
+    }
+    try {
+      done(null, JSON.parse(body));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   // BELANGRIJK: setErrorHandler moet vóór app.register(...) van elke plugin/route
   // staan. Fastify's plugin-encapsulatie "bevriest" welke errorHandler een
   // child-context gebruikt op het moment dat die child-plugin boot (tijdens
