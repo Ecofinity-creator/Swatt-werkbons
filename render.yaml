@@ -46,6 +46,13 @@ services:
           property: connectionString
       - key: SESSION_COOKIE_SECRET
         generateValue: true
+      - key: SEED_TOKEN
+        # Geheim voor de eenmalige /admin/seed-route (zie
+        # apps/api/src/modules/admin/seed.routes.ts), waarmee de allereerste
+        # ADMIN-gebruiker via de browser aangemaakt kan worden. Ga na de
+        # deploy naar deze envVar in het Render-dashboard om de gegenereerde
+        # waarde te kopiëren.
+        generateValue: true
       - key: COOKIE_SECURE
         value: 'true'
       - key: CORS_ORIGINS
