@@ -49,6 +49,7 @@ services:
       - key: COOKIE_SECURE
         value: 'true'
       - key: CORS_ORIGINS
-        # Na de eerste Vercel-deploy hier de echte productie-URL invullen
-        # (en elke Vercel-preview-URL toevoegen tijdens ontwikkeling).
-        value: 'https://swatt-app.vercel.app'
+        # Komma-gescheiden lijst (zie apps/api/src/config/env.ts). De echte
+        # productie-URL van de Vercel-deploy; latere Vercel preview-URL's
+        # (per PR/branch) hier gewoon aan toevoegen, komma-gescheiden.
+        value: 'https://swatt-werkbons-web.vercel.app'
