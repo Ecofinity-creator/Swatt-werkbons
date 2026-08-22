@@ -140,7 +140,7 @@ export function TeamleaderSettingsPage() {
 
       <div className="mt-6 flex flex-col gap-3">
         {status?.status !== 'CONNECTED' ? (
-          
+          <a
             href={teamleaderApi.authorizeUrl()}
             className="rounded-lg bg-swatt-gold px-4 py-4 text-center text-base font-semibold text-swatt-black active:opacity-80"
           >
