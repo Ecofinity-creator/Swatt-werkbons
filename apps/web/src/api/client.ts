@@ -1,4 +1,4 @@
-import type { ApiErrorBody, LoginResponseBody } from '@swatt/shared-types';
+import type { ApiErrorBody, LoginResponseBody, TeamleaderStatusResponseBody } from '@swatt/shared-types';
 
 /**
  * Lege string in dev (Vite-proxy stuurt /auth en /health door naar de API,
@@ -61,4 +61,16 @@ export const authApi = {
     }),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
   me: () => request<LoginResponseBody>('/auth/me', { method: 'GET' }),
+};
+
+export const teamleaderApi = {
+  status: () => request<TeamleaderStatusResponseBody>('/teamleader/status', { method: 'GET' }),
+  disconnect: () => request<void>('/teamleader/oauth/disconnect', { method: 'POST' }),
+  /**
+   * Bewust GEEN `request()`-fetch-call: dit moet een echte browser-navigatie
+   * zijn (`<a href={...}>`), niet een `fetch()` — de backend antwoordt met
+   * een 302-redirect naar Teamleader's eigen toestemmingsscherm, en enkel
+   * een top-level navigatie kan die browser daadwerkelijk volgen.
+   */
+  authorizeUrl: (): string => `${API_BASE_URL}/teamleader/oauth/authorize`,
 };
