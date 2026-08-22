@@ -59,4 +59,26 @@ services:
         # Komma-gescheiden lijst (zie apps/api/src/config/env.ts). De echte
         # productie-URL van de Vercel-deploy; latere Vercel preview-URL's
         # (per PR/branch) hier gewoon aan toevoegen, komma-gescheiden.
+        # Wordt ook gebruikt als terugkeer-URL na de Teamleader OAuth-callback
+        # (zie apps/api/src/modules/teamleader/teamleader.routes.ts) — dus de
+        # EERSTE waarde in deze lijst moet altijd de echte frontend-URL zijn.
         value: 'https://swatt-werkbons-web.vercel.app'
+      # Teamleader OAuth (Phase 2) — sync: false: deze vier moet je zelf
+      # invullen in het Render-dashboard ná het registreren van de
+      # Teamleader-marketplace-app (zie README "Teamleader koppelen"). Zolang
+      # ze niet gezet zijn blijft de rest van de app gewoon werken; enkel de
+      # /teamleader/*-routes geven dan een duidelijke "niet geconfigureerd"-fout.
+      - key: TEAMLEADER_CLIENT_ID
+        sync: false
+      - key: TEAMLEADER_CLIENT_SECRET
+        sync: false
+      - key: TEAMLEADER_REDIRECT_URI
+        # Moet exact overeenkomen met de redirect-URI die bij de
+        # Teamleader-app geregistreerd staat, bv.
+        # https://swatt-api.onrender.com/teamleader/oauth/callback
+        sync: false
+      - key: TEAMLEADER_TOKEN_ENCRYPTION_KEY
+        # AES-256-sleutel voor de versleutelde tokenopslag (token-crypto.service.ts).
+        # Render genereert deze zelf, base64-encoded — exact het formaat dat
+        # config/env.ts verwacht (32 bytes na decodering).
+        generateValue: true
