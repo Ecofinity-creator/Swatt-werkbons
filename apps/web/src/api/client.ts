@@ -21,7 +21,17 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     credentials: 'include', // stuurt/ontvangt de httpOnly sessiecookie
     headers: {
-      'Content-Type': 'application/json',
+      // BELANGRIJK: `text/plain` i.p.v. `application/json` als Content-Type.
+      // Een cross-origin request met een JSON-content-type is nooit een
+      // CORS-"simple request" en triggert dus altijd een OPTIONS-preflight.
+      // Render's edge geeft op die preflight een niet-JSON 404 terug vóór
+      // onze eigen backend ooit bereikt wordt (bevestigd via grondig
+      // onderzoek — zie apps/api/src/app.ts). `text/plain` staat wél op de
+      // CORS-safelist, dus dit vermijdt de preflight volledig; de body blijft
+      // gewoon JSON (de backend parset `text/plain` expliciet als JSON, zie
+      // addContentTypeParser in app.ts). Alleen toevoegen wanneer er ook echt
+      // een body is — een kale GET zonder headers is sowieso al "simple".
+      ...(init.body ? { 'Content-Type': 'text/plain' } : {}),
       ...init.headers,
     },
   });
