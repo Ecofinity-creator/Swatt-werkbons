@@ -25,11 +25,16 @@ services:
     # Geen `rootDir`: dit is een npm-workspaces monorepo, dus `npm ci`/build
     # moeten vanuit de repo-root draaien zodat workspace-package @swatt/shared-types
     # correct gelinkt wordt in node_modules.
-    # TIJDELIJK uitgebreid met diagnostische commando's om een build-fout te
-    # onderzoeken (@types/node lijkt niet gevonden te worden tijdens de
-    # apps/api-build, hoewel het lokaal met een identieke lockfile altijd
-    # correct installeert) — verwijderen zodra de oorzaak gevonden is.
-    buildCommand: npm ci && node --version && npm --version && echo "NODE_ENV tijdens build is:" && echo $NODE_ENV && echo "--- inhoud node_modules/@types ---" && ls node_modules/@types/ && echo "--- @types/node package.json ---" && cat node_modules/@types/node/package.json | head -5 && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
+    #
+    # BELANGRIJK — `--include=dev` op npm ci: Render zet NODE_ENV=production
+    # (zie envVars hieronder) al actief tijdens de installstap zelf, en npm
+    # slaat dan standaard alle devDependencies over — inclusief `typescript`
+    # en alle `@types/*`-pakketten die we net nodig hebben om te bouwen.
+    # Bevestigd via diagnostische build-log: `node_modules/@types` bestond
+    # daardoor gewoon niet, en `tsc` viel terug op een andere, niet-lokale
+    # versie (vandaar de eerdere, verwarrende TS5108-fout). `--include=dev`
+    # forceert installatie van devDependencies ongeacht NODE_ENV.
+    buildCommand: npm ci --include=dev && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
     startCommand: npm run prisma:migrate:deploy --workspace=apps/api && npm start --workspace=apps/api
     healthCheckPath: /health
     envVars:
