@@ -22,6 +22,13 @@ const envSchema = z.object({
     .string()
     .default('false')
     .transform((value) => value === 'true'),
+  /**
+   * Optioneel geheim voor de eenmalige `/admin/seed`-route (zie
+   * modules/admin/seed.routes.ts): laat toe om, zonder command line of
+   * directe databanktoegang, de allereerste ADMIN-gebruiker aan te maken via
+   * de browser. Onopgezet (lokale dev) → route reageert altijd met 404.
+   */
+  SEED_TOKEN: z.string().min(16).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
