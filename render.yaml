@@ -25,7 +25,11 @@ services:
     # Geen `rootDir`: dit is een npm-workspaces monorepo, dus `npm ci`/build
     # moeten vanuit de repo-root draaien zodat workspace-package @swatt/shared-types
     # correct gelinkt wordt in node_modules.
-    buildCommand: npm ci && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
+    # TIJDELIJK uitgebreid met diagnostische commando's om een build-fout te
+    # onderzoeken (@types/node lijkt niet gevonden te worden tijdens de
+    # apps/api-build, hoewel het lokaal met een identieke lockfile altijd
+    # correct installeert) — verwijderen zodra de oorzaak gevonden is.
+    buildCommand: npm ci && node --version && npm --version && echo "NODE_ENV tijdens build is:" && echo $NODE_ENV && echo "--- inhoud node_modules/@types ---" && ls node_modules/@types/ && echo "--- @types/node package.json ---" && cat node_modules/@types/node/package.json | head -5 && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
     startCommand: npm run prisma:migrate:deploy --workspace=apps/api && npm start --workspace=apps/api
     healthCheckPath: /health
     envVars:
