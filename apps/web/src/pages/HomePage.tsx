@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 
 const ROLE_LABELS: Record<string, string> = {
@@ -32,6 +33,15 @@ export function HomePage() {
         </p>
         <p className="text-sm text-swatt-gold">{ROLE_LABELS[user.role] ?? user.role}</p>
       </section>
+
+      {user.role === 'ADMIN' && (
+        <Link
+          to="/instellingen/teamleader"
+          className="mt-4 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Teamleader-integratie
+        </Link>
+      )}
 
       <button
         type="button"
