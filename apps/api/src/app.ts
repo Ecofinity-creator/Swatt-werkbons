@@ -7,6 +7,7 @@ import { env } from './config/env';
 import { ApiError } from './errors';
 import authPlugin from './modules/auth/auth.plugin';
 import authRoutes from './modules/auth/auth.routes';
+import seedRoutes from './modules/admin/seed.routes';
 import { requireRole } from './modules/rbac/rbac.middleware';
 import prismaPlugin from './plugins/prisma';
 
@@ -74,6 +75,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(prismaPlugin);
   await app.register(authPlugin);
   await app.register(authRoutes);
+  await app.register(seedRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 
