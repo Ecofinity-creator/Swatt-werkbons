@@ -26,6 +26,14 @@ enum UserRole {
   @@map("user_role")
 }
 
+enum TeamleaderConnectionStatus {
+  DISCONNECTED
+  CONNECTED
+  ERROR
+
+  @@map("teamleader_connection_status")
+}
+
 model User {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email        String   @unique @db.Citext
@@ -41,6 +49,10 @@ model User {
 
   employee Employee?
   sessions Session[]
+
+  /// Admins die ooit (het laatst) de Teamleader-koppeling gelegd hebben.
+  /// Zie TeamleaderConnection — meestal maar 0 of 1 rij, want die tabel is zelf een singleton.
+  connectedTeamleaderConnections TeamleaderConnection[]
 
   @@index([role])
   @@map("user")
@@ -75,4 +87,41 @@ model Session {
   @@index([userId])
   @@index([expiresAt])
   @@map("session")
+}
+
+/// Singleton-rij: er hoort maar één Teamleader-koppeling te zijn voor de hele
+/// organisatie. Afgedwongen door de service-laag met een vast, welbekend ID
+/// (TEAMLEADER_CONNECTION_SINGLETON_ID in teamleader-auth.service.ts) i.p.v.
+/// een DB-constraint — analoog aan de company_settings-singleton uit het
+/// oorspronkelijke Stap 4-datamodel.
+///
+/// Bewuste vereenvoudiging t.o.v. die Stap 4-schets: `client_id`/`client_secret`
+/// worden hier NIET bewaard. Er is maar één Teamleader-marketplace-app-registratie
+/// voor de hele levensduur van de app, dus die horen als environment variable thuis
+/// (TEAMLEADER_CLIENT_ID/TEAMLEADER_CLIENT_SECRET — zie config/env.ts), niet als
+/// muteerbare databasedata: één minder geheim dat via een databackup zou kunnen lekken.
+model TeamleaderConnection {
+  id     String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  status TeamleaderConnectionStatus @default(DISCONNECTED)
+
+  /// AES-256-GCM-versleuteld (iv || authTag || ciphertext) — zie token-crypto.service.ts.
+  /// Nooit de tokens in platte tekst opslaan (sectie 3 en 25 van de projectbrief).
+  accessTokenEncrypted  Bytes? @map("access_token_encrypted")
+  refreshTokenEncrypted Bytes? @map("refresh_token_encrypted")
+
+  tokenExpiresAt DateTime? @map("token_expires_at") @db.Timestamptz
+
+  /// Mensentaal-samenvatting van de laatste fout (sectie 27) — null zolang alles goed gaat.
+  lastError String? @map("last_error")
+
+  connectedByUserId String?   @map("connected_by_user_id") @db.Uuid
+  connectedAt       DateTime? @map("connected_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  connectedByUser User? @relation(fields: [connectedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([connectedByUserId])
+  @@map("teamleader_connection")
 }
