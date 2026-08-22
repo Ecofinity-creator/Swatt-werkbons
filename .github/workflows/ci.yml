@@ -28,6 +28,15 @@ jobs:
       DATABASE_URL: postgresql://swatt:swatt_ci@localhost:5432/swatt_test
       SESSION_COOKIE_SECRET: ci-test-secret-minstens-32-tekens-lang
       NODE_ENV: test
+      # Teamleader OAuth (Phase 2) — vaste test-waarden, geen echte secrets.
+      # De tests roepen Teamleader nooit echt aan (fetch wordt gemockt), dus
+      # deze waarden dienen enkel om isTeamleaderConfigured() op `true` te
+      # krijgen zodat de "geconfigureerd"-paden meegetest worden.
+      TEAMLEADER_CLIENT_ID: ci-test-client-id
+      TEAMLEADER_CLIENT_SECRET: ci-test-client-secret
+      TEAMLEADER_REDIRECT_URI: http://localhost:3000/teamleader/oauth/callback
+      # openssl rand -base64 32 (test-only sleutel, mag gerust in git staan)
+      TEAMLEADER_TOKEN_ENCRYPTION_KEY: H81ZAvO1tYqfCsYg/Eek8HrcevSTboS+aLWOfjEV47E=
 
     steps:
       - uses: actions/checkout@v4
