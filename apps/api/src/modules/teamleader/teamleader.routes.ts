@@ -103,4 +103,16 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
  */
 async function resolveOptionalAdminUserId(
   app: FastifyInstance,
-  request:
+  request: FastifyRequest,
+): Promise<string | null> {
+  const sessionId = request.cookies[SESSION_COOKIE_NAME];
+  if (!sessionId) return null;
+
+  const session = await app.sessionService.findValidSession(sessionId);
+  if (!session) return null;
+
+  const currentUser = await app.authService.getCurrentUser(session.userId);
+  if (!currentUser || !currentUser.isActive || currentUser.role !== 'ADMIN') return null;
+
+  return currentUser.id;
+}
