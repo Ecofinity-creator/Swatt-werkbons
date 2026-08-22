@@ -115,4 +115,132 @@ describe('TeamleaderAuthService', () => {
     expect(status.status).toBe('CONNECTED');
   });
 
-  it('geeft TEAMLEADER_NOT_CONNECTED terug wanneer er nog geen koppeling is', async () =>
+  it('geeft TEAMLEADER_NOT_CONNECTED terug wanneer er nog geen koppeling is', async () => {
+    const { prisma } = createFakePrisma();
+    const service = new TeamleaderAuthService(prisma);
+
+    await expect(service.getValidAccessToken()).rejects.toMatchObject({ code: 'TEAMLEADER_NOT_CONNECTED' });
+  });
+
+  it('hergebruikt een nog geldig access token zonder Teamleader opnieuw aan te roepen', async () => {
+    const { prisma } = createFakePrisma();
+    const service = new TeamleaderAuthService(prisma);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ access_token: 'access-1', refresh_token: 'refresh-1', expires_in: 3600, token_type: 'Bearer' }),
+    );
+    await service.handleAuthorizationCallback({ code: 'code-1', connectedByUserId: 'user-1' });
+    fetchMock.mockClear();
+
+    const token = await service.getValidAccessToken();
+    expect(token).toBe('access-1');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('ververst automatisch een (bijna) verlopen access token vóór gebruik', async () => {
+    const { prisma, getRow } = createFakePrisma();
+    const service = new TeamleaderAuthService(prisma);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        access_token: 'access-oud',
+        refresh_token: 'refresh-oud',
+        expires_in: 60, // < REFRESH_MARGIN_MS (2 min) → meteen als "bijna verlopen" behandeld
+        token_type: 'Bearer',
+      }),
+    );
+    await service.handleAuthorizationCallback({ code: 'code-1', connectedByUserId: 'user-1' });
+    fetchMock.mockClear(); // enkel de refresh-call hieronder tellen, niet de initiële connect-call
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ access_token: 'access-nieuw', refresh_token: 'refresh-nieuw', expires_in: 3600, token_type: 'Bearer' }),
+    );
+
+    const token = await service.getValidAccessToken();
+
+    expect(token).toBe('access-nieuw');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, calledInit] = fetchMock.mock.calls[0]!;
+    expect(String(calledInit.body)).toContain('grant_type=refresh_token');
+    expect(String(calledInit.body)).toContain('refresh_token=refresh-oud');
+
+    // connectedAt/connectedByUserId blijven behouden na een refresh (geen nieuwe koppeling).
+    expect(getRow()?.connectedByUserId).toBe('user-1');
+  });
+
+  it('race condition: twee gelijktijdige aanvragen voor een verlopen token triggeren maar één refresh-call', async () => {
+    const { prisma } = createFakePrisma();
+    const service = new TeamleaderAuthService(prisma);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ access_token: 'access-oud', refresh_token: 'refresh-oud', expires_in: 60, token_type: 'Bearer' }),
+    );
+    await service.handleAuthorizationCallback({ code: 'code-1', connectedByUserId: 'user-1' });
+    fetchMock.mockClear(); // enkel de race-condition-fetch-call hieronder tellen, niet de initiële connect-call
+
+    let resolveFetch!: (value: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+
+    const first = service.getValidAccessToken();
+    const second = service.getValidAccessToken();
+
+    // Wacht tot beide aanroepen effectief tot aan de (enige) fetch-call gelopen zijn,
+    // vóór we die call laten "antwoorden" — robuuster dan een vast aantal microtask-ticks gokken.
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    resolveFetch(
+      jsonResponse({ access_token: 'access-nieuw', refresh_token: 'refresh-nieuw', expires_in: 3600, token_type: 'Bearer' }),
+    );
+
+    const [firstToken, secondToken] = await Promise.all([first, second]);
+
+    expect(firstToken).toBe('access-nieuw');
+    expect(secondToken).toBe('access-nieuw');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('zet de status op ERROR met een mensentaal-foutmelding wanneer de refresh mislukt, en vraagt om opnieuw te verbinden', async () => {
+    const { prisma, getRow } = createFakePrisma();
+    const service = new TeamleaderAuthService(prisma);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ access_token: 'access-oud', refresh_token: 'refresh-oud', expires_in: 60, token_type: 'Bearer' }),
+    );
+    await service.handleAuthorizationCallback({ code: 'code-1', connectedByUserId: 'user-1' });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'invalid_grant' }, { ok: false, status: 400 }));
+
+    await expect(service.getValidAccessToken()).rejects.toMatchObject({ code: 'TEAMLEADER_RECONNECT_REQUIRED' });
+
+    const row = getRow();
+    expect(row?.status).toBe('ERROR');
+    expect(row?.lastError).toBeTruthy();
+  });
+
+  it('verbreekt de koppeling: tokens en status volledig gewist', async () => {
+    const { prisma, getRow } = createFakePrisma();
+    const service = new TeamleaderAuthService(prisma);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ access_token: 'a', refresh_token: 'r', expires_in: 3600, token_type: 'Bearer' }),
+    );
+    await service.handleAuthorizationCallback({ code: 'code-1', connectedByUserId: 'user-1' });
+
+    await service.disconnect();
+
+    const row = getRow();
+    expect(row?.status).toBe('DISCONNECTED');
+    expect(row?.accessTokenEncrypted).toBeNull();
+    expect(row?.refreshTokenEncrypted).toBeNull();
+
+    const status = await service.getStatus();
+    expect(status.status).toBe('DISCONNECTED');
+  });
+});
