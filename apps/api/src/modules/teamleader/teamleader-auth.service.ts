@@ -171,4 +171,84 @@ export class TeamleaderAuthService {
           data: { status: 'ERROR', lastError: message },
         });
       } catch {
-        // Best effort — als
+        // Best effort — als zelfs deze update faalt, blijft de oorspronkelijke fout leidend.
+      }
+      throw TeamleaderErrors.reconnectRequired();
+    }
+
+    await this.persistTokens(tokens, null);
+    return tokens.access_token;
+  }
+
+  private async exchangeToken(
+    config: TeamleaderEnvConfig,
+    params: Record<string, string>,
+  ): Promise<TeamleaderTokenResponse> {
+    // Body-parameters (niet Basic-auth header) — zo documenteert Teamleader
+    // zelf de token-exchange in het officiële apiary-blueprint.
+    const body = new URLSearchParams({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      ...params,
+    });
+
+    const response = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(
+        `Teamleader token-endpoint gaf ${response.status} terug: ${errorText || response.statusText}`,
+      );
+    }
+
+    return (await response.json()) as TeamleaderTokenResponse;
+  }
+
+  /**
+   * `connectedByUserId === null` betekent hier "dit is een token-refresh,
+   * geen nieuwe koppeling" — `connectedAt`/`connectedByUserId` van de
+   * bestaande rij blijven dan onaangeroerd. Bij een echte nieuwe koppeling
+   * (na de OAuth-callback) geeft de aanroeper altijd de admin-id door.
+   */
+  private async persistTokens(tokens: TeamleaderTokenResponse, connectedByUserId: string | null): Promise<void> {
+    const tokenExpiresAt = new Date(Date.now() + tokens.expires_in * 1000);
+    const sharedData = {
+      status: 'CONNECTED' as const,
+      accessTokenEncrypted: encryptToken(tokens.access_token),
+      refreshTokenEncrypted: encryptToken(tokens.refresh_token),
+      tokenExpiresAt,
+      lastError: null,
+    };
+
+    await this.prisma.teamleaderConnection.upsert({
+      where: { id: TEAMLEADER_CONNECTION_SINGLETON_ID },
+      create: {
+        id: TEAMLEADER_CONNECTION_SINGLETON_ID,
+        ...sharedData,
+        connectedAt: new Date(),
+        connectedByUserId,
+      },
+      update: {
+        ...sharedData,
+        ...(connectedByUserId ? { connectedAt: new Date(), connectedByUserId } : {}),
+      },
+    });
+  }
+
+  private async findConnection(): Promise<TeamleaderConnectionRow | null> {
+    return this.prisma.teamleaderConnection.findUnique({
+      where: { id: TEAMLEADER_CONNECTION_SINGLETON_ID },
+    });
+  }
+
+  private assertConfigured(): TeamleaderEnvConfig {
+    if (!isTeamleaderConfigured()) {
+      throw TeamleaderErrors.notConfigured();
+    }
+    return getTeamleaderConfig();
+  }
+}
