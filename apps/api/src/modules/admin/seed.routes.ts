@@ -30,7 +30,14 @@ const seedBodySchema = z.object({
 });
 
 function assertValidToken(request: FastifyRequest): void {
-  const token = (request.query as { token?: string }).token;
+  const rawToken = (request.query as { token?: string }).token;
+  // Render's gegenereerde tokens zijn base64-achtig en kunnen een `+` bevatten.
+  // Query-string parsing (zowel hier als in de browser die de URL samenstelt)
+  // decodeert een niet-percent-encodeerde `+` als een spatie — vandaar het
+  // terugvertalen, zodat een gewoon gekopieerd/geplakte token altijd werkt
+  // zonder dat de gebruiker zelf moet URL-encoderen. Een base64-token bevat
+  // nooit een echte spatie, dus dit is veilig.
+  const token = rawToken?.replace(/ /g, '+');
   if (!env.SEED_TOKEN || !token || token !== env.SEED_TOKEN) {
     // Bewust dezelfde 404 in beide gevallen (geen token ingesteld vs. fout
     // token) — geeft een aanvaller geen enkel signaal of deze route "echt"
