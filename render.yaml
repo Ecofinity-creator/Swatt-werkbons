@@ -2,9 +2,17 @@
 # Redis en de achtergrondwerkers (BullMQ, PDF-service) worden toegevoegd in
 # Phase 9 (Teamleader-sync) resp. Phase 8 (PDF), zoals gepland in Stap 6 —
 # bewust niet vooruit provisioneren wat nog niet gebruikt wordt.
+#
+# LET OP — huidige keuze: `plan: free` op beide, bewust voor de testfase.
+# De gratis Postgres-database wordt door Render automatisch verwijderd na
+# 30 dagen, en de gratis web service valt na ~15 min inactiviteit in slaap
+# (trage cold-start bij de volgende request). Prima om nu te ontwikkelen en
+# te testen, maar VOOR er echte klantwerkbonnen op komen te staan moet dit
+# naar `plan: starter` (~$7/maand voor de service + $6/maand voor de
+# database) om dataverlies en cold-starts te vermijden.
 databases:
   - name: swatt-postgres
-    plan: starter
+    plan: free
     region: frankfurt
     postgresMajorVersion: '16'
 
@@ -12,7 +20,7 @@ services:
   - type: web
     name: swatt-api
     runtime: node
-    plan: starter
+    plan: free
     region: frankfurt
     # Geen `rootDir`: dit is een npm-workspaces monorepo, dus `npm ci`/build
     # moeten vanuit de repo-root draaien zodat workspace-package @swatt/shared-types
