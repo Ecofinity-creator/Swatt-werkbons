@@ -26,6 +26,13 @@ export class AuthService {
       throw AuthErrors.invalidCredentials();
     }
 
+    if (user.passwordHash === null) {
+      // Uitgenodigd, maar nog geen wachtwoord ingesteld (zie user.routes.ts
+      // / password-reset.service.ts) — expliciet onderscheiden van
+      // "invalid credentials", zie de toelichting bij passwordNotSet() in errors.ts.
+      throw AuthErrors.passwordNotSet();
+    }
+
     const passwordMatches = await verifyPassword(password, user.passwordHash);
     if (!passwordMatches) {
       throw AuthErrors.invalidCredentials();
