@@ -186,8 +186,7 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
   // Bewust POST, geen GET: dit voert een actie uit (roept Teamleader aan,
   // schrijft naar onze eigen database) — geen idempotente resource-fetch.
   //
-  // MVP-beperking: dit draait synchroon
- binnen de request (nog geen BullMQ-
+    // MVP-beperking: dit draait synchroon binnen de request (nog geen BullMQ-
   // achtergrondwerker — die komt pas in Phase 9/11 van de roadmap). Bij een
   // groot aantal projecten kan dit een tijdje duren; de admin-UI toont dan
   // ook gewoon "Bezig..." tot de aanvraag klaar is. Geen dataverlies-risico:
