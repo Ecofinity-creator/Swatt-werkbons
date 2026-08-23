@@ -1,18 +1,3 @@
-# Swatt Werkbon-app
-
-Mobiele tijdregistratie + digitale werkbon + Teamleader Focus-integratie voor Swatt BV (Izegem).
-
-Volledige functionele analyse, architectuur, Teamleader API-analyse, datamodel, UX en development-roadmap staan in het projectfundamentendocument (Stap 1 t/m 6). **Phase 1 — Foundation** (projectskelet, login/sessies, RBAC, CI/CD naar Vercel + Render) is afgerond en live. Dit is nu ook uitgebreid met **Phase 2 — Teamleader OAuth**: een admin kan de Teamleader-koppeling leggen/verbreken, met automatische, veilig versleutelde token-refresh.
-
-## Structuur (npm workspaces monorepo)
-
-```
-apps/
-  api/    → backend: Node.js + TypeScript + Fastify + Prisma + PostgreSQL
-  web/    → frontend: React + TypeScript + Vite + Tailwind (PWA volgt in Phase 11)
-packages/
-  shared-types/ → types gedeeld tussen api en web (o.a. UserRole, AuthenticatedUser)
-```
 
 ## Lokaal opzetten
 
@@ -118,9 +103,26 @@ npm run lint
 4. Log in als ADMIN, ga naar **Instellingen → Teamleader-integratie**, en klik **Verbind met Teamleader**.
 5. **Nog te verifiëren tegen het echte Swatt-account (zie openstaand actiepunt in het fundamentendocument):** gebruikt dit account de legacy of de `projects-v2`-projectenmodule — bepaalt de implementatie van `ProjectSyncService` in Phase 3.
 
+## E-mail koppelen (uitnodigingen + wachtwoord vergeten)
+
+Nieuwe gebruikers krijgen geen wachtwoord meer van de admin, maar een uitnodigingsmail met een link om er zelf een
+in te stellen; diezelfde link (via "Wachtwoord vergeten" op het inlogscherm) werkt ook om een bestaand wachtwoord
+te resetten. Dit loopt via [Resend](https://resend.com):
+
+1. Maak een gratis Resend-account aan (3.000 e-mails/maand gratis).
+2. Ofwel meteen testen met de Resend-sandboxafzender `onboarding@resend.dev` (levert enkel af aan het e-mailadres
+   van je eigen Resend-account — voldoende om de flow te testen), ofwel een eigen verzenddomein verifiëren via de
+   DNS-instructies in het Resend-dashboard voor echte productie-verzending.
+3. Maak een API-key aan in het Resend-dashboard.
+4. Zet `RESEND_API_KEY` en `EMAIL_FROM_ADDRESS` (zie `apps/api/.env.example`) — lokaal in `.env`, in productie
+   rechtstreeks in de Render-dashboard env vars (nooit in code of chat delen).
+
+Zonder deze configuratie blijft de rest van de app gewoon werken (business rule 9): een nieuwe gebruiker wordt dan
+wel aangemaakt, maar zonder uitnodigingsmail — de admin ziet dat in het scherm **Medewerkers** en kan de betrokkene
+vragen "Wachtwoord vergeten" te gebruiken zodra de e-mailkoppeling actief is.
+
 ## Beperkingen van deze fase (Phase 1 + 2)
 
-- Geen wachtwoord-reset-flow (komt met de eerste "echte" gebruikersbeheer-fase).
 - Geen rate-limiting op `/auth/login` nog (gepland voor Phase 12 — production hardening), dus **niet production-ready tegen brute-force** in deze vorm.
 - Redis/BullMQ bestaan nog niet — die komen in Phase 8/9 (PDF-generatie, Teamleader-sync van tijd/bestanden).
 - Teamleader OAuth is klaar (Phase 2), maar er wordt nog **niets** effectief gesynchroniseerd — geen projecten, gebruikers, tijdregistraties of bestanden. Dat begint in Phase 3.
