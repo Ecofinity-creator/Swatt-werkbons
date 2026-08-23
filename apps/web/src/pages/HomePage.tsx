@@ -36,6 +36,13 @@ export function HomePage() {
         Mijn projecten
       </Link>
 
+      <Link
+        to="/app-toegang"
+        className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+      >
+        App op smartphone (QR-code)
+      </Link>
+
       {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
         <Link
           to="/backoffice/medewerkers"
