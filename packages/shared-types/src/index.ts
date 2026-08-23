@@ -41,6 +41,17 @@ export interface LoginResponseBody {
   user: AuthenticatedUser;
 }
 
+/** Body van POST /auth/forgot-password. Response is altijd 204, ongeacht of het e-mailadres bestaat (voorkomt account-enumeratie). */
+export interface ForgotPasswordBody {
+  email: string;
+}
+
+/** Body van POST /auth/reset-password — `token` komt uit de link in de uitnodigings-/reset-e-mail. */
+export interface ResetPasswordBody {
+  token: string;
+  password: string;
+}
+
 export interface ApiErrorBody {
   error: {
     /** Machine-leesbare code, bv. "INVALID_CREDENTIALS" — voor i18n/UI-logica. */
@@ -108,14 +119,15 @@ export interface ListUsersResponseBody {
 
 export interface CreateUserBody {
   email: string;
-  password: string;
   displayName: string;
   role: UserRole;
   phone?: string;
 }
 
+/** `inviteEmailSent` is false wanneer het account wél is aangemaakt maar de uitnodigingsmail niet kon worden verstuurd (zie business rule 9 — externe-dienst-storing mag nooit lokale data laten verloren gaan). */
 export interface CreateUserResponseBody {
   user: AdminUserSummary;
+  inviteEmailSent: boolean;
 }
 
 /** Body van POST /admin/users/:id/update — alle velden optioneel (partial update). */
