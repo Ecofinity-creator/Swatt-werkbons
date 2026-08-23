@@ -6,6 +6,7 @@ import type {
   ListProjectsResponseBody,
   ListUsersResponseBody,
   LoginResponseBody,
+  PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
   TeamleaderStatusResponseBody,
   UpdateUserBody,
@@ -79,12 +80,23 @@ export const teamleaderApi = {
   status: () => request<TeamleaderStatusResponseBody>('/teamleader/status', { method: 'GET' }),
   disconnect: () => request<void>('/teamleader/oauth/disconnect', { method: 'POST' }),
   /**
-   * Bewust GEEN `request()`-fetch-call: dit moet een echte browser-navigatie
-   * zijn (`<a href={...}>`), niet een `fetch()` — de backend antwoordt met
-   * een 302-redirect naar Teamleader's eigen toestemmingsscherm, en enkel
-   * een top-level navigatie kan die browser daadwerkelijk volgen.
+   * Twee stappen, bewust: (1) een gewone, cookie-geauthenticeerde fetch-call
+   * die een kortlevend eenmalig token ophaalt, gevolgd door (2) een echte
+   * top-level browsernavigatie naar onze eigen /authorize-route (die op haar
+   * beurt doorstuurt naar Teamleader) met dat token in de URL. Waarom niet
+   * gewoon een `<a href>` met een cookie-check op de navigatie zelf: zie de
+   * uitgebreide toelichting bij AUTHORIZE_HANDOFF_TTL_MS in
+   * teamleader.routes.ts — cross-site cookiebescherming in moderne browsers
+   * (Firefox Total Cookie Protection e.d.) maakt de gewone sessiecookie
+   * onbetrouwbaar op het exacte moment van een top-level navigatie naar een
+   * ander domein (Vercel → Render).
    */
-  authorizeUrl: (): string => `${API_BASE_URL}/teamleader/oauth/authorize`,
+  connect: async (): Promise<void> => {
+    const { token } = await request<PrepareAuthorizeResponseBody>('/teamleader/oauth/prepare-authorize', {
+      method: 'POST',
+    });
+    window.location.href = `${API_BASE_URL}/teamleader/oauth/authorize?token=${encodeURIComponent(token)}`;
+  },
   syncProjects: () => request<ProjectSyncResponseBody>('/admin/teamleader/sync/projects', { method: 'POST' }),
 };
 
