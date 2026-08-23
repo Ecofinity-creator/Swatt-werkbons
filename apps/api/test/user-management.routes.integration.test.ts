@@ -74,12 +74,12 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
       method: 'POST',
       url: '/admin/users',
       headers: { cookie },
-      payload: { email: 'nieuw@swatt.be', password: 'wachtwoord123', displayName: 'Nieuw', role: 'EMPLOYEE' },
+      payload: { email: 'nieuw@swatt.be', displayName: 'Nieuw', role: 'EMPLOYEE' },
     });
     expect(create.statusCode).toBe(403);
   });
 
-  it('een ADMIN kan een nieuwe gebruiker aanmaken (met meteen een Employee-profiel) en die verschijnt in de lijst', async () => {
+  it('een ADMIN kan een nieuwe gebruiker aanmaken (met meteen een Employee-profiel, zonder wachtwoord) en die verschijnt in de lijst', async () => {
     const cookie = await loginAsAdmin();
 
     const createResponse = await app.inject({
@@ -88,7 +88,6 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
       headers: { cookie },
       payload: {
         email: 'peter@swatt.be',
-        password: 'werfwachtwoord1',
         displayName: 'Peter',
         role: 'EMPLOYEE',
         phone: '0470 12 34 56',
@@ -103,14 +102,27 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
     expect(created.employee).toMatchObject({ displayName: 'Peter', phone: '0470 12 34 56' });
     expect(created).not.toHaveProperty('passwordHash');
     expect(created).not.toHaveProperty('password');
+    // RESEND_API_KEY/EMAIL_FROM_ADDRESS zijn in deze testomgeving bewust niet
+    // gezet (zie README "Tests draaien") — de uitnodigingsmail kan dus niet
+    // verstuurd worden, maar het account wordt sowieso aangemaakt (business
+    // rule 9). De route meldt dat via inviteEmailSent: false.
+    expect(createResponse.json().inviteEmailSent).toBe(false);
 
-    // De nieuwe gebruiker kan meteen inloggen met het door de admin gekozen wachtwoord.
+    // Geen wachtwoord ingesteld: inloggen geeft een duidelijke, specifieke fout
+    // (niet de generieke "invalid credentials") — zie AuthService.login.
     const loginResponse = await app.inject({
       method: 'POST',
       url: '/auth/login',
-      payload: { email: 'peter@swatt.be', password: 'werfwachtwoord1' },
+      payload: { email: 'peter@swatt.be', password: 'eender-welk-wachtwoord' },
     });
-    expect(loginResponse.statusCode).toBe(200);
+    expect(loginResponse.statusCode).toBe(401);
+    expect(loginResponse.json().error.code).toBe('PASSWORD_NOT_SET');
+
+    // Er is wél een uitnodigingstoken aangemaakt (dat gebeurt vóór de
+    // mislukte mailverzending, zie user.routes.ts) — zonder geldig token zou
+    // Peter nooit meer een wachtwoord kunnen instellen.
+    const tokenCount = await prisma.passwordSetupToken.count({ where: { userId: created.id } });
+    expect(tokenCount).toBe(1);
 
     const listResponse = await app.inject({ method: 'GET', url: '/admin/users', headers: { cookie } });
     const emails = listResponse.json().users.map((u: { email: string }) => u.email);
@@ -119,7 +131,7 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
 
   it('weigert een tweede gebruiker met hetzelfde e-mailadres met een mensentaal-foutmelding', async () => {
     const cookie = await loginAsAdmin();
-    const payload = { email: 'dubbel@swatt.be', password: 'werfwachtwoord1', displayName: 'Eerste', role: 'EMPLOYEE' };
+    const payload = { email: 'dubbel@swatt.be', displayName: 'Eerste', role: 'EMPLOYEE' };
 
     const first = await app.inject({ method: 'POST', url: '/admin/users', headers: { cookie }, payload });
     expect(first.statusCode).toBe(201);
