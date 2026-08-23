@@ -34,6 +34,18 @@ enum TeamleaderConnectionStatus {
   @@map("teamleader_connection_status")
 }
 
+/// Welke Teamleader-projectenmodule het gekoppelde account gebruikt — de twee
+/// modules zijn onderling incompatibel (bevestigd via het officiële
+/// support-artikel "New Teamleader Focus API Project Endpoints": een account
+/// gebruikt exact één van beide, nooit allebei). Zie ProjectSyncService
+/// (Phase 3) voor hoe dit gedetecteerd wordt via `accounts.projects-v2-status`.
+enum TeamleaderProjectsModule {
+  LEGACY
+  PROJECTS_V2
+
+  @@map("teamleader_projects_module")
+}
+
 model User {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email        String   @unique @db.Citext
@@ -54,6 +66,9 @@ model User {
   /// Zie TeamleaderConnection — meestal maar 0 of 1 rij, want die tabel is zelf een singleton.
   connectedTeamleaderConnections TeamleaderConnection[]
 
+  /// Admins/supervisors die ooit een ProjectAssignment gelegd hebben (Phase 3).
+  createdProjectAssignments ProjectAssignment[]
+
   @@index([role])
   @@map("user")
 }
@@ -68,6 +83,10 @@ model Employee {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Welke Teamleader-projecten deze werknemer mag selecteren om uren op te boeken
+  /// (Phase 3 — zie ProjectAssignment hieronder en Stap 4 van het fundamentendocument).
+  projectAssignments ProjectAssignment[]
 
   @@map("employee")
 }
@@ -111,6 +130,12 @@ model TeamleaderConnection {
 
   tokenExpiresAt DateTime? @map("token_expires_at") @db.Timestamptz
 
+  /// Gedetecteerd bij de eerste project-sync-poging (zie ProjectSyncService,
+  /// Phase 3) via `accounts.projects-v2-status`, en daarna hier gecached zodat
+  /// niet elke sync-run opnieuw diezelfde detectie-call moet doen. Null =
+  /// nog niet gedetecteerd (bv. meteen na een nieuwe koppeling).
+  projectsModule TeamleaderProjectsModule? @map("projects_module")
+
   /// Mensentaal-samenvatting van de laatste fout (sectie 27) — null zolang alles goed gaat.
   lastError String? @map("last_error")
 
@@ -124,4 +149,86 @@ model TeamleaderConnection {
 
   @@index([connectedByUserId])
   @@map("teamleader_connection")
+}
+
+// ============================================================
+// Phase 3 (slice) — read-only Teamleader-projectcache + koppeling
+// werknemer↔project. Zie ProjectSyncService/CustomerSyncService
+// (apps/api/src/modules/teamleader/) en Stap 4 van het fundamentendocument.
+//
+// Bewuste vereenvoudigingen t.o.v. de oorspronkelijke Stap 4-schets:
+// - `Customer.address`/`Project.address` zijn één samengestelde tekstkolom
+//   (opgebouwd uit Teamleader's AddressResponse: line_1 + postcode/stad),
+//   geen aparte kolommen — enkel nodig als leesbare weergave op de
+//   projectkaart, niet als gestructureerde data.
+// - `Project.address` is een kopie van `Customer.address` op syncmoment
+//   (denormalisatie voor de projectkaart-UI, sectie 5). Een adreswijziging
+//   bij de klant in Teamleader komt pas door bij de eerstvolgende sync.
+// - Een Teamleader-project zonder gekoppelde klant wordt NIET gesynchroniseerd
+//   (zowel de legacy als de projects-v2 API staan dat toe — bv. een intern
+//   project) — dit datamodel vereist net als de oorspronkelijke Stap 4-schets
+//   een klant per project (WorkOrder.customerId leunt hierop). Zie
+//   ProjectSyncService voor de exacte telling van overgeslagen projecten.
+// - Een projects-v2-project kan in theorie meerdere klanten hebben
+//   (`customers`-array); wij bewaren enkel de eerste — te herzien zodra dit
+//   in de praktijk voorkomt bij een echt Teamleader-account.
+// ============================================================
+
+model Customer {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  teamleaderId   String  @unique @map("teamleader_id")
+  teamleaderType String  @map("teamleader_type") // 'contact' | 'company'
+  name           String
+  address        String?
+  vatNumber      String? @map("vat_number")
+  isArchivedInTl Boolean @default(false) @map("is_archived_in_tl")
+
+  lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  projects Project[]
+
+  @@map("customer")
+}
+
+model Project {
+  id                String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  teamleaderId      String                   @unique @map("teamleader_id")
+  teamleaderModule  TeamleaderProjectsModule @map("teamleader_module")
+  customerId        String                   @map("customer_id") @db.Uuid
+  /// `reference` (legacy, bv. "PRO-2") of `project_key` (projects-v2, sequentieel nummer) als tekst.
+  projectNumber     String?                  @map("project_number")
+  name              String
+  description       String?
+  /// Kopie van customer.address op syncmoment — zie toelichting bovenaan dit blok.
+  address           String?
+  /// Ruwe Teamleader-statuswaarde (legacy: active/on_hold/done/cancelled; projects-v2: open/closed) — puur informatief.
+  status            String?
+  isArchivedInTl    Boolean                  @default(false) @map("is_archived_in_tl")
+
+  lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  customer    Customer             @relation(fields: [customerId], references: [id])
+  assignments ProjectAssignment[]
+
+  @@index([customerId])
+  @@index([isArchivedInTl])
+  @@map("project")
+}
+
+model ProjectAssignment {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId       String   @map("project_id") @db.Uuid
+  employeeId      String   @map("employee_id") @db.Uuid
+  assignedByUserId String  @map("assigned_by_user_id") @db.Uuid
+  assignedAt      DateTime @default(now()) @map("assigned_at") @db.Timestamptz
+
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  employee       Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  assignedByUser User     @relation(fields: [assignedByUserId], references: [id])
+
+  @@unique([projectId, employeeId])
+  @@index([employeeId])
+  @@map("project_assignment")
 }
