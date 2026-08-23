@@ -4,6 +4,21 @@ import { env } from '../../config/env';
 import { loginBodySchema } from './auth.schemas';
 import { SESSION_COOKIE_NAME } from './session.service';
 
+/**
+ * Frontend (Vercel) en backend (Render) staan op verschillende domeinen —
+ * elke fetch-call is voor de browser dus een "cross-site"-request. Een
+ * cookie met `SameSite=Lax` wordt bij zo'n cross-site fetch/XHR NOOIT
+ * meegestuurd (Lax staat dat enkel toe bij een top-level paginanavigatie
+ * met een "veilige" methode, bv. het klikken op een link) — enkel
+ * `SameSite=None` (verplicht in combinatie met `Secure`) laat de
+ * sessiecookie betrouwbaar werken over twee verschillende domeinen, zowel
+ * bij gewone API-calls als bij de Teamleader OAuth-navigatie. Lokaal (dev,
+ * via de Vite-proxy) is frontend+backend wél hetzelfde origin en werkt
+ * `Secure` niet over gewoon HTTP — vandaar de terugval op `Lax` wanneer
+ * `COOKIE_SECURE` niet aan staat.
+ */
+const SESSION_COOKIE_SAME_SITE = env.COOKIE_SECURE ? 'none' : 'lax';
+
 export default async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/auth/login', async (request, reply) => {
     const body = loginBodySchema.parse(request.body);
@@ -13,7 +28,7 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
     reply.setCookie(SESSION_COOKIE_NAME, sessionId, {
       httpOnly: true,
       secure: env.COOKIE_SECURE,
-      sameSite: 'lax',
+      sameSite: SESSION_COOKIE_SAME_SITE,
       path: '/',
       maxAge: 60 * 60 * 24 * 7, // 7 dagen, moet in lijn blijven met SessionService
     });
@@ -30,7 +45,11 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
       if (sessionId) {
         await app.authService.logout(sessionId);
       }
-      reply.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+      reply.clearCookie(SESSION_COOKIE_NAME, {
+        path: '/',
+        secure: env.COOKIE_SECURE,
+        sameSite: SESSION_COOKIE_SAME_SITE,
+      });
       reply.code(204);
       return null;
     },
