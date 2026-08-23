@@ -5,7 +5,6 @@ const userRoleSchema = z.enum(USER_ROLES);
 
 export const createUserBodySchema = z.object({
   email: z.string().trim().min(1, 'E-mailadres is verplicht').email('Ongeldig e-mailadres'),
-  password: z.string().min(8, 'Wachtwoord moet minstens 8 tekens zijn'),
   displayName: z.string().trim().min(1, 'Naam is verplicht'),
   role: userRoleSchema,
   phone: z.string().trim().min(1).optional(),
