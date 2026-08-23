@@ -8,7 +8,7 @@ import type {
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { UserErrors } from '../../errors';
-import { hashPassword } from '../auth/password.service';
+import { buildInviteEmail } from '../auth/auth-emails';
 import { requireRole } from '../rbac/rbac.middleware';
 import { createUserBodySchema, updateUserBodySchema } from './user.schemas';
 
@@ -21,13 +21,11 @@ const userIdParamsSchema = z.object({ id: z.string().uuid() });
  * "gebruiker zonder werknemersprofiel"-pad; zie het commentaar bij het
  * Employee-model in schema.prisma.
  *
- * Wachtwoord: de admin kiest en deelt het wachtwoord rechtstreeks mee aan de
- * nieuwe gebruiker (zelfde patroon als /admin/seed) — er is nog geen
- * e-mailverzendings-infrastructuur in de stack (geen SMTP/e-maildienst
- * geconfigureerd) om een "stel je wachtwoord in"-link te versturen. Een
- * uitnodigingsflow per e-mail is een logische latere uitbreiding zodra er
- * toch een e-maildienst nodig is (bv. sectie 30: "e-mail werkbon naar
- * eindklant").
+ * Wachtwoord: de admin kiest hier GEEN wachtwoord meer — een nieuwe
+ * gebruiker krijgt `passwordHash: null` en meteen een uitnodigingsmail met
+ * een link om zelf een wachtwoord in te stellen (zie password-reset.service.ts
+ * / auth-emails.ts). Dit vervangt het eerdere patroon (admin deelt zelf een
+ * wachtwoord mee) nu er wél e-mailverzendings-infrastructuur is (Resend).
  */
 export default async function userRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -53,19 +51,32 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
         throw UserErrors.emailAlreadyInUse();
       }
 
-      const passwordHash = await hashPassword(body.password);
       const user = await app.prisma.user.create({
         data: {
           email: body.email,
-          passwordHash,
+          passwordHash: null,
           role: body.role,
           employee: { create: { displayName: body.displayName, phone: body.phone ?? null } },
         },
         include: { employee: true },
       });
 
+      // Account blijft sowieso aangemaakt, zelfs als de uitnodigingsmail
+      // faalt (bv. e-maildienst nog niet geconfigureerd) — business rule 9
+      // (externe-dienst-storing mag nooit lokale data laten verloren gaan).
+      // De admin ziet dat via `inviteEmailSent` en kan de gebruiker vragen
+      // om zelf "Wachtwoord vergeten" te gebruiken zodra dat wel lukt.
+      let inviteEmailSent = true;
+      try {
+        const token = await app.passwordResetService.createToken(user.id);
+        await app.emailService.send(buildInviteEmail(body.email, token, body.displayName));
+      } catch (err) {
+        inviteEmailSent = false;
+        request.log.error({ err }, 'Versturen van uitnodigingsmail mislukt');
+      }
+
       reply.code(201);
-      return { user: toAdminUserSummary(user) };
+      return { user: toAdminUserSummary(user), inviteEmailSent };
     },
   );
 
