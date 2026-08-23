@@ -10,6 +10,17 @@ const STATE_COOKIE_NAME = 'swatt_tl_oauth_state';
 const STATE_COOKIE_PATH = '/teamleader/oauth';
 const STATE_COOKIE_MAX_AGE_SECONDS = 60 * 10; // 10 minuten — ruim voldoende om Teamleader's toestemmingsscherm te doorlopen
 
+/**
+ * Zelfde reden als SESSION_COOKIE_SAME_SITE in auth.routes.ts: deze cookie
+ * wordt gezet tijdens een browsernavigatie naar het backend-domein
+ * (Render) en moet nog meegestuurd worden bij de terugkeer-redirect vanuit
+ * Teamleader — een cross-site multi-hop redirect. `SameSite=Lax` gedraagt
+ * zich daarbij niet in elke browser betrouwbaar (bekende Safari/Firefox-
+ * eigenaardigheden bij OAuth-redirectketens); `SameSite=None` (+ `Secure`)
+ * is hier de robuuste keuze. Lokaal (http, geen `Secure`) valt dit terug op `Lax`.
+ */
+const STATE_COOKIE_SAME_SITE = env.COOKIE_SECURE ? 'none' : 'lax';
+
 export default async function teamleaderRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/teamleader/status',
@@ -36,7 +47,7 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
       reply.setCookie(STATE_COOKIE_NAME, state, {
         httpOnly: true,
         secure: env.COOKIE_SECURE,
-        sameSite: 'lax',
+        sameSite: STATE_COOKIE_SAME_SITE,
         path: STATE_COOKIE_PATH,
         maxAge: STATE_COOKIE_MAX_AGE_SECONDS,
       });
@@ -53,7 +64,11 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
   app.get('/teamleader/oauth/callback', async (request, reply) => {
     const query = request.query as { code?: string; state?: string; error?: string };
     const expectedState = request.cookies[STATE_COOKIE_NAME];
-    reply.clearCookie(STATE_COOKIE_NAME, { path: STATE_COOKIE_PATH });
+    reply.clearCookie(STATE_COOKIE_NAME, {
+      path: STATE_COOKIE_PATH,
+      secure: env.COOKIE_SECURE,
+      sameSite: STATE_COOKIE_SAME_SITE,
+    });
 
     const redirectBase = `${env.CORS_ORIGINS[0] ?? 'http://localhost:5173'}/instellingen/teamleader`;
 
