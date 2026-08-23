@@ -2,6 +2,7 @@ import type { UserRole } from '@swatt/shared-types';
 import { roleAtLeast } from '@swatt/shared-types';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
+import { AppAccessPage } from './pages/AppAccessPage';
 import { EmployeeProjectsPage } from './pages/EmployeeProjectsPage';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
@@ -57,6 +58,14 @@ export function App() {
         element={
           <RequireAuth>
             <EmployeeProjectsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/app-toegang"
+        element={
+          <RequireAuth>
+            <AppAccessPage />
           </RequireAuth>
         }
       />
