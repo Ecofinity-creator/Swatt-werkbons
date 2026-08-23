@@ -105,6 +105,17 @@ export const authApi = {
     }),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
   me: () => request<LoginResponseBody>('/auth/me', { method: 'GET' }),
+  /**
+   * Antwoord is altijd 204, ook als het e-mailadres niet bestaat — de
+   * backend geeft bewust nooit prijs of een account bestaat (voorkomt
+   * account-enumeratie). De UI moet dus altijd dezelfde neutrale
+   * bevestiging tonen, ongeacht wat hier terugkomt.
+   */
+  forgotPassword: (email: string) =>
+    request<void>('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }),
+  /** `token` komt uit de link in de uitnodigings-/reset-e-mail (querystring). */
+  resetPassword: (token: string, password: string) =>
+    request<void>('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) }),
 };
 
 export const teamleaderApi = {
