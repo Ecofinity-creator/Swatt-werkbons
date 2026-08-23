@@ -14,10 +14,41 @@ import type {
 } from '@swatt/shared-types';
 
 /**
- * Lege string in dev (Vite-proxy stuurt /auth en /health door naar de API,
- * zie vite.config.ts); in productie zet je VITE_API_URL naar de Render-backend-URL.
+ * Altijd een lege string — elke `request()`-aanroep gaat dus naar een
+ * relatief pad op hetzelfde domein als de frontend zelf.
+ *
+ * In dev stuurt de Vite-proxy /auth, /admin, /projects, /teamleader en
+ * /health door naar de lokale API (zie vite.config.ts). In productie doet
+ * Vercel exact hetzelfde via `rewrites` in apps/web/vercel.json, die deze
+ * paden server-to-server doorsturen naar de Render-backend.
+ *
+ * BELANGRIJK — waarom niet gewoon rechtstreeks naar de Render-URL (zoals
+ * vroeger via VITE_API_URL): frontend (Vercel) en backend (Render) staan op
+ * verschillende domeinen, dus elke rechtstreekse `fetch()` was voor de
+ * browser "cross-site". Dat maakte de sessiecookie afhankelijk van
+ * cookie-instellingen die wij niet controleren — met SameSite=None;Secure
+ * werkt dit meestal, maar zodra een gebruiker "cookies van derden
+ * blokkeren" aanheeft staan (steeds vaker de standaard in Chrome/Android),
+ * wordt de sessiecookie nooit opgeslagen/teruggestuurd en lijkt de
+ * gebruiker random uitgelogd te raken (bevestigd: exact dit gebeurde bij
+ * een test op Android Chrome — "Mijn projecten" gaf NOT_AUTHENTICATED
+ * terwijl inloggen zelf leek te lukken). Door alles via hetzelfde domein
+ * als de frontend te laten lopen (Vercel-rewrite-proxy), is de
+ * sessiecookie voor de browser gewoon "first-party" en speelt dat
+ * cookiebeleid geen rol meer.
  */
-const API_BASE_URL: string = import.meta.env.VITE_API_URL ?? '';
+const API_BASE_URL = '';
+
+/**
+ * Enige uitzondering: de Teamleader OAuth-`/authorize`-navigatie hieronder
+ * (`teamleaderApi.connect`) moet bewust rechtstreeks naar de Render-URL
+ * blijven gaan, NIET via de Vercel-proxy. Die navigatie zet en leest een
+ * eigen state-cookie in een Render-naar-Render-navigatieketen (browser →
+ * Render/authorize → Teamleader → Render/callback) die vandaag al correct
+ * werkt en hier bewust ongemoeid gelaten wordt — zie de uitgebreide
+ * toelichting bij AUTHORIZE_HANDOFF_TTL_MS in teamleader.routes.ts.
+ */
+const TEAMLEADER_DIRECT_API_URL: string = import.meta.env.VITE_API_URL ?? '';
 
 export class ApiRequestError extends Error {
   constructor(
@@ -95,7 +126,7 @@ export const teamleaderApi = {
     const { token } = await request<PrepareAuthorizeResponseBody>('/teamleader/oauth/prepare-authorize', {
       method: 'POST',
     });
-    window.location.href = `${API_BASE_URL}/teamleader/oauth/authorize?token=${encodeURIComponent(token)}`;
+    window.location.href = `${TEAMLEADER_DIRECT_API_URL}/teamleader/oauth/authorize?token=${encodeURIComponent(token)}`;
   },
   syncProjects: () => request<ProjectSyncResponseBody>('/admin/teamleader/sync/projects', { method: 'POST' }),
 };
