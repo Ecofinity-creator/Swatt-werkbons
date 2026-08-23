@@ -51,4 +51,19 @@ export const TeamleaderErrors = {
       'TEAMLEADER_RECONNECT_REQUIRED',
       'De Teamleader-koppeling is verlopen of ingetrokken. Verbind opnieuw via de instellingen.',
     ),
+  /** Onverwacht antwoord van de Teamleader-API zelf (niet-2xx, of een onherkenbare response-vorm). */
+  syncFailed: (detail: string) =>
+    new ApiError(502, 'TEAMLEADER_SYNC_FAILED', `Synchroniseren met Teamleader is mislukt: ${detail}`),
+};
+
+export const UserErrors = {
+  emailAlreadyInUse: () =>
+    new ApiError(409, 'EMAIL_ALREADY_IN_USE', 'Dit e-mailadres is al in gebruik door een andere gebruiker.'),
+  notFound: () => new ApiError(404, 'USER_NOT_FOUND', 'Deze gebruiker bestaat niet (meer).'),
+};
+
+export const ProjectErrors = {
+  notFound: () =>
+    new ApiError(404, 'PROJECT_NOT_FOUND', 'Dit project bestaat niet (meer) of is niet gesynchroniseerd.'),
+  employeeNotFound: () => new ApiError(404, 'EMPLOYEE_NOT_FOUND', 'Deze werknemer bestaat niet (meer).'),
 };
