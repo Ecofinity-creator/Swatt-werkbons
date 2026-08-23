@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useAuth } from '../auth/AuthContext';
+import { ApiRequestError, useAuth } from '../auth/AuthContext';
 import { ROLE_LABELS } from '../constants';
 
 /**
@@ -9,8 +10,25 @@ import { ROLE_LABELS } from '../constants';
  */
 export function HomePage() {
   const { user, logout } = useAuth();
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
 
   if (!user) return null;
+
+  const handleLogout = async () => {
+    setIsLoggingOut(true);
+    setLogoutError(null);
+    try {
+      await logout();
+    } catch (err) {
+      // Zonder deze afhandeling deed de knop bij een mislukte/trage aanroep
+      // (bv. Render's gratis instance die na inactiviteit ~50s nodig heeft om
+      // op te starten) ogenschijnlijk niets — geen foutmelding, geen laadstatus.
+      setLogoutError(err instanceof ApiRequestError ? err.message : 'Uitloggen is mislukt. Probeer opnieuw.');
+    } finally {
+      setIsLoggingOut(false);
+    }
+  };
 
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
@@ -61,12 +79,19 @@ export function HomePage() {
         </Link>
       )}
 
+      {logoutError && (
+        <p role="alert" className="mt-6 rounded-lg bg-red-950 px-4 py-3 text-sm text-red-300">
+          {logoutError}
+        </p>
+      )}
+
       <button
         type="button"
-        onClick={() => void logout()}
-        className="mt-auto rounded-lg border border-neutral-700 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-900"
+        onClick={() => void handleLogout()}
+        disabled={isLoggingOut}
+        className="mt-auto rounded-lg border border-neutral-700 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-900 disabled:opacity-50"
       >
-        Uitloggen
+        {isLoggingOut ? 'Bezig met uitloggen...' : 'Uitloggen'}
       </button>
     </main>
   );
