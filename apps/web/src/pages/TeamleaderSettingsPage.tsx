@@ -28,6 +28,7 @@ const CALLBACK_ERROR_MESSAGES: Record<string, string> = {
     'De koppelingspoging kon niet geverifieerd worden (verlopen of ongeldige aanvraag). Probeer opnieuw.',
   MISSING_CODE: 'Teamleader gaf geen geldige autorisatiecode terug. Probeer opnieuw.',
   EXCHANGE_FAILED: 'De koppeling met Teamleader is mislukt. Probeer opnieuw of neem contact op met support.',
+  HANDOFF_EXPIRED: 'Deze koppelingspoging is verlopen. Klik hieronder opnieuw op "Verbind met Teamleader".',
 };
 
 function formatDateTime(value: string | null): string {
@@ -45,6 +46,7 @@ function formatDateTime(value: string | null): string {
 export function TeamleaderSettingsPage() {
   const [status, setStatus] = useState<TeamleaderStatusResponseBody | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [isSyncingProjects, setIsSyncingProjects] = useState(false);
   const [syncResult, setSyncResult] = useState<ProjectSyncResponseBody | null>(null);
@@ -79,6 +81,19 @@ export function TeamleaderSettingsPage() {
     // Enkel bij het inladen van de pagina uitvoeren — niet bij elke wijziging van searchParams zelf.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const handleConnect = async () => {
+    setIsConnecting(true);
+    setLoadError(null);
+    try {
+      // Navigeert bij succes de hele pagina weg (zie teamleaderApi.connect) —
+      // isConnecting hoeft dan niet meer teruggezet te worden.
+      await teamleaderApi.connect();
+    } catch (err) {
+      setLoadError(err instanceof ApiRequestError ? err.message : 'Verbinden met Teamleader is mislukt. Probeer opnieuw.');
+      setIsConnecting(false);
+    }
+  };
 
   const handleDisconnect = async () => {
     // eslint-disable-next-line no-alert
@@ -194,12 +209,14 @@ export function TeamleaderSettingsPage() {
 
       <div className="mt-6 flex flex-col gap-3">
         {status?.status !== 'CONNECTED' ? (
-          <a
-            href={teamleaderApi.authorizeUrl()}
-            className="rounded-lg bg-swatt-gold px-4 py-4 text-center text-base font-semibold text-swatt-black active:opacity-80"
+          <button
+            type="button"
+            onClick={() => void handleConnect()}
+            disabled={isConnecting}
+            className="rounded-lg bg-swatt-gold px-4 py-4 text-center text-base font-semibold text-swatt-black active:opacity-80 disabled:opacity-50"
           >
-            Verbind met Teamleader
-          </a>
+            {isConnecting ? 'Bezig...' : 'Verbind met Teamleader'}
+          </button>
         ) : (
           <button
             type="button"
