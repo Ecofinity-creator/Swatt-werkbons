@@ -30,6 +30,24 @@ export const AuthErrors = {
     new ApiError(401, 'NOT_AUTHENTICATED', 'Je bent niet (meer) ingelogd. Log opnieuw in.'),
   insufficientRole: () =>
     new ApiError(403, 'INSUFFICIENT_ROLE', 'Je hebt geen rechten voor deze actie.'),
+  /**
+   * Nieuw account via uitnodiging, of anderszins nog geen wachtwoord
+   * ingesteld. Dit expliciet onderscheiden van invalidCredentials() is hier
+   * GEEN account-enumeratie-risico: de gebruiker probeert net met dit exacte
+   * e-mailadres in te loggen, dus die weet al dat het bestaat.
+   */
+  passwordNotSet: () =>
+    new ApiError(
+      401,
+      'PASSWORD_NOT_SET',
+      'Voor dit account is nog geen wachtwoord ingesteld. Check je e-mail voor de uitnodigingslink, of klik hieronder op "Wachtwoord vergeten".',
+    ),
+  invalidOrExpiredToken: () =>
+    new ApiError(
+      400,
+      'INVALID_OR_EXPIRED_TOKEN',
+      'Deze link is ongeldig, al gebruikt, of verlopen. Vraag een nieuwe link aan.',
+    ),
 };
 
 export const TeamleaderErrors = {
@@ -66,4 +84,16 @@ export const ProjectErrors = {
   notFound: () =>
     new ApiError(404, 'PROJECT_NOT_FOUND', 'Dit project bestaat niet (meer) of is niet gesynchroniseerd.'),
   employeeNotFound: () => new ApiError(404, 'EMPLOYEE_NOT_FOUND', 'Deze werknemer bestaat niet (meer).'),
+};
+
+export const EmailErrors = {
+  notConfigured: () =>
+    new ApiError(
+      503,
+      'EMAIL_NOT_CONFIGURED',
+      'E-mailverzending is nog niet geconfigureerd. Neem contact op met de beheerder.',
+    ),
+  /** Onverwacht antwoord van de e-maildienst zelf (niet-2xx). */
+  sendFailed: (detail: string) =>
+    new ApiError(502, 'EMAIL_SEND_FAILED', `Het versturen van de e-mail is mislukt: ${detail}`),
 };
