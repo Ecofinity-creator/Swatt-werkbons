@@ -64,6 +64,19 @@ export interface TeamleaderStatusResponseBody {
 }
 
 /**
+ * Response van POST /teamleader/oauth/prepare-authorize — een kortlevend,
+ * eenmalig bruikbaar token (zie de uitgebreide toelichting in
+ * apps/api/src/modules/teamleader/teamleader.routes.ts bij
+ * AUTHORIZE_HANDOFF_TTL_MS) dat de frontend meegeeft in de daaropvolgende
+ * top-level navigatie naar /teamleader/oauth/authorize. Nodig omdat cross-site
+ * cookiebescherming in moderne browsers (Firefox Total Cookie Protection e.d.)
+ * de normale sessiecookie op dát exacte moment onbetrouwbaar maakt.
+ */
+export interface PrepareAuthorizeResponseBody {
+  token: string;
+}
+
+/**
  * Phase 3 (slice) — gebruikersbeheer (admin) + projectcache/koppeling.
  * Zie apps/api/src/modules/users/ en apps/api/src/modules/projects/.
  *
