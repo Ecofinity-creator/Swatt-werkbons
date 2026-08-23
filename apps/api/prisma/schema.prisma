@@ -47,9 +47,13 @@ enum TeamleaderProjectsModule {
 }
 
 model User {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email        String   @unique @db.Citext
-  passwordHash String   @map("password_hash")
+  id     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email  String   @unique @db.Citext
+  /// Null zolang de gebruiker (via een uitnodigingsmail) nog geen wachtwoord
+  /// heeft ingesteld — zie PasswordSetupToken hieronder en AuthService.login,
+  /// die dit expliciet en met een duidelijke foutmelding afvangt i.p.v. te
+  /// crashen op een null-vergelijking.
+  passwordHash String? @map("password_hash")
   role         UserRole @default(EMPLOYEE)
   isActive     Boolean  @default(true) @map("is_active")
 
@@ -69,8 +73,34 @@ model User {
   /// Admins/supervisors die ooit een ProjectAssignment gelegd hebben (Phase 3).
   createdProjectAssignments ProjectAssignment[]
 
+  /// Uitnodigings-/reset-tokens ooit voor deze gebruiker aangemaakt (zie PasswordSetupToken).
+  passwordSetupTokens PasswordSetupToken[]
+
   @@index([role])
   @@map("user")
+}
+
+/// Eén token voor zowel "wachtwoord instellen bij uitnodiging" (nieuwe
+/// gebruiker, passwordHash nog null) als "wachtwoord vergeten" (bestaande
+/// gebruiker) — functioneel identiek: een geldig, eenmalig token geeft het
+/// recht om een nieuw wachtwoord te zetten voor de gekoppelde gebruiker. Zie
+/// PasswordResetService (apps/api/src/modules/auth/password-reset.service.ts).
+///
+/// Zelfde patroon als Session hierboven: het token zelf is de primary key
+/// (hoge entropie, random gegenereerd), niet gehasht opgeslagen — analoog aan
+/// hoe Session.id ook rechtstreeks als cookiewaarde gebruikt wordt.
+model PasswordSetupToken {
+  id        String    @id @db.VarChar(64)
+  userId    String    @map("user_id") @db.Uuid
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  usedAt    DateTime? @map("used_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_setup_token")
 }
 
 model Employee {
