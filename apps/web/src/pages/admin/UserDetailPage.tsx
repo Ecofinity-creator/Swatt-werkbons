@@ -210,9 +210,9 @@ export function UserDetailPage() {
                       onChange={() => void toggleProject(project)}
                       className="h-4 w-4 accent-swatt-gold"
                     />
-                    <label htmlFor={`project-${project.id}`} className="flex-1 text-sm">
-                      <span className="font-medium">{project.name}</span>
-                      <span className="text-neutral-500"> — {project.customerName}</span>
+                     <label htmlFor={`project-${project.id}`} className="flex-1 text-sm">
+                      <span className="font-medium">{project.customerName}</span>
+                      <span className="text-neutral-500"> — {project.name}</span>
                       {project.projectNumber && (
                         <span className="text-neutral-400"> (#{project.projectNumber})</span>
                       )}
