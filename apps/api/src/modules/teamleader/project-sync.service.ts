@@ -10,7 +10,21 @@ import { TeamleaderApiError, type TeamleaderClient } from './teamleader-client.s
  * Alle veldnamen hieronder zijn geverifieerd tegen het officiële blueprint
  * (github.com/teamleadercrm/api/blob/master/apiary.apib, secties
  * `projects.list`, `projects-v2/projects.list`, `accounts.projects-v2-status`,
- * `contacts.info`, `companies.info`) — niet verzonnen.
+ * `contacts.list`, `companies.list`) — niet verzonnen.
+ *
+ * BELANGRIJK — batch-opvraging i.p.v. één aanroep per klant:
+ * eerdere versie deed één `contacts.info`/`companies.info`-aanroep per
+ * distincte klant, wat bij een account met veel klanten realistisch tegen
+ * Teamleader's eigen rate limit aanliep (200 aanvragen per rollend minuut —
+ * zie sectie "Rate limiting" in het blueprint). Diezelfde sectie raadt
+ * expliciet aan: "check if you can filter `.list` endpoints with a list of
+ * entity `ids`". `contacts.list`/`companies.list` ondersteunen inderdaad
+ * `filter.ids` en geven exact dezelfde velden terug als `contacts.info`/
+ * `companies.info` (incl. `primary_address`) — dus we verzamelen eerst alle
+ * distincte klant-id's over álle projecten heen, en halen ze daarna in
+ * batches van hoogstens `DEFAULT_PAGE_SIZE` (20) per aanroep op, via de
+ * bestaande `listAll()`-paginering. Dat brengt bijvoorbeeld 50 klanten terug
+ * van 50 aanroepen naar 3.
  */
 
 type TeamleaderProjectsModule = 'LEGACY' | 'PROJECTS_V2';
@@ -68,6 +82,12 @@ interface CompanyInfoRow {
   primary_address: AddressResponse | null;
 }
 
+interface CustomerDetails {
+  name: string;
+  vatNumber: string | null;
+  address: string | null;
+}
+
 export interface ProjectSyncResult {
   module: TeamleaderProjectsModule;
   syncedCount: number;
@@ -93,22 +113,66 @@ export class ProjectSyncService {
     }
 
     let skippedWithoutCustomerCount = 0;
-    const seenTeamleaderIds: string[] = [];
-    // Voorkomt herhaalde contacts.info/companies.info-calls voor dezelfde klant
-    // binnen één sync-run (meerdere projecten delen vaak dezelfde klant).
-    const customerCache = new Map<string, { id: string; address: string | null }>();
-
+    const rowsWithCustomer: { row: NormalizedProjectRow; customer: TeamleaderCustomerRef }[] = [];
     for (const row of rows) {
-      if (!row.customer) {
+      if (row.customer) {
+        rowsWithCustomer.push({ row, customer: row.customer });
+      } else {
+        skippedWithoutCustomerCount += 1;
+      }
+    }
+
+    let customerDetailsByKey: Map<string, CustomerDetails>;
+    try {
+      customerDetailsByKey = await this.fetchCustomerDetailsBatched(rowsWithCustomer.map((entry) => entry.customer));
+    } catch (err) {
+      throw this.wrapTeamleaderError(err);
+    }
+
+    // customer.teamleaderId -> onze lokale Customer.id (voorkomt herhaalde
+    // upserts voor dezelfde klant binnen één sync-run — meerdere projecten
+    // delen vaak dezelfde klant).
+    const localCustomerCache = new Map<string, { id: string; address: string | null }>();
+    const seenTeamleaderIds: string[] = [];
+
+    for (const { row, customer: ref } of rowsWithCustomer) {
+      const cacheKey = `${ref.type}:${ref.id}`;
+      const details = customerDetailsByKey.get(cacheKey);
+      if (!details) {
+        // Klant stond nog in het project, maar kon niet (meer) opgehaald worden
+        // via contacts.list/companies.list (bv. intussen verwijderd in
+        // Teamleader tussen het ophalen van de projectenlijst en dit moment).
+        // Zelfde afhandeling als "geen klant gekoppeld": overslaan, niet laten
+        // crashen (business rule 9 — externe API-eigenaardigheden mogen nooit
+        // lokale data laten verloren gaan).
         skippedWithoutCustomerCount += 1;
         continue;
       }
 
-      let customer: { id: string; address: string | null };
-      try {
-        customer = await this.ensureCustomer(row.customer, customerCache);
-      } catch (err) {
-        throw this.wrapTeamleaderError(err);
+      let localCustomer = localCustomerCache.get(cacheKey);
+      if (!localCustomer) {
+        const customer = await this.prisma.customer.upsert({
+          where: { teamleaderId: ref.id },
+          create: {
+            teamleaderId: ref.id,
+            teamleaderType: ref.type,
+            name: details.name,
+            address: details.address,
+            vatNumber: details.vatNumber,
+            isArchivedInTl: false,
+            lastSyncedAt: new Date(),
+          },
+          update: {
+            teamleaderType: ref.type,
+            name: details.name,
+            address: details.address,
+            vatNumber: details.vatNumber,
+            isArchivedInTl: false,
+            lastSyncedAt: new Date(),
+          },
+        });
+        localCustomer = { id: customer.id, address: customer.address };
+        localCustomerCache.set(cacheKey, localCustomer);
       }
 
       await this.prisma.project.upsert({
@@ -116,22 +180,22 @@ export class ProjectSyncService {
         create: {
           teamleaderId: row.id,
           teamleaderModule: module,
-          customerId: customer.id,
+          customerId: localCustomer.id,
           projectNumber: row.projectNumber,
           name: row.name,
           description: row.description,
-          address: customer.address,
+          address: localCustomer.address,
           status: row.status,
           isArchivedInTl: false,
           lastSyncedAt: new Date(),
         },
         update: {
           teamleaderModule: module,
-          customerId: customer.id,
+          customerId: localCustomer.id,
           projectNumber: row.projectNumber,
           name: row.name,
           description: row.description,
-          address: customer.address,
+          address: localCustomer.address,
           status: row.status,
           isArchivedInTl: false,
           lastSyncedAt: new Date(),
@@ -157,6 +221,47 @@ export class ProjectSyncService {
       skippedWithoutCustomerCount,
       archivedCount: archived.count,
     };
+  }
+
+  /**
+   * Verzamelt alle distincte klant-id's uit `refs`, splitst ze op type
+   * (contact/company — die twee lopen via afzonderlijke Teamleader-endpoints),
+   * en haalt ze in batches op via `contacts.list`/`companies.list` met
+   * `filter.ids` (zie de uitgebreide toelichting bovenaan dit bestand). Geeft
+   * een map terug van `"type:id"` naar de opgehaalde gegevens; een id die
+   * Teamleader niet (meer) teruggeeft, ontbreekt eenvoudigweg in de map.
+   */
+  private async fetchCustomerDetailsBatched(
+    refs: TeamleaderCustomerRef[],
+  ): Promise<Map<string, CustomerDetails>> {
+    const contactIds = [...new Set(refs.filter((ref) => ref.type === 'contact').map((ref) => ref.id))];
+    const companyIds = [...new Set(refs.filter((ref) => ref.type === 'company').map((ref) => ref.id))];
+
+    const [contactRows, companyRows] = await Promise.all([
+      contactIds.length > 0
+        ? this.client.listAll<ContactInfoRow>('contacts.list', { filter: { ids: contactIds } })
+        : Promise.resolve<ContactInfoRow[]>([]),
+      companyIds.length > 0
+        ? this.client.listAll<CompanyInfoRow>('companies.list', { filter: { ids: companyIds } })
+        : Promise.resolve<CompanyInfoRow[]>([]),
+    ]);
+
+    const result = new Map<string, CustomerDetails>();
+    for (const contact of contactRows) {
+      result.set(`contact:${contact.id}`, {
+        name: `${contact.first_name} ${contact.last_name}`.trim(),
+        vatNumber: null,
+        address: formatAddress(contact.primary_address),
+      });
+    }
+    for (const company of companyRows) {
+      result.set(`company:${company.id}`, {
+        name: company.name,
+        vatNumber: company.vat_number,
+        address: formatAddress(company.primary_address),
+      });
+    }
+    return result;
   }
 
   /**
@@ -214,67 +319,6 @@ export class ProjectSyncService {
       status: row.status,
       customer: row.customer,
     }));
-  }
-
-  private async ensureCustomer(
-    ref: TeamleaderCustomerRef,
-    cache: Map<string, { id: string; address: string | null }>,
-  ): Promise<{ id: string; address: string | null }> {
-    const cacheKey = `${ref.type}:${ref.id}`;
-    const cached = cache.get(cacheKey);
-    if (cached) return cached;
-
-    const details =
-      ref.type === 'company' ? await this.fetchCompanyDetails(ref.id) : await this.fetchContactDetails(ref.id);
-
-    const customer = await this.prisma.customer.upsert({
-      where: { teamleaderId: ref.id },
-      create: {
-        teamleaderId: ref.id,
-        teamleaderType: ref.type,
-        name: details.name,
-        address: details.address,
-        vatNumber: details.vatNumber,
-        isArchivedInTl: false,
-        lastSyncedAt: new Date(),
-      },
-      update: {
-        teamleaderType: ref.type,
-        name: details.name,
-        address: details.address,
-        vatNumber: details.vatNumber,
-        isArchivedInTl: false,
-        lastSyncedAt: new Date(),
-      },
-    });
-
-    const result = { id: customer.id, address: customer.address };
-    cache.set(cacheKey, result);
-    return result;
-  }
-
-  private async fetchContactDetails(
-    id: string,
-  ): Promise<{ name: string; vatNumber: string | null; address: string | null }> {
-    const response = await this.client.post<{ data: ContactInfoRow }>('contacts.info', { id });
-    const contact = response.data;
-    return {
-      name: `${contact.first_name} ${contact.last_name}`.trim(),
-      vatNumber: null,
-      address: formatAddress(contact.primary_address),
-    };
-  }
-
-  private async fetchCompanyDetails(
-    id: string,
-  ): Promise<{ name: string; vatNumber: string | null; address: string | null }> {
-    const response = await this.client.post<{ data: CompanyInfoRow }>('companies.info', { id });
-    const company = response.data;
-    return {
-      name: company.name,
-      vatNumber: company.vat_number,
-      address: formatAddress(company.primary_address),
-    };
   }
 
   private wrapTeamleaderError(err: unknown): Error {
