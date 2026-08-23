@@ -1,7 +1,8 @@
 import type { LoginResponseBody } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
 import { env } from '../../config/env';
-import { loginBodySchema } from './auth.schemas';
+import { buildPasswordResetEmail } from './auth-emails';
+import { forgotPasswordBodySchema, loginBodySchema, resetPasswordBodySchema } from './auth.schemas';
 import { SESSION_COOKIE_NAME } from './session.service';
 
 /**
@@ -57,5 +58,36 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/auth/me', { preHandler: app.authenticate }, async (request) => {
     return { user: request.currentUser };
+  });
+
+  app.post('/auth/forgot-password', async (request, reply) => {
+    const body = forgotPasswordBodySchema.parse(request.body);
+
+    const user = await app.prisma.user.findUnique({ where: { email: body.email } });
+    if (user && user.isActive) {
+      try {
+        const token = await app.passwordResetService.createToken(user.id);
+        await app.emailService.send(buildPasswordResetEmail(body.email, token));
+      } catch (err) {
+        // Nooit laten blijken aan de client of dit gelukt is (voorkomt
+        // account-enumeratie via responsverschillen) — wel duidelijk loggen
+        // server-side zodat een echte infrastructuurfout (bv.
+        // EMAIL_NOT_CONFIGURED) niet onopgemerkt blijft.
+        request.log.error({ err }, 'Versturen van wachtwoord-vergeten-e-mail mislukt');
+      }
+    }
+
+    // Altijd hetzelfde antwoord, ongeacht of het e-mailadres bestaat/actief
+    // is/de mail effectief verstuurd werd — zie AuthService.login voor
+    // dezelfde anti-enumeratie-redenering.
+    reply.code(204);
+    return null;
+  });
+
+  app.post('/auth/reset-password', async (request, reply) => {
+    const body = resetPasswordBodySchema.parse(request.body);
+    await app.passwordResetService.consumeToken(body.token, body.password);
+    reply.code(204);
+    return null;
   });
 }
