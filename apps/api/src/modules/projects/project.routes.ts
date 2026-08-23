@@ -18,6 +18,22 @@ import { employeeIdParamsSchema, listProjectsQuerySchema, projectAssignmentBodyS
  * (opnieuw koppelen/ontkoppelen van een reeds (niet-)gekoppeld project geeft
  * gewoon succes) — een dubbele klik in de UI mag nooit een foutmelding geven.
  */
+
+/**
+ * Enkel "actieve" projecten tonen in de overzichten — een gearchiveerd
+ * project (`isArchivedInTl`) bestaat niet meer in Teamleader, maar een
+ * niet-gearchiveerd project kan in Teamleader zelf nog steeds afgerond of
+ * geannuleerd zijn (`Project.status`, puur informatief overgenomen uit
+ * Teamleader — zie schema.prisma). Legacy-projecten gebruiken
+ * `active/on_hold/done/cancelled`, projects-v2 gebruikt `open/closed` (zie
+ * project-sync.service.ts) — dus enkel `active` resp. `open` telt hier als
+ * "actief".
+ */
+const ACTIVE_STATUS_FILTER: Prisma.ProjectWhereInput[] = [
+  { teamleaderModule: 'LEGACY', status: 'active' },
+  { teamleaderModule: 'PROJECTS_V2', status: 'open' },
+];
+
 export default async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/projects',
@@ -28,13 +44,18 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
       const projects = await app.prisma.project.findMany({
         where: {
           isArchivedInTl: false,
+          OR: ACTIVE_STATUS_FILTER,
           ...(query.search
             ? {
-                OR: [
-                  { name: { contains: query.search, mode: 'insensitive' } },
-                  { projectNumber: { contains: query.search, mode: 'insensitive' } },
-                  { address: { contains: query.search, mode: 'insensitive' } },
-                  { customer: { name: { contains: query.search, mode: 'insensitive' } } },
+                AND: [
+                  {
+                    OR: [
+                      { name: { contains: query.search, mode: 'insensitive' } },
+                      { projectNumber: { contains: query.search, mode: 'insensitive' } },
+                      { address: { contains: query.search, mode: 'insensitive' } },
+                      { customer: { name: { contains: query.search, mode: 'insensitive' } } },
+                    ],
+                  },
                 ],
               }
             : {}),
@@ -59,7 +80,7 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
     }
 
     const projects = await app.prisma.project.findMany({
-      where: { isArchivedInTl: false, assignments: { some: { employeeId } } },
+      where: { isArchivedInTl: false, OR: ACTIVE_STATUS_FILTER, assignments: { some: { employeeId } } },
       include: { customer: true },
       orderBy: { name: 'asc' },
     });
