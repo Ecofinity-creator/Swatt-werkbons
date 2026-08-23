@@ -62,3 +62,95 @@ export interface TeamleaderStatusResponseBody {
   tokenExpiresAt: string | null;
   lastError: string | null;
 }
+
+/**
+ * Phase 3 (slice) — gebruikersbeheer (admin) + projectcache/koppeling.
+ * Zie apps/api/src/modules/users/ en apps/api/src/modules/projects/.
+ *
+ * BELANGRIJK — bewust geen PATCH/DELETE-routes: deze app vermijdt CORS-preflights
+ * structureel (zie apps/api/src/app.ts / apps/web/src/api/client.ts, Render's edge
+ * geeft op een preflight een niet-JSON 404 vóór onze eigen backend). Alle
+ * schrijfacties hieronder lopen daarom via POST, ook wat conceptueel een
+ * update/delete is (bv. `.../update`, `.../remove`) — net als het bestaande
+ * `/teamleader/oauth/disconnect`-patroon.
+ */
+
+/** Publieke weergave van een door een admin beheerde gebruiker (nooit een password hash). */
+export interface AdminUserSummary {
+  id: string;
+  email: string;
+  role: UserRole;
+  isActive: boolean;
+  employee: {
+    id: string;
+    displayName: string;
+    phone: string | null;
+  } | null;
+  createdAt: string;
+}
+
+export interface ListUsersResponseBody {
+  users: AdminUserSummary[];
+}
+
+export interface CreateUserBody {
+  email: string;
+  password: string;
+  displayName: string;
+  role: UserRole;
+  phone?: string;
+}
+
+export interface CreateUserResponseBody {
+  user: AdminUserSummary;
+}
+
+/** Body van POST /admin/users/:id/update — alle velden optioneel (partial update). */
+export interface UpdateUserBody {
+  role?: UserRole;
+  isActive?: boolean;
+  displayName?: string;
+  phone?: string | null;
+}
+
+export interface UpdateUserResponseBody {
+  user: AdminUserSummary;
+}
+
+/** Publieke weergave van een uit Teamleader gesynchroniseerd project. */
+export interface ProjectSummary {
+  id: string;
+  teamleaderId: string;
+  projectNumber: string | null;
+  name: string;
+  description: string | null;
+  address: string | null;
+  status: string | null;
+  customerName: string;
+  isArchivedInTl: boolean;
+}
+
+export interface ListProjectsResponseBody {
+  projects: ProjectSummary[];
+}
+
+/** Response van GET /admin/employees/:employeeId/project-assignments. */
+export interface ListProjectAssignmentsResponseBody {
+  projectIds: string[];
+}
+
+/** Body van POST .../project-assignments en .../project-assignments/remove. */
+export interface ProjectAssignmentBody {
+  projectId: string;
+}
+
+export const TEAMLEADER_PROJECTS_MODULES = ['LEGACY', 'PROJECTS_V2'] as const;
+export type TeamleaderProjectsModule = (typeof TEAMLEADER_PROJECTS_MODULES)[number];
+
+/** Response van POST /admin/teamleader/sync/projects. */
+export interface ProjectSyncResponseBody {
+  module: TeamleaderProjectsModule;
+  syncedCount: number;
+  skippedWithoutCustomerCount: number;
+  archivedCount: number;
+}
