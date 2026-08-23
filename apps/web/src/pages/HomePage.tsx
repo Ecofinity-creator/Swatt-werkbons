@@ -1,11 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
-
-const ROLE_LABELS: Record<string, string> = {
-  EMPLOYEE: 'Werknemer',
-  SUPERVISOR: 'Supervisor',
-  ADMIN: 'Administrator',
-};
+import { ROLE_LABELS } from '../constants';
 
 /**
  * Placeholder-Home voor Phase 1 — bewijst dat login/sessie/RBAC werken.
@@ -34,10 +29,26 @@ export function HomePage() {
         <p className="text-sm text-swatt-gold">{ROLE_LABELS[user.role] ?? user.role}</p>
       </section>
 
+      <Link
+        to="/mijn-projecten"
+        className="mt-4 rounded-lg bg-swatt-gold px-4 py-4 text-center text-base font-semibold text-swatt-black active:opacity-80"
+      >
+        Mijn projecten
+      </Link>
+
+      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
+        <Link
+          to="/backoffice/medewerkers"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Medewerkers
+        </Link>
+      )}
+
       {user.role === 'ADMIN' && (
         <Link
           to="/instellingen/teamleader"
-          className="mt-4 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
         >
           Teamleader-integratie
         </Link>
