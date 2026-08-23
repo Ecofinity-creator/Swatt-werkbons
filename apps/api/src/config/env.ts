@@ -49,6 +49,19 @@ const rawEnvSchema = z.object({
   TEAMLEADER_REDIRECT_URI: z.string().url('TEAMLEADER_REDIRECT_URI moet een geldige URL zijn').optional(),
   /** base64-encoded AES-256-sleutel — zie token-crypto.service.ts. Genereer met: openssl rand -base64 32 */
   TEAMLEADER_TOKEN_ENCRYPTION_KEY: z.string().optional(),
+
+  /**
+   * E-mailverzending (wachtwoord vergeten + uitnodigingsmail bij aanmaak van
+   * een nieuwe gebruiker) via Resend — zie modules/email/email.service.ts.
+   * Bewust optioneel, zelfde filosofie als Teamleader hierboven: de rest van
+   * de app blijft werken zolang deze niet gezet zijn, enkel het versturen
+   * van een e-mail geeft dan een duidelijke "niet geconfigureerd"-fout i.p.v.
+   * de hele app te laten crashen bij opstart. Moeten samen gezet worden
+   * (zie superRefine).
+   */
+  RESEND_API_KEY: z.string().min(1).optional(),
+  /** Bv. "SWATT <noreply@ecofinity.eu>", of tijdelijk "onboarding@resend.dev" (Resend-sandbox, levert enkel af aan je eigen Resend-accountmail). */
+  EMAIL_FROM_ADDRESS: z.string().min(1).optional(),
 });
 
 const envSchema = rawEnvSchema.superRefine((value, ctx) => {
@@ -85,6 +98,16 @@ const envSchema = rawEnvSchema.superRefine((value, ctx) => {
           'TEAMLEADER_TOKEN_ENCRYPTION_KEY moet base64-encoded zijn en exact 32 bytes (256 bit) voorstellen — genereer met: openssl rand -base64 32',
       });
     }
+  }
+
+  const emailFieldsSet = [value.RESEND_API_KEY, value.EMAIL_FROM_ADDRESS].filter(
+    (fieldValue) => fieldValue !== undefined,
+  ).length;
+  if (emailFieldsSet === 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'RESEND_API_KEY en EMAIL_FROM_ADDRESS horen samen ingesteld te worden (of geen van beide).',
+    });
   }
 });
 
@@ -138,4 +161,22 @@ export function getTeamleaderConfig(): TeamleaderEnvConfig {
     redirectUri: env.TEAMLEADER_REDIRECT_URI,
     tokenEncryptionKey: env.TEAMLEADER_TOKEN_ENCRYPTION_KEY,
   };
+}
+
+export interface EmailEnvConfig {
+  apiKey: string;
+  fromAddress: string;
+}
+
+/** true zodra beide EMAIL_*-variabelen gezet zijn (zie superRefine hierboven — nooit "gedeeltelijk"). */
+export function isEmailConfigured(): boolean {
+  return env.RESEND_API_KEY !== undefined && env.EMAIL_FROM_ADDRESS !== undefined;
+}
+
+/** Werp altijd eerst `isEmailConfigured()` op — deze gooit als de configuratie ontbreekt. */
+export function getEmailConfig(): EmailEnvConfig {
+  if (env.RESEND_API_KEY === undefined || env.EMAIL_FROM_ADDRESS === undefined) {
+    throw new Error('getEmailConfig() aangeroepen terwijl e-mailverzending niet geconfigureerd is — roep eerst isEmailConfigured() op.');
+  }
+  return { apiKey: env.RESEND_API_KEY, fromAddress: env.EMAIL_FROM_ADDRESS };
 }
