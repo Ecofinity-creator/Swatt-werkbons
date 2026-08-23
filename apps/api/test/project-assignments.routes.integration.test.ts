@@ -105,4 +105,114 @@ describe('Projecten + werknemer↔project-koppeling', () => {
     });
 
     const peterCookie = await loginAs('peter@swatt.be', 'werfwachtwoord1');
-    const peterProjects = await app.inject({ method: 'GET', url: '/projects/mine',
+    const peterProjects = await app.inject({ method: 'GET', url: '/projects/mine', headers: { cookie: peterCookie } });
+    expect(peterProjects.statusCode).toBe(200);
+    expect(peterProjects.json().projects).toHaveLength(1);
+    expect(peterProjects.json().projects[0]).toMatchObject({ name: 'Onderhoud warmtepomp', customerName: 'Janssens BV' });
+
+    const wannesCookie = await loginAs('wannes@swatt.be', 'werfwachtwoord2');
+    const wannesProjects = await app.inject({ method: 'GET', url: '/projects/mine', headers: { cookie: wannesCookie } });
+    expect(wannesProjects.statusCode).toBe(200);
+    expect(wannesProjects.json().projects).toHaveLength(0);
+  });
+
+  it('GET /projects vereist minstens SUPERVISOR, en ondersteunt zoeken op klant/project/nummer', async () => {
+    await createUser({ email: 'peter@swatt.be', password: 'werfwachtwoord1', role: 'EMPLOYEE' });
+    const peterCookie = await loginAs('peter@swatt.be', 'werfwachtwoord1');
+    const forbidden = await app.inject({ method: 'GET', url: '/projects', headers: { cookie: peterCookie } });
+    expect(forbidden.statusCode).toBe(403);
+
+    await createUser({ email: 'supervisor@swatt.be', password: 'wachtwoord123', role: 'SUPERVISOR' });
+    const supervisorCookie = await loginAs('supervisor@swatt.be', 'wachtwoord123');
+
+    await createProject({ teamleaderId: 'proj-1', name: 'Onderhoud warmtepomp', customerName: 'Janssens BV' });
+    await createProject({ teamleaderId: 'proj-2', name: 'Service HVAC', customerName: 'De Smet NV' });
+
+    const all = await app.inject({ method: 'GET', url: '/projects', headers: { cookie: supervisorCookie } });
+    expect(all.json().projects).toHaveLength(2);
+
+    const search = await app.inject({ method: 'GET', url: '/projects?search=janssens', headers: { cookie: supervisorCookie } });
+    expect(search.json().projects).toHaveLength(1);
+    expect(search.json().projects[0].customerName).toBe('Janssens BV');
+  });
+
+  it('een gearchiveerd project verschijnt nooit in /projects of /projects/mine (business rule 8)', async () => {
+    const admin = await createUser({ email: 'admin@swatt.be', password: 'Str0ngPassw0rd!', role: 'ADMIN' });
+    const peter = await createUser({ email: 'peter@swatt.be', password: 'werfwachtwoord1', role: 'EMPLOYEE' });
+    const archived = await createProject({
+      teamleaderId: 'proj-archived',
+      name: 'Oud project',
+      customerName: 'Oude Klant',
+      isArchivedInTl: true,
+    });
+    await prisma.projectAssignment.create({
+      data: { projectId: archived.id, employeeId: peter.employee!.id, assignedByUserId: admin.id },
+    });
+
+    const peterCookie = await loginAs('peter@swatt.be', 'werfwachtwoord1');
+    const mine = await app.inject({ method: 'GET', url: '/projects/mine', headers: { cookie: peterCookie } });
+    expect(mine.json().projects).toHaveLength(0);
+  });
+
+  it('SUPERVISOR kan een werknemer aan een project koppelen/ontkoppelen; koppelen is idempotent', async () => {
+    await createUser({ email: 'supervisor@swatt.be', password: 'wachtwoord123', role: 'SUPERVISOR' });
+    const peter = await createUser({ email: 'peter@swatt.be', password: 'werfwachtwoord1', role: 'EMPLOYEE' });
+    const project = await createProject({ teamleaderId: 'proj-1', name: 'Onderhoud warmtepomp', customerName: 'Janssens BV' });
+
+    const supervisorCookie = await loginAs('supervisor@swatt.be', 'wachtwoord123');
+    const employeeId = peter.employee!.id;
+
+    const assign1 = await app.inject({
+      method: 'POST',
+      url: `/admin/employees/${employeeId}/project-assignments`,
+      headers: { cookie: supervisorCookie },
+      payload: { projectId: project.id },
+    });
+    expect(assign1.statusCode).toBe(204);
+
+    // Nogmaals koppelen (bv. dubbele klik) mag geen foutmelding geven.
+    const assign2 = await app.inject({
+      method: 'POST',
+      url: `/admin/employees/${employeeId}/project-assignments`,
+      headers: { cookie: supervisorCookie },
+      payload: { projectId: project.id },
+    });
+    expect(assign2.statusCode).toBe(204);
+
+    const list = await app.inject({
+      method: 'GET',
+      url: `/admin/employees/${employeeId}/project-assignments`,
+      headers: { cookie: supervisorCookie },
+    });
+    expect(list.json().projectIds).toEqual([project.id]);
+
+    const remove = await app.inject({
+      method: 'POST',
+      url: `/admin/employees/${employeeId}/project-assignments/remove`,
+      headers: { cookie: supervisorCookie },
+      payload: { projectId: project.id },
+    });
+    expect(remove.statusCode).toBe(204);
+
+    const listAfterRemove = await app.inject({
+      method: 'GET',
+      url: `/admin/employees/${employeeId}/project-assignments`,
+      headers: { cookie: supervisorCookie },
+    });
+    expect(listAfterRemove.json().projectIds).toEqual([]);
+  });
+
+  it('EMPLOYEE mag geen werknemers aan projecten koppelen', async () => {
+    const peter = await createUser({ email: 'peter@swatt.be', password: 'werfwachtwoord1', role: 'EMPLOYEE' });
+    const project = await createProject({ teamleaderId: 'proj-1', name: 'Onderhoud warmtepomp', customerName: 'Janssens BV' });
+    const peterCookie = await loginAs('peter@swatt.be', 'werfwachtwoord1');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/admin/employees/${peter.employee!.id}/project-assignments`,
+      headers: { cookie: peterCookie },
+      payload: { projectId: project.id },
+    });
+    expect(response.statusCode).toBe(403);
+  });
+});
