@@ -4,8 +4,10 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
 import { AppAccessPage } from './pages/AppAccessPage';
 import { EmployeeProjectsPage } from './pages/EmployeeProjectsPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
+import { SetPasswordPage } from './pages/SetPasswordPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { UsersPage } from './pages/admin/UsersPage';
@@ -37,6 +39,8 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/wachtwoord-vergeten" element={<ForgotPasswordPage />} />
+      <Route path="/wachtwoord-instellen" element={<SetPasswordPage />} />
       <Route
         path="/"
         element={
