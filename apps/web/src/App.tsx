@@ -2,9 +2,12 @@ import type { UserRole } from '@swatt/shared-types';
 import { roleAtLeast } from '@swatt/shared-types';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
+import { EmployeeProjectsPage } from './pages/EmployeeProjectsPage';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
+import { UserDetailPage } from './pages/admin/UserDetailPage';
+import { UsersPage } from './pages/admin/UsersPage';
 
 function LoadingScreen() {
   return (
@@ -46,6 +49,30 @@ export function App() {
         element={
           <RequireAuth minimumRole="ADMIN">
             <TeamleaderSettingsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/mijn-projecten"
+        element={
+          <RequireAuth>
+            <EmployeeProjectsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/medewerkers"
+        element={
+          <RequireAuth minimumRole="SUPERVISOR">
+            <UsersPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/medewerkers/:userId"
+        element={
+          <RequireAuth minimumRole="SUPERVISOR">
+            <UserDetailPage />
           </RequireAuth>
         }
       />
