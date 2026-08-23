@@ -8,7 +8,7 @@ import { ApiRequestError } from '../../auth/AuthContext';
 import { useAuth } from '../../auth/AuthContext';
 import { ROLE_LABELS } from '../../constants';
 
-const emptyForm = { email: '', password: '', displayName: '', role: 'EMPLOYEE' as UserRole, phone: '' };
+const emptyForm = { email: '', displayName: '', role: 'EMPLOYEE' as UserRole, phone: '' };
 
 /**
  * Backoffice-scherm "Medewerkers" (Stap 5.2, scherm 2). Eerste scherm met het
@@ -25,6 +25,7 @@ export function UsersPage() {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [inviteWarning, setInviteWarning] = useState<string | null>(null);
 
   const loadUsers = useCallback(async () => {
     try {
@@ -43,15 +44,20 @@ export function UsersPage() {
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setErrorMessage(null);
+    setInviteWarning(null);
     setIsSubmitting(true);
     try {
-      await usersApi.create({
+      const response = await usersApi.create({
         email: form.email,
-        password: form.password,
         displayName: form.displayName,
         role: form.role,
         ...(form.phone ? { phone: form.phone } : {}),
       });
+      if (!response.inviteEmailSent) {
+        setInviteWarning(
+          `Gebruiker ${form.displayName} is aangemaakt, maar de uitnodigingsmail kon niet worden verstuurd. Laat deze persoon "Wachtwoord vergeten" gebruiken op het inlogscherm zodra dit opgelost is.`,
+        );
+      }
       setForm(emptyForm);
       setShowCreateForm(false);
       await loadUsers();
@@ -79,6 +85,15 @@ export function UsersPage() {
       {errorMessage && (
         <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {errorMessage}
+        </p>
+      )}
+
+      {inviteWarning && (
+        <p
+          role="alert"
+          className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+        >
+          {inviteWarning}
         </p>
       )}
 
@@ -116,17 +131,6 @@ export function UsersPage() {
                     className={inputClass}
                   />
                 </Field>
-                <Field label="Wachtwoord (min. 8 tekens)">
-                  <input
-                    required
-                    type="password"
-                    minLength={8}
-                    autoComplete="new-password"
-                    value={form.password}
-                    onChange={(e) => setForm({ ...form, password: e.target.value })}
-                    className={inputClass}
-                  />
-                </Field>
                 <Field label="Rol">
                   <select
                     value={form.role}
@@ -148,6 +152,10 @@ export function UsersPage() {
                   />
                 </Field>
               </div>
+              <p className="text-xs text-neutral-500">
+                Er wordt geen wachtwoord ingesteld — de gebruiker krijgt een e-mail met een link om zelf een
+                wachtwoord te kiezen.
+              </p>
               <div className="flex gap-2">
                 <button
                   type="submit"
