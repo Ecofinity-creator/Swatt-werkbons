@@ -14,6 +14,17 @@ import { hashPassword } from '../src/modules/auth/password.service';
  * TEAMLEADER_*-variabelen (zie README "Tests draaien" en
  * .github/workflows/ci.yml voor de vaste test-waarden — geen echte secrets,
  * enkel gebruikt tegen de gemockte fetch hieronder).
+ *
+ * BELANGRIJK: GET /teamleader/oauth/authorize steunt bewust NIET meer op de
+ * sessiecookie (zie de uitgebreide toelichting bovenaan
+ * src/modules/teamleader/teamleader.routes.ts — cross-site cookiebescherming
+ * in moderne browsers, zoals Firefox' Total Cookie Protection, maakt die
+ * cookie onbetrouwbaar op het moment van een top-level navigatie naar het
+ * Render-domein). In plaats daarvan wordt eerst POST
+ * /teamleader/oauth/prepare-authorize aangeroepen (wél cookie-geauthenticeerd,
+ * een gewone fetch-call) om een kortlevend eenmalig token op te halen, en dat
+ * token wordt meegegeven aan /authorize. Deze tests volgen dus diezelfde
+ * tweestapsflow.
  */
 
 let app: FastifyInstance;
@@ -80,6 +91,17 @@ async function loginAsAdmin(email = 'admin@swatt.be'): Promise<{ cookie: string;
   return { cookie: extractSessionCookie(response.headers['set-cookie']), userId: user.id };
 }
 
+/** Stap 1 van de nieuwe flow: haalt het kortlevende handoff-token op (zie toelichting bovenaan dit bestand). */
+async function prepareAuthorize(cookie: string): Promise<string> {
+  const response = await app.inject({
+    method: 'POST',
+    url: '/teamleader/oauth/prepare-authorize',
+    headers: { cookie },
+  });
+  expect(response.statusCode).toBe(200);
+  return (response.json() as { token: string }).token;
+}
+
 function mockSuccessfulTokenExchange(): void {
   vi.stubGlobal(
     'fetch',
@@ -128,9 +150,31 @@ describe('Teamleader OAuth-routes', () => {
     expect(response.json()).toMatchObject({ status: 'DISCONNECTED', lastError: null });
   });
 
-  it('GET /teamleader/oauth/authorize stuurt een ADMIN naar Teamleader met een state-cookie', async () => {
+  it('POST /teamleader/oauth/prepare-authorize weigert een niet-ADMIN', async () => {
+    await createUser({ email: 'technieker3@swatt.be', password: 'werfwachtwoord', role: 'EMPLOYEE' });
+    const loginResponse = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { email: 'technieker3@swatt.be', password: 'werfwachtwoord' },
+    });
+    const cookie = extractSessionCookie(loginResponse.headers['set-cookie']);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/teamleader/oauth/prepare-authorize',
+      headers: { cookie },
+    });
+    expect(response.statusCode).toBe(403);
+  });
+
+  it('GET /teamleader/oauth/authorize met een geldig handoff-token stuurt naar Teamleader met een state-cookie', async () => {
     const { cookie } = await loginAsAdmin();
-    const response = await app.inject({ method: 'GET', url: '/teamleader/oauth/authorize', headers: { cookie } });
+    const token = await prepareAuthorize(cookie);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/teamleader/oauth/authorize?token=${token}`,
+    });
 
     expect(response.statusCode).toBe(302);
     const location = response.headers['location'] as string;
@@ -142,30 +186,43 @@ describe('Teamleader OAuth-routes', () => {
     expect(stateCookieValue.length).toBeGreaterThan(10);
   });
 
-  it('GET /teamleader/oauth/authorize weigert een niet-ADMIN', async () => {
-    await createUser({ email: 'technieker3@swatt.be', password: 'werfwachtwoord', role: 'EMPLOYEE' });
-    const loginResponse = await app.inject({
-      method: 'POST',
-      url: '/auth/login',
-      payload: { email: 'technieker3@swatt.be', password: 'werfwachtwoord' },
+  it('GET /teamleader/oauth/authorize zonder (of met een ongeldig/verlopen) token redirect met teamleaderError=HANDOFF_EXPIRED', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/teamleader/oauth/authorize?token=dit-bestaat-niet',
     });
-    const cookie = extractSessionCookie(loginResponse.headers['set-cookie']);
-
-    const response = await app.inject({ method: 'GET', url: '/teamleader/oauth/authorize', headers: { cookie } });
-    expect(response.statusCode).toBe(403);
+    expect(response.statusCode).toBe(302);
+    expect(response.headers['location']).toContain('teamleaderError=HANDOFF_EXPIRED');
   });
 
-  it('volledige koppeling: authorize → callback → status CONNECTED, met correcte connectedByUserId', async () => {
+  it('GET /teamleader/oauth/authorize kan hetzelfde token maar één keer gebruiken', async () => {
+    const { cookie } = await loginAsAdmin();
+    const token = await prepareAuthorize(cookie);
+
+    const first = await app.inject({ method: 'GET', url: `/teamleader/oauth/authorize?token=${token}` });
+    expect(first.statusCode).toBe(302);
+    expect(first.headers['location']).toContain('focus.teamleader.eu');
+
+    const second = await app.inject({ method: 'GET', url: `/teamleader/oauth/authorize?token=${token}` });
+    expect(second.statusCode).toBe(302);
+    expect(second.headers['location']).toContain('teamleaderError=HANDOFF_EXPIRED');
+  });
+
+  it('volledige koppeling: prepare → authorize → callback → status CONNECTED, met correcte connectedByUserId', async () => {
     const { cookie, userId } = await loginAsAdmin();
+    const token = await prepareAuthorize(cookie);
 
     const authorizeResponse = await app.inject({
       method: 'GET',
-      url: '/teamleader/oauth/authorize',
-      headers: { cookie },
+      url: `/teamleader/oauth/authorize?token=${token}`,
     });
     const stateCookie = `swatt_tl_oauth_state=${extractCookieValueByName(
       authorizeResponse.headers['set-cookie'],
       'swatt_tl_oauth_state',
+    )}`;
+    const connectedByCookie = `swatt_tl_oauth_admin=${extractCookieValueByName(
+      authorizeResponse.headers['set-cookie'],
+      'swatt_tl_oauth_admin',
     )}`;
     const location = new URL(authorizeResponse.headers['location'] as string);
     const state = location.searchParams.get('state');
@@ -176,7 +233,7 @@ describe('Teamleader OAuth-routes', () => {
     const callbackResponse = await app.inject({
       method: 'GET',
       url: `/teamleader/oauth/callback?code=test-code&state=${state}`,
-      headers: { cookie: `${cookie}; ${stateCookie}` },
+      headers: { cookie: `${stateCookie}; ${connectedByCookie}` },
     });
 
     expect(callbackResponse.statusCode).toBe(302);
@@ -193,11 +250,11 @@ describe('Teamleader OAuth-routes', () => {
 
   it('callback met een verkeerde state redirect met teamleaderError=STATE_MISMATCH (CSRF-bescherming)', async () => {
     const { cookie } = await loginAsAdmin();
+    const token = await prepareAuthorize(cookie);
 
     const authorizeResponse = await app.inject({
       method: 'GET',
-      url: '/teamleader/oauth/authorize',
-      headers: { cookie },
+      url: `/teamleader/oauth/authorize?token=${token}`,
     });
     const stateCookie = `swatt_tl_oauth_state=${extractCookieValueByName(
       authorizeResponse.headers['set-cookie'],
@@ -207,7 +264,7 @@ describe('Teamleader OAuth-routes', () => {
     const callbackResponse = await app.inject({
       method: 'GET',
       url: '/teamleader/oauth/callback?code=test-code&state=dit-klopt-niet',
-      headers: { cookie: `${cookie}; ${stateCookie}` },
+      headers: { cookie: stateCookie },
     });
 
     expect(callbackResponse.statusCode).toBe(302);
