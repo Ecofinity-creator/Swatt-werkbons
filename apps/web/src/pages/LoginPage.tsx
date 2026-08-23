@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
 
 export function LoginPage() {
@@ -38,13 +38,14 @@ export function LoginPage() {
           Technical Support Team
         </p>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <form onSubmit={handleSubmit} method="post" className="flex flex-col gap-4">
           <div>
             <label htmlFor="email" className="mb-1 block text-sm text-neutral-300">
               E-mailadres
             </label>
             <input
               id="email"
+              name="email"
               type="email"
               autoComplete="username"
               required
@@ -60,6 +61,7 @@ export function LoginPage() {
             </label>
             <input
               id="password"
+              name="password"
               type="password"
               autoComplete="current-password"
               required
@@ -82,6 +84,13 @@ export function LoginPage() {
           >
             {isSubmitting ? 'Bezig met inloggen...' : 'Inloggen'}
           </button>
+
+          <Link
+            to="/wachtwoord-vergeten"
+            className="text-center text-sm text-neutral-400 underline underline-offset-2"
+          >
+            Wachtwoord vergeten?
+          </Link>
         </form>
       </div>
     </main>
