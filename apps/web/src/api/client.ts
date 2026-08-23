@@ -1,4 +1,16 @@
-import type { ApiErrorBody, LoginResponseBody, TeamleaderStatusResponseBody } from '@swatt/shared-types';
+import type {
+  ApiErrorBody,
+  CreateUserBody,
+  CreateUserResponseBody,
+  ListProjectAssignmentsResponseBody,
+  ListProjectsResponseBody,
+  ListUsersResponseBody,
+  LoginResponseBody,
+  ProjectSyncResponseBody,
+  TeamleaderStatusResponseBody,
+  UpdateUserBody,
+  UpdateUserResponseBody,
+} from '@swatt/shared-types';
 
 /**
  * Lege string in dev (Vite-proxy stuurt /auth en /health door naar de API,
@@ -73,4 +85,45 @@ export const teamleaderApi = {
    * een top-level navigatie kan die browser daadwerkelijk volgen.
    */
   authorizeUrl: (): string => `${API_BASE_URL}/teamleader/oauth/authorize`,
+  syncProjects: () => request<ProjectSyncResponseBody>('/admin/teamleader/sync/projects', { method: 'POST' }),
+};
+
+/**
+ * Admin-only gebruikersbeheer. Bewust POST i.p.v. PATCH voor de update-call
+ * (`.../update`) — zie het commentaar bij ProjectAssignmentBody in
+ * shared-types over waarom deze app PATCH/DELETE structureel vermijdt.
+ */
+export const usersApi = {
+  list: () => request<ListUsersResponseBody>('/admin/users', { method: 'GET' }),
+  create: (body: CreateUserBody) =>
+    request<CreateUserResponseBody>('/admin/users', { method: 'POST', body: JSON.stringify(body) }),
+  update: (userId: string, body: UpdateUserBody) =>
+    request<UpdateUserResponseBody>(`/admin/users/${userId}/update`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+};
+
+export const projectsApi = {
+  list: (search?: string) =>
+    request<ListProjectsResponseBody>(`/projects${search ? `?search=${encodeURIComponent(search)}` : ''}`, {
+      method: 'GET',
+    }),
+  mine: () => request<ListProjectsResponseBody>('/projects/mine', { method: 'GET' }),
+  assignments: {
+    list: (employeeId: string) =>
+      request<ListProjectAssignmentsResponseBody>(`/admin/employees/${employeeId}/project-assignments`, {
+        method: 'GET',
+      }),
+    assign: (employeeId: string, projectId: string) =>
+      request<void>(`/admin/employees/${employeeId}/project-assignments`, {
+        method: 'POST',
+        body: JSON.stringify({ projectId }),
+      }),
+    unassign: (employeeId: string, projectId: string) =>
+      request<void>(`/admin/employees/${employeeId}/project-assignments/remove`, {
+        method: 'POST',
+        body: JSON.stringify({ projectId }),
+      }),
+  },
 };
