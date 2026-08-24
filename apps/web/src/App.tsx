@@ -10,6 +10,7 @@ import { LoginPage } from './pages/LoginPage';
 import { ProjectTimerPage } from './pages/ProjectTimerPage';
 import { SetPasswordPage } from './pages/SetPasswordPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
+import { WorkOrderReviewPage } from './pages/WorkOrderReviewPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { UsersPage } from './pages/admin/UsersPage';
 
@@ -71,6 +72,14 @@ export function App() {
         element={
           <RequireAuth>
             <ProjectTimerPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/werkbonnen/:workOrderId"
+        element={
+          <RequireAuth>
+            <WorkOrderReviewPage />
           </RequireAuth>
         }
       />
