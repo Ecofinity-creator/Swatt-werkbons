@@ -17,6 +17,8 @@
       "source": "/teamleader/oauth/disconnect",
       "destination": "https://swatt-api.onrender.com/teamleader/oauth/disconnect"
     },
+    { "source": "/time-entries", "destination": "https://swatt-api.onrender.com/time-entries" },
+    { "source": "/time-entries/:path*", "destination": "https://swatt-api.onrender.com/time-entries/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
