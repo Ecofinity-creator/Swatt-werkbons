@@ -57,6 +57,24 @@ enum TimeEntryStatus {
   @@map("time_entry_status")
 }
 
+/// Phase 5 — werkbonnen (basis). Statusnamen matchen het overzicht uit sectie 20
+/// van de projectbrief. Deze ronde gebruikt enkel DRAFT (een werkbon wordt
+/// automatisch aangemaakt zodra de timer gestopt wordt); de volledige enum
+/// staat hier al klaar zodat de latere fases (handtekening, Teamleader-sync,
+/// facturatie — Phase 7/9/10) geen schema-migratie nodig hebben die bestaande
+/// rijen zou raken.
+enum WorkOrderStatus {
+  DRAFT
+  READY_FOR_SIGNATURE
+  SIGNED
+  SYNC_PENDING
+  SYNC_FAILED
+  READY_FOR_INVOICING
+  INVOICED
+
+  @@map("work_order_status")
+}
+
 model User {
   id     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email  String   @unique @db.Citext
@@ -131,6 +149,9 @@ model Employee {
 
   /// Eigen tijdsregistraties (Phase 4 — zie TimeEntry hieronder).
   timeEntries TimeEntry[]
+
+  /// Werkbonnen die deze werknemer heeft aangemaakt (Phase 5 — zie WorkOrder hieronder).
+  createdWorkOrders WorkOrder[]
 
   @@map("employee")
 }
@@ -257,6 +278,8 @@ model Project {
   assignments ProjectAssignment[]
   /// Tijdsregistraties op dit project (Phase 4 — zie TimeEntry hieronder).
   timeEntries TimeEntry[]
+  /// Werkbonnen op dit project (Phase 5 — zie WorkOrder hieronder).
+  workOrders  WorkOrder[]
 
   @@index([customerId])
   @@index([isArchivedInTl])
@@ -316,7 +339,74 @@ model TimeEntry {
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   project  Project  @relation(fields: [projectId], references: [id], onDelete: Restrict)
 
+  /// Gezet zodra deze registratie in een werkbon is opgenomen (Phase 5) — een
+  /// gestopte tijdsregistratie hoort bij hoogstens één werkbon, zie
+  /// WorkOrderTimeEntry.timeEntryId (unique) hieronder.
+  workOrderLink WorkOrderTimeEntry?
+
   @@index([employeeId])
   @@index([projectId])
   @@map("time_entry")
+}
+
+// ============================================================
+// Phase 5 — werkbonnen (basis). Zie modules/work-orders/ en secties 6-8, 20 en
+// 24 van de projectbrief. Nog zonder foto's/handtekening/PDF/versionering
+// (Phase 6/7/8) en zonder Teamleader-sync/facturatie (Phase 9/10) — die
+// bouwen voort op deze basis zonder de kern hieronder te moeten wijzigen.
+// ============================================================
+
+/// Eén teller per jaar voor het volgnummer in werkbonnummers (bv.
+/// "WB-2026-000123", sectie 7). Atomair opgehoogd door WorkOrderService — zie
+/// de toelichting daar over hoe gelijktijdige aanmaak correct wordt afgehandeld.
+model WorkOrderCounter {
+  year       Int @id
+  lastNumber Int @default(0) @map("last_number")
+
+  @@map("work_order_counter")
+}
+
+/// Bundelt één of meer gestopte tijdsregistraties op hetzelfde project tot één
+/// werkbon (zie WorkOrderTimeEntry). Een aparte koppeltabel i.p.v. een
+/// rechtstreekse FK op TimeEntry omdat sectie 8 van de brief rekening houdt
+/// met meerdere werknemers op dezelfde werf — ook al ondersteunt de UI in
+/// Phase 5 nog enkel het simpele geval van één werknemer/één registratie.
+model WorkOrder {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Bv. "WB-2026-000123" — zie WorkOrderCounter.
+  workOrderNumber String          @unique @map("work_order_number")
+  projectId       String          @map("project_id") @db.Uuid
+  status          WorkOrderStatus @default(DRAFT)
+
+  /// Vrij tekstveld "uitgevoerde werkzaamheden" (sectie 7) — apart bewaard
+  /// (i.p.v. enkel via de gekoppelde TimeEntry's) zodat een werkbon met
+  /// meerdere tijdsregistraties toch één samenhangende omschrijving heeft.
+  description String?
+
+  createdByEmployeeId String   @map("created_by_employee_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  project           Project              @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  createdByEmployee Employee             @relation(fields: [createdByEmployeeId], references: [id])
+  timeEntries       WorkOrderTimeEntry[]
+
+  @@index([projectId])
+  @@index([status])
+  @@map("work_order")
+}
+
+/// Koppeltabel werkbon ↔ tijdsregistratie. `timeEntryId` is uniek: elke
+/// tijdsregistratie hoort bij hoogstens één werkbon.
+model WorkOrderTimeEntry {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workOrderId String   @map("work_order_id") @db.Uuid
+  timeEntryId String   @unique @map("time_entry_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  timeEntry TimeEntry @relation(fields: [timeEntryId], references: [id], onDelete: Restrict)
+
+  @@index([workOrderId])
+  @@map("work_order_time_entry")
 }
