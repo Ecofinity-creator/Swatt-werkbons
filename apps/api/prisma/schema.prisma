@@ -46,6 +46,17 @@ enum TeamleaderProjectsModule {
   @@map("teamleader_projects_module")
 }
 
+/// Phase 4 — timer ("START WERK"). RUNNING → PAUSED (herhaaldelijk mogelijk) → RUNNING,
+/// en uiteindelijk RUNNING/PAUSED → STOPPED (eindstatus, geen terugweg). Zie
+/// TimeEntryService voor de overgangslogica.
+enum TimeEntryStatus {
+  RUNNING
+  PAUSED
+  STOPPED
+
+  @@map("time_entry_status")
+}
+
 model User {
   id     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email  String   @unique @db.Citext
@@ -117,6 +128,9 @@ model Employee {
   /// Welke Teamleader-projecten deze werknemer mag selecteren om uren op te boeken
   /// (Phase 3 — zie ProjectAssignment hieronder en Stap 4 van het fundamentendocument).
   projectAssignments ProjectAssignment[]
+
+  /// Eigen tijdsregistraties (Phase 4 — zie TimeEntry hieronder).
+  timeEntries TimeEntry[]
 
   @@map("employee")
 }
@@ -241,6 +255,8 @@ model Project {
 
   customer    Customer             @relation(fields: [customerId], references: [id])
   assignments ProjectAssignment[]
+  /// Tijdsregistraties op dit project (Phase 4 — zie TimeEntry hieronder).
+  timeEntries TimeEntry[]
 
   @@index([customerId])
   @@index([isArchivedInTl])
@@ -261,4 +277,46 @@ model ProjectAssignment {
   @@unique([projectId, employeeId])
   @@index([employeeId])
   @@map("project_assignment")
+}
+
+// ============================================================
+// Phase 4 — timer ("START WERK"). Zie modules/time-entries/ en Stap 6/9 van
+// het fundamentendocument (secties 6 en 24 van de projectbrief).
+// ============================================================
+
+/// Eén actieve (RUNNING/PAUSED) tijdsregistratie per werknemer — business rule
+/// 1 (sectie 24). Naast de service-laag-check dwingt de partiële unieke index
+/// `time_entry_one_active_per_employee` (zie migratie) dit ook op
+/// databankniveau af, als backstop tegen een race condition tussen twee
+/// gelijktijdige "start"-aanvragen.
+///
+/// `pausedSeconds` is de som van alle AFGERONDE pauze-intervallen; de nog
+/// lopende pauze (indien status = PAUSED, via `currentPauseStartedAt`) wordt
+/// pas bij hervatten of stoppen opgeteld — zie TimeEntryService voor de
+/// berekening van de netto gewerkte tijd.
+model TimeEntry {
+  id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId String           @map("employee_id") @db.Uuid
+  projectId  String           @map("project_id") @db.Uuid
+  status     TimeEntryStatus  @default(RUNNING)
+
+  startedAt DateTime  @map("started_at") @db.Timestamptz
+  endedAt   DateTime? @map("ended_at") @db.Timestamptz
+
+  pausedSeconds         Int       @default(0) @map("paused_seconds")
+  currentPauseStartedAt DateTime? @map("current_pause_started_at") @db.Timestamptz
+
+  /// Vrij tekstveld "uitgevoerde werkzaamheden" (sectie 6/7) — optioneel, meestal
+  /// pas ingevuld bij het stoppen van de timer.
+  description String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project  Project  @relation(fields: [projectId], references: [id], onDelete: Restrict)
+
+  @@index([employeeId])
+  @@index([projectId])
+  @@map("time_entry")
 }
