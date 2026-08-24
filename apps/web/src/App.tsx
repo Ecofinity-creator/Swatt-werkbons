@@ -7,6 +7,7 @@ import { EmployeeProjectsPage } from './pages/EmployeeProjectsPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
+import { ProjectTimerPage } from './pages/ProjectTimerPage';
 import { SetPasswordPage } from './pages/SetPasswordPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
@@ -62,6 +63,14 @@ export function App() {
         element={
           <RequireAuth>
             <EmployeeProjectsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/projecten/:projectId"
+        element={
+          <RequireAuth>
+            <ProjectTimerPage />
           </RequireAuth>
         }
       />
