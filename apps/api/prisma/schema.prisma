@@ -90,6 +90,20 @@ enum WorkOrderPhotoCategory {
   @@map("work_order_photo_category")
 }
 
+/// Phase 8 — PDF-generatie (sectie 12/13/31). Bewust losgekoppeld van de
+/// Teamleader-upload-statussen (TEAMLEADER_UPLOAD_* uit sectie 13) — die
+/// horen bij Phase 9. Section 31: "PDF EN TEAMLEADER MOETEN LOSGEKOPPELD
+/// ZIJN" — deze enum bewaakt enkel of ONZE eigen PDF succesvol is opgebouwd
+/// en opgeslagen, los van of/wanneer die nadien ooit naar Teamleader gaat.
+enum WorkOrderPdfStatus {
+  PDF_PENDING
+  PDF_GENERATING
+  PDF_READY
+  PDF_FAILED
+
+  @@map("work_order_pdf_status")
+}
+
 model User {
   id     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email  String   @unique @db.Citext
@@ -421,8 +435,20 @@ model WorkOrder {
   /// zodra status SIGNED is (Phase 7 — zie WorkOrderSignature hieronder).
   signature WorkOrderSignature?
 
+  /// Phase 8 — PDF-generatie (secties 12/13/31), losgekoppeld van een
+  /// eventuele latere Teamleader-upload (Phase 9). `pdfFileKey` is een
+  /// StorageService-key (zie StoredFile), net als de foto's/handtekening
+  /// hierboven — geen Prisma-FK, om dezelfde reden. `pdfError` is een
+  /// mensentaal-boodschap (sectie 27), nooit een ruwe stacktrace.
+  pdfStatus      WorkOrderPdfStatus @default(PDF_PENDING) @map("pdf_status")
+  pdfFileKey     String?            @map("pdf_file_key")
+  pdfFileName    String?            @map("pdf_file_name")
+  pdfGeneratedAt DateTime?          @map("pdf_generated_at") @db.Timestamptz
+  pdfError       String?            @map("pdf_error")
+
   @@index([projectId])
   @@index([status])
+  @@index([pdfStatus])
   @@map("work_order")
 }
 
@@ -524,4 +550,38 @@ model WorkOrderSignature {
   requestedByUser  User      @relation(fields: [requestedByUserId], references: [id])
 
   @@map("work_order_signature")
+}
+
+// ============================================================
+// Phase 8 — bedrijfsgegevens voor de werkbon-PDF-header (secties 7/12).
+// ============================================================
+
+/// Singleton-rij, zelfde patroon als TeamleaderConnection hierboven: een
+/// vast, welbekend ID (COMPANY_SETTINGS_SINGLETON_ID in
+/// company-settings.service.ts), lazy aangemaakt met verstandige
+/// placeholderwaarden bij de eerste opvraging — geen aparte seed-migratie
+/// nodig. Vandaag enkel gelezen door WorkOrderPdfService; een
+/// admin-instellingenscherm om dit aan te passen is een logische, kleine
+/// vervolgstap (nog niet gebouwd deze ronde).
+model CompanySettings {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  companyName  String  @map("company_name")
+  addressLine  String? @map("address_line")
+  vatNumber    String? @map("vat_number")
+  contactEmail String? @map("contact_email")
+  contactPhone String? @map("contact_phone")
+
+  /// StorageService-key van een geüpload bedrijfslogo (zie StoredFile) —
+  /// optioneel; zonder logo valt de PDF-header terug op een gestileerd
+  /// "SWATT"-tekstlogo (zwarte achtergrond, gouden tekst), zie
+  /// work-order-pdf-document.ts.
+  logoFileKey String? @map("logo_file_key")
+
+  /// Sectie 12: "Laat de exacte juridische formulering configureerbaar zijn."
+  workOrderLegalText String @map("work_order_legal_text")
+
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("company_settings")
 }
