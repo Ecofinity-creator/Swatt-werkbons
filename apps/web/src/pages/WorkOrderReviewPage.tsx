@@ -498,7 +498,7 @@ function SignedWorkOrderView({
         <p className="text-sm text-neutral-300">{WORK_ORDER_PDF_STATUS_LABELS[workOrder.pdfStatus]}</p>
 
                 {workOrder.pdfStatus === 'PDF_READY' && (
-          
+          <a
             href={`/work-orders/${workOrder.id}/pdf`}
             target="_blank"
             rel="noreferrer"
