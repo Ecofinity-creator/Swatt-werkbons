@@ -1,8 +1,23 @@
 import type { ProjectSummary, TimeEntrySummary } from '@swatt/shared-types';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
-import { projectsApi, timeEntriesApi } from '../api/client';
+import { projectsApi, timeEntriesApi, workOrdersApi } from '../api/client';
 import { ApiRequestError } from '../auth/AuthContext';
+
+/**
+ * Phase 5 — werkbonnen (basis). De werkbon wordt automatisch aangemaakt
+ * meteen na een geslaagde stop (geen aparte "werkbon aanmaken"-klik). Business
+ * rule 9 (sectie 24): een storing bij die aanmaak mag de al veilig
+ * opgeslagen tijdsregistratie nooit "verliezen" — vandaar `workOrderError` +
+ * een expliciete herprobeer-knop i.p.v. de hele stop-actie te laten falen.
+ */
+interface StoppedSummary {
+  elapsedSeconds: number;
+  description: string | null;
+  timeEntryId: string;
+  workOrderNumber: string | null;
+  workOrderError: string | null;
+}
 
 /**
  * Phase 4 — "START WERK". Bereikbaar via een projectkaart op "Mijn
@@ -29,9 +44,8 @@ export function ProjectTimerPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showStopForm, setShowStopForm] = useState(false);
   const [description, setDescription] = useState('');
-  const [stoppedSummary, setStoppedSummary] = useState<{ elapsedSeconds: number; description: string | null } | null>(
-    null,
-  );
+  const [stoppedSummary, setStoppedSummary] = useState<StoppedSummary | null>(null);
+  const [isCreatingWorkOrder, setIsCreatingWorkOrder] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -126,18 +140,56 @@ export function ProjectTimerPage() {
     setErrorMessage(null);
     setIsSubmitting(true);
     try {
-      const response = await timeEntriesApi.stop(activeEntry.id, description.trim() || undefined);
-      setStoppedSummary({
-        elapsedSeconds: computeElapsedSeconds(response.timeEntry, Date.now()),
-        description: response.timeEntry.description,
-      });
+      const trimmedDescription = description.trim() || undefined;
+      const response = await timeEntriesApi.stop(activeEntry.id, trimmedDescription);
+      const stoppedEntry = response.timeEntry;
       setActiveEntry(null);
       setShowStopForm(false);
       setDescription('');
+      setStoppedSummary({
+        elapsedSeconds: computeElapsedSeconds(stoppedEntry, Date.now()),
+        description: stoppedEntry.description,
+        timeEntryId: stoppedEntry.id,
+        workOrderNumber: null,
+        workOrderError: null,
+      });
+      await createWorkOrder(stoppedEntry.id, trimmedDescription ?? null);
     } catch (err) {
       setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de timer niet stoppen.');
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  /**
+   * Faalt deze aanroep, dan blijft de al gestopte/opgeslagen tijdsregistratie
+   * gewoon behouden (business rule 9) — `stoppedSummary` toont dan een
+   * duidelijke foutmelding met een herprobeer-knop i.p.v. de gebruiker terug
+   * naar "START WERK" te sturen alsof er niets gebeurd is.
+   */
+  async function createWorkOrder(timeEntryId: string, descriptionValue: string | null) {
+    if (!projectId) return;
+    setIsCreatingWorkOrder(true);
+    try {
+      const response = await workOrdersApi.create({
+        projectId,
+        timeEntryIds: [timeEntryId],
+        ...(descriptionValue ? { description: descriptionValue } : {}),
+      });
+      setStoppedSummary((prev) =>
+        prev ? { ...prev, workOrderNumber: response.workOrder.workOrderNumber, workOrderError: null } : prev,
+      );
+    } catch (err) {
+      setStoppedSummary((prev) =>
+        prev
+          ? {
+              ...prev,
+              workOrderError: err instanceof ApiRequestError ? err.message : 'Kon de werkbon niet aanmaken.',
+            }
+          : prev,
+      );
+    } finally {
+      setIsCreatingWorkOrder(false);
     }
   }
 
@@ -173,6 +225,29 @@ export function ProjectTimerPage() {
           {stoppedSummary.description && (
             <p className="max-w-sm text-sm text-neutral-400">&ldquo;{stoppedSummary.description}&rdquo;</p>
           )}
+
+          {stoppedSummary.workOrderNumber ? (
+            <div className="rounded-lg bg-neutral-800 px-4 py-3">
+              <p className="text-xs uppercase tracking-wide text-neutral-400">Werkbon</p>
+              <p className="text-lg font-bold text-white">{stoppedSummary.workOrderNumber}</p>
+            </div>
+          ) : stoppedSummary.workOrderError ? (
+            <div className="w-full rounded-lg bg-red-950 px-4 py-3 text-sm text-red-300">
+              <p>{stoppedSummary.workOrderError}</p>
+              <p className="mt-1 text-red-400">Je tijdsregistratie is wel veilig opgeslagen.</p>
+              <button
+                type="button"
+                onClick={() => void createWorkOrder(stoppedSummary.timeEntryId, stoppedSummary.description)}
+                disabled={isCreatingWorkOrder}
+                className="mt-3 rounded-lg bg-swatt-gold px-4 py-2 text-sm font-bold text-swatt-black disabled:opacity-60"
+              >
+                {isCreatingWorkOrder ? 'Bezig...' : 'Opnieuw proberen'}
+              </button>
+            </div>
+          ) : (
+            <p className="text-sm text-neutral-400">Werkbon aanmaken...</p>
+          )}
+
           <Link
             to="/mijn-projecten"
             className="mt-2 rounded-lg bg-swatt-gold px-6 py-3 text-sm font-bold text-swatt-black"
