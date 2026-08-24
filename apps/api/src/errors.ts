@@ -137,6 +137,15 @@ export const WorkOrderErrors = {
     ),
   noTimeEntries: () =>
     new ApiError(400, 'WORK_ORDER_NO_TIME_ENTRIES', 'Een werkbon moet minstens één tijdsregistratie bevatten.'),
+  /** Phase 6/7 — business rule 3 (sectie 24): een ondertekende werkbon is immutable. */
+  alreadySigned: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_ALREADY_SIGNED',
+      'Deze werkbon is al ondertekend en kan niet meer gewijzigd worden.',
+    ),
+  photoNotFound: () =>
+    new ApiError(404, 'WORK_ORDER_PHOTO_NOT_FOUND', 'Deze foto bestaat niet (meer) op deze werkbon.'),
 };
 
 export const EmailErrors = {
