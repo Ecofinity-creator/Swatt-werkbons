@@ -93,8 +93,8 @@ export interface PrepareAuthorizeResponseBody {
  *
  * BELANGRIJK — bewust geen PATCH/DELETE-routes: deze app vermijdt CORS-preflights
  * structureel (zie apps/api/src/app.ts / apps/web/src/api/client.ts, Render's edge
- * geeft op een preflight een niet-JSON 404 vóór onze eigen backend ooit bereikt
- * wordt). Alle schrijfacties hieronder lopen daarom via POST, ook wat conceptueel een
+ * geeft op een preflight een niet-JSON 404 vóór onze eigen backend). Alle
+ * schrijfacties hieronder lopen daarom via POST, ook wat conceptueel een
  * update/delete is (bv. `.../update`, `.../remove`) — net als het bestaande
  * `/teamleader/oauth/disconnect`-patroon.
  */
@@ -229,4 +229,55 @@ export interface StartTimeEntryBody {
 /** Body van POST /time-entries/:id/stop — `description` is optioneel. */
 export interface StopTimeEntryBody {
   description?: string;
+}
+
+/**
+ * Phase 5 — werkbonnen (basis). Zie apps/api/src/modules/work-orders/.
+ * Statusnamen matchen het overzicht uit sectie 20 van de projectbrief; deze
+ * ronde gebruikt enkel DRAFT.
+ */
+export const WORK_ORDER_STATUSES = [
+  'DRAFT',
+  'READY_FOR_SIGNATURE',
+  'SIGNED',
+  'SYNC_PENDING',
+  'SYNC_FAILED',
+  'READY_FOR_INVOICING',
+  'INVOICED',
+] as const;
+export type WorkOrderStatus = (typeof WORK_ORDER_STATUSES)[number];
+
+/** Eén tijdsregistratie zoals opgenomen in een werkbon (sectie 8 — meerdere werknemers per werf). */
+export interface WorkOrderTimeEntrySummary {
+  id: string;
+  employeeId: string;
+  employeeDisplayName: string;
+  startedAt: string;
+  endedAt: string | null;
+  pausedSeconds: number;
+}
+
+export interface WorkOrderSummary {
+  id: string;
+  workOrderNumber: string;
+  projectId: string;
+  projectName: string;
+  customerName: string;
+  status: WorkOrderStatus;
+  description: string | null;
+  createdByEmployeeDisplayName: string;
+  createdAt: string;
+  timeEntries: WorkOrderTimeEntrySummary[];
+}
+
+/** Body van POST /work-orders. */
+export interface CreateWorkOrderBody {
+  projectId: string;
+  timeEntryIds: string[];
+  description?: string;
+}
+
+/** Response van POST /work-orders en GET /work-orders/:id. */
+export interface WorkOrderResponseBody {
+  workOrder: WorkOrderSummary;
 }
