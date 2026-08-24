@@ -84,6 +84,21 @@ export const ProjectErrors = {
   notFound: () =>
     new ApiError(404, 'PROJECT_NOT_FOUND', 'Dit project bestaat niet (meer) of is niet gesynchroniseerd.'),
   employeeNotFound: () => new ApiError(404, 'EMPLOYEE_NOT_FOUND', 'Deze werknemer bestaat niet (meer).'),
+    notAssigned: () =>
+    new ApiError(
+      403,
+      'PROJECT_NOT_ASSIGNED',
+      'Dit project is niet aan jou gekoppeld. Vraag je supervisor of beheerder om je aan dit project te koppelen.',
+    ),
+};
+
+export const TimeEntryErrors = {
+  alreadyActive: () =>
+    new ApiError(409, 'TIME_ENTRY_ALREADY_ACTIVE', 'Je hebt al een actieve tijdsregistratie lopen. Stop deze eerst voor je een nieuwe start.'),
+  notFound: () => new ApiError(404, 'TIME_ENTRY_NOT_FOUND', 'Deze tijdsregistratie bestaat niet (meer).'),
+  notRunning: () => new ApiError(409, 'TIME_ENTRY_NOT_RUNNING', 'Deze tijdsregistratie loopt niet (meer).'),
+  notPaused: () => new ApiError(409, 'TIME_ENTRY_NOT_PAUSED', 'Deze tijdsregistratie staat niet gepauzeerd.'),
+  alreadyStopped: () => new ApiError(409, 'TIME_ENTRY_ALREADY_STOPPED', 'Deze tijdsregistratie is al gestopt.'),
 };
 
 export const EmailErrors = {
