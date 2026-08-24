@@ -15,6 +15,7 @@ interface StoppedSummary {
   elapsedSeconds: number;
   description: string | null;
   timeEntryId: string;
+  workOrderId: string | null;
   workOrderNumber: string | null;
   workOrderError: string | null;
 }
@@ -150,6 +151,7 @@ export function ProjectTimerPage() {
         elapsedSeconds: computeElapsedSeconds(stoppedEntry, Date.now()),
         description: stoppedEntry.description,
         timeEntryId: stoppedEntry.id,
+        workOrderId: null,
         workOrderNumber: null,
         workOrderError: null,
       });
@@ -177,7 +179,14 @@ export function ProjectTimerPage() {
         ...(descriptionValue ? { description: descriptionValue } : {}),
       });
       setStoppedSummary((prev) =>
-        prev ? { ...prev, workOrderNumber: response.workOrder.workOrderNumber, workOrderError: null } : prev,
+        prev
+          ? {
+              ...prev,
+              workOrderId: response.workOrder.id,
+              workOrderNumber: response.workOrder.workOrderNumber,
+              workOrderError: null,
+            }
+          : prev,
       );
     } catch (err) {
       setStoppedSummary((prev) =>
@@ -227,9 +236,17 @@ export function ProjectTimerPage() {
           )}
 
           {stoppedSummary.workOrderNumber ? (
-            <div className="rounded-lg bg-neutral-800 px-4 py-3">
+            <div className="w-full rounded-lg bg-neutral-800 px-4 py-3">
               <p className="text-xs uppercase tracking-wide text-neutral-400">Werkbon</p>
               <p className="text-lg font-bold text-white">{stoppedSummary.workOrderNumber}</p>
+              {stoppedSummary.workOrderId && (
+                <Link
+                  to={`/werkbonnen/${stoppedSummary.workOrderId}`}
+                  className="mt-3 block rounded-lg bg-swatt-gold px-4 py-3 text-center text-sm font-bold text-swatt-black"
+                >
+                  Werkbon afwerken (foto&apos;s &amp; handtekening) →
+                </Link>
+              )}
             </div>
           ) : stoppedSummary.workOrderError ? (
             <div className="w-full rounded-lg bg-red-950 px-4 py-3 text-sm text-red-300">
