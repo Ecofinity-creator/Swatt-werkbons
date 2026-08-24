@@ -10,8 +10,35 @@ const WITH_DETAILS = {
         timeEntry: { include: { employee: true } },
       },
     },
+    // Phase 6/7 — foto's en handtekening. Bevatten enkel opaque storage-keys
+    // (zie StorageService), geen ruwe bytes — die haalt de route-laag pas op
+    // wanneer een werkbon écht opgevraagd wordt (toSummary() in
+    // work-order.routes.ts is daarom async).
+    photos: { include: { uploadedByEmployee: true }, orderBy: { createdAt: 'asc' } },
+    signature: { include: { requestedByUser: true } },
   },
 } as const;
+
+export interface WorkOrderPhotoRecord {
+  id: string;
+  category: string | null;
+  description: string | null;
+  optimizedFileKey: string;
+  thumbnailFileKey: string;
+  uploadedByEmployeeId: string;
+  uploadedByEmployee: { displayName: string };
+  createdAt: Date;
+}
+
+export interface WorkOrderSignatureRecord {
+  id: string;
+  signerName: string;
+  signerFunction: string | null;
+  signatureFileKey: string;
+  signedAt: Date;
+  contentHash: string;
+  requestedByUserId: string;
+}
 
 export interface WorkOrderRecord {
   id: string;
@@ -38,6 +65,8 @@ export interface WorkOrderRecord {
       employee: { displayName: string };
     };
   }>;
+  photos: WorkOrderPhotoRecord[];
+  signature: WorkOrderSignatureRecord | null;
 }
 
 /**
