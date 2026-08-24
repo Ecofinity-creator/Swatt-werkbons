@@ -24,14 +24,20 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/auth/login', async (request, reply) => {
     const body = loginBodySchema.parse(request.body);
 
-    const { sessionId, user } = await app.authService.login(body.email, body.password);
+    const { sessionId, user, expiresAt } = await app.authService.login(body.email, body.password, body.rememberMe);
+
+    // `maxAge` rechtstreeks afgeleid van `expiresAt` (i.p.v. een aparte,
+    // hardcoded duur) — zo kunnen cookie en server-side sessie (session.service.ts)
+    // per definitie nooit uit elkaar lopen, ook niet wanneer "Onthou mij"
+    // een andere duur oplevert (30 i.p.v. 7 dagen).
+    const maxAge = Math.max(1, Math.round((expiresAt.getTime() - Date.now()) / 1000));
 
     reply.setCookie(SESSION_COOKIE_NAME, sessionId, {
       httpOnly: true,
       secure: env.COOKIE_SECURE,
       sameSite: SESSION_COOKIE_SAME_SITE,
       path: '/',
-      maxAge: 60 * 60 * 24 * 7, // 7 dagen, moet in lijn blijven met SessionService
+      maxAge,
     });
 
     const responseBody: LoginResponseBody = { user };
