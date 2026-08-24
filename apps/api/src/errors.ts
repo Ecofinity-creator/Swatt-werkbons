@@ -146,6 +146,21 @@ export const WorkOrderErrors = {
     ),
   photoNotFound: () =>
     new ApiError(404, 'WORK_ORDER_PHOTO_NOT_FOUND', 'Deze foto bestaat niet (meer) op deze werkbon.'),
+  /** Phase 8 — PDF-generatie kan enkel voor een ondertekende werkbon (die heeft altijd ook een handtekening, zie WorkOrderSignatureService.sign()). */
+  notSignedForPdf: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_NOT_SIGNED',
+      'Deze werkbon is nog niet ondertekend — er is nog geen PDF om te genereren.',
+    ),
+  pdfGenerationInProgress: () =>
+    new ApiError(409, 'WORK_ORDER_PDF_GENERATING', 'De PDF wordt momenteel al gegenereerd. Even geduld.'),
+  pdfNotReady: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_PDF_NOT_READY',
+      'De PDF van deze werkbon is nog niet beschikbaar. Probeer het zo dadelijk opnieuw, of gebruik "PDF opnieuw genereren".',
+    ),
 };
 
 export const EmailErrors = {
