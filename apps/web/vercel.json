@@ -19,6 +19,8 @@
     },
     { "source": "/time-entries", "destination": "https://swatt-api.onrender.com/time-entries" },
     { "source": "/time-entries/:path*", "destination": "https://swatt-api.onrender.com/time-entries/:path*" },
+    { "source": "/work-orders", "destination": "https://swatt-api.onrender.com/work-orders" },
+    { "source": "/work-orders/:path*", "destination": "https://swatt-api.onrender.com/work-orders/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
