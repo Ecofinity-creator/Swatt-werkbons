@@ -75,6 +75,21 @@ enum WorkOrderStatus {
   @@map("work_order_status")
 }
 
+/// Phase 6 — foto's op een werkbon (sectie 9 van de projectbrief). Categorie
+/// is optioneel (zie WorkOrderPhoto.category); deze lijst matcht de
+/// voorbeeldcategorieën uit sectie 9 letterlijk.
+enum WorkOrderPhotoCategory {
+  SITUATIE_VOOR
+  UITVOERING
+  SITUATIE_NA
+  SERIENUMMER
+  TECHNISCHE_INSTALLATIE
+  PROBLEEM_SCHADE
+  OVERIGE
+
+  @@map("work_order_photo_category")
+}
+
 model User {
   id     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email  String   @unique @db.Citext
@@ -104,6 +119,11 @@ model User {
 
   /// Uitnodigings-/reset-tokens ooit voor deze gebruiker aangemaakt (zie PasswordSetupToken).
   passwordSetupTokens PasswordSetupToken[]
+
+  /// Werkbon-ondertekeningen die deze gebruiker (typisch de technieker zelf,
+  /// via zijn eigen ingelogde sessie) aan de klant heeft gevraagd (Phase 6/7 —
+  /// zie WorkOrderSignature hieronder).
+  requestedWorkOrderSignatures WorkOrderSignature[]
 
   @@index([role])
   @@map("user")
@@ -152,6 +172,9 @@ model Employee {
 
   /// Werkbonnen die deze werknemer heeft aangemaakt (Phase 5 — zie WorkOrder hieronder).
   createdWorkOrders WorkOrder[]
+
+  /// Foto's die deze werknemer aan een werkbon heeft toegevoegd (Phase 6 — zie WorkOrderPhoto hieronder).
+  uploadedWorkOrderPhotos WorkOrderPhoto[]
 
   @@map("employee")
 }
@@ -391,6 +414,13 @@ model WorkOrder {
   createdByEmployee Employee             @relation(fields: [createdByEmployeeId], references: [id])
   timeEntries       WorkOrderTimeEntry[]
 
+  /// Foto's op deze werkbon (Phase 6 — zie WorkOrderPhoto hieronder).
+  photos WorkOrderPhoto[]
+
+  /// Handtekening van de klant — ten hoogste één per werkbon, en enkel gezet
+  /// zodra status SIGNED is (Phase 7 — zie WorkOrderSignature hieronder).
+  signature WorkOrderSignature?
+
   @@index([projectId])
   @@index([status])
   @@map("work_order")
@@ -409,4 +439,89 @@ model WorkOrderTimeEntry {
 
   @@index([workOrderId])
   @@map("work_order_time_entry")
+}
+
+// ============================================================
+// Phase 6/7 — foto's + verplichte klanthandtekening. Zie
+// modules/storage/ en modules/work-orders/, en secties 9-11 van de
+// projectbrief.
+//
+// Opslagstrategie (bewuste keuze op vraag van Steven — "snel starten: opslag
+// in de database"): foto's en de handtekeningafbeelding worden als bytea in
+// Postgres bewaard via StoredFile hieronder, achter een StorageService-
+// abstractielaag (zie storage.service.ts). WorkOrderPhoto/WorkOrderSignature
+// verwijzen daarom bewust NIET via een Prisma-FK naar StoredFile — de
+// "storage key" die zij bewaren (optimizedFileKey/thumbnailFileKey/
+// signatureFileKey) is voor hen een ondoorzichtige string (vandaag een
+// StoredFile.id, later evt. een S3-object-key). Dat laat toe om later over
+// te schakelen naar echte S3-compatibele opslag zonder deze twee modellen —
+// of de code die ze aanroept — te moeten wijzigen (sectie 2 van de brief:
+// "bouw een abstraction/service layer zodat de implementatie later
+// aangepast kan worden").
+// ============================================================
+
+/// Generieke binaire opslag (bytea) — zie DatabaseStorageService. Bewust
+/// zonder relaties: elke tabel die hiernaar verwijst doet dat via een
+/// ondoorzichtige key-string, nooit via een Prisma-relatie (zie hierboven).
+model StoredFile {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  mimeType  String   @map("mime_type")
+  data      Bytes
+  sizeBytes Int      @map("size_bytes")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@map("stored_file")
+}
+
+/// Eén foto op een werkbon (sectie 9). `optimizedFileKey`/`thumbnailFileKey`
+/// zijn StorageService-keys (zie StoredFile hierboven) — geen ruwe bytes hier.
+/// Categorie is optioneel (sectie 9: "Categorie mag optioneel zijn").
+model WorkOrderPhoto {
+  id          String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workOrderId String                  @map("work_order_id") @db.Uuid
+  category    WorkOrderPhotoCategory?
+  description String?
+
+  optimizedFileKey String @map("optimized_file_key")
+  thumbnailFileKey String @map("thumbnail_file_key")
+
+  uploadedByEmployeeId String   @map("uploaded_by_employee_id") @db.Uuid
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  workOrder          WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  uploadedByEmployee Employee  @relation(fields: [uploadedByEmployeeId], references: [id])
+
+  @@index([workOrderId])
+  @@map("work_order_photo")
+}
+
+/// Digitale handtekening van de eindklant (sectie 10) — ten hoogste één per
+/// werkbon (`workOrderId` uniek). Zodra deze rij bestaat, is de werkbon
+/// SIGNED en dus immutable (sectie 11 — business rule 3); een correctie
+/// vereist expliciet heropenen, wat een latere fase is (nog niet gebouwd).
+model WorkOrderSignature {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workOrderId    String  @unique @map("work_order_id") @db.Uuid
+  signerName     String  @map("signer_name")
+  signerFunction String? @map("signer_function")
+
+  /// StorageService-key naar de PNG van het handtekening-canvas (zie StoredFile).
+  signatureFileKey String @map("signature_file_key")
+
+  signedAt  DateTime @map("signed_at") @db.Timestamptz
+  ipAddress String?  @map("ip_address")
+
+  /// SHA-256 van een canonieke JSON-snapshot (omschrijving + gesorteerde
+  /// tijdsregistratie- en foto-ID's) op het moment van ondertekenen — een
+  /// lichtgewicht tamper-evidence-signaal, GEEN volledige WorkOrderVersion-
+  /// audittrail (sectie 11 van de brief blijft daarmee deels een latere fase).
+  contentHash String @map("content_hash")
+
+  requestedByUserId String   @map("requested_by_user_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  workOrder        WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  requestedByUser  User      @relation(fields: [requestedByUserId], references: [id])
+
+  @@map("work_order_signature")
 }
