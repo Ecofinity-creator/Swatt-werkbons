@@ -84,7 +84,8 @@ export const ProjectErrors = {
   notFound: () =>
     new ApiError(404, 'PROJECT_NOT_FOUND', 'Dit project bestaat niet (meer) of is niet gesynchroniseerd.'),
   employeeNotFound: () => new ApiError(404, 'EMPLOYEE_NOT_FOUND', 'Deze werknemer bestaat niet (meer).'),
-    notAssigned: () =>
+  /** Project bestaat wel, maar is niet aan deze werknemer gekoppeld (zie ProjectAssignment) — enkel gekoppelde projecten mogen uren boeken (Stap 5.1). */
+  notAssigned: () =>
     new ApiError(
       403,
       'PROJECT_NOT_ASSIGNED',
@@ -92,13 +93,50 @@ export const ProjectErrors = {
     ),
 };
 
+/** Phase 4 — timer ("START WERK"). Zie modules/time-entries/time-entry.service.ts voor de business-rule-logica. */
 export const TimeEntryErrors = {
+  /** Business rule 1 (sectie 24): één werknemer kan maar één actieve timer tegelijk hebben. */
   alreadyActive: () =>
-    new ApiError(409, 'TIME_ENTRY_ALREADY_ACTIVE', 'Je hebt al een actieve tijdsregistratie lopen. Stop deze eerst voor je een nieuwe start.'),
+    new ApiError(
+      409,
+      'TIME_ENTRY_ALREADY_ACTIVE',
+      'Je hebt al een actieve tijdsregistratie lopen. Stop deze eerst voor je een nieuwe start.',
+    ),
   notFound: () => new ApiError(404, 'TIME_ENTRY_NOT_FOUND', 'Deze tijdsregistratie bestaat niet (meer).'),
-  notRunning: () => new ApiError(409, 'TIME_ENTRY_NOT_RUNNING', 'Deze tijdsregistratie loopt niet (meer).'),
-  notPaused: () => new ApiError(409, 'TIME_ENTRY_NOT_PAUSED', 'Deze tijdsregistratie staat niet gepauzeerd.'),
-  alreadyStopped: () => new ApiError(409, 'TIME_ENTRY_ALREADY_STOPPED', 'Deze tijdsregistratie is al gestopt.'),
+  notRunning: () =>
+    new ApiError(409, 'TIME_ENTRY_NOT_RUNNING', 'Deze tijdsregistratie loopt niet (meer).'),
+  notPaused: () =>
+    new ApiError(409, 'TIME_ENTRY_NOT_PAUSED', 'Deze tijdsregistratie staat niet gepauzeerd.'),
+  alreadyStopped: () =>
+    new ApiError(409, 'TIME_ENTRY_ALREADY_STOPPED', 'Deze tijdsregistratie is al gestopt.'),
+};
+
+/** Phase 5 — werkbonnen (basis). Zie modules/work-orders/work-order.service.ts. */
+export const WorkOrderErrors = {
+  notFound: () => new ApiError(404, 'WORK_ORDER_NOT_FOUND', 'Deze werkbon bestaat niet (meer).'),
+  /** Meegegeven time-entry-IDs bevatten er minstens één die niet bestaat, niet van deze werknemer is, of niet (meer) STOPPED is. */
+  invalidTimeEntry: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_INVALID_TIME_ENTRY',
+      'Deze tijdsregistratie kan niet aan een werkbon toegevoegd worden. Controleer of ze van jou is en gestopt is.',
+    ),
+  /** Een meegegeven time entry hoort bij een ander project dan het opgegeven project van de werkbon. */
+  timeEntryProjectMismatch: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_TIME_ENTRY_PROJECT_MISMATCH',
+      'Deze tijdsregistratie hoort bij een ander project dan de werkbon.',
+    ),
+  /** De time entry is al aan een (andere) werkbon gekoppeld — business rule (sectie 24 naar analogie): hoogstens één werkbon per tijdsregistratie. */
+  timeEntryAlreadyLinked: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_TIME_ENTRY_ALREADY_LINKED',
+      'Deze tijdsregistratie is al aan een werkbon gekoppeld.',
+    ),
+  noTimeEntries: () =>
+    new ApiError(400, 'WORK_ORDER_NO_TIME_ENTRIES', 'Een werkbon moet minstens één tijdsregistratie bevatten.'),
 };
 
 export const EmailErrors = {
