@@ -13,6 +13,7 @@ import teamleaderPlugin from './modules/teamleader/teamleader.plugin';
 import teamleaderRoutes from './modules/teamleader/teamleader.routes';
 import timeEntryRoutes from './modules/time-entries/time-entry.routes';
 import userRoutes from './modules/users/user.routes';
+import workOrderRoutes from './modules/work-orders/work-order.routes';
 import { requireRole } from './modules/rbac/rbac.middleware';
 import prismaPlugin from './plugins/prisma';
 
@@ -109,6 +110,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(userRoutes);
   await app.register(projectRoutes);
   await app.register(timeEntryRoutes);
+  await app.register(workOrderRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 
