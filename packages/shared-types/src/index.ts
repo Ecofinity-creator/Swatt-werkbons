@@ -93,8 +93,8 @@ export interface PrepareAuthorizeResponseBody {
  *
  * BELANGRIJK — bewust geen PATCH/DELETE-routes: deze app vermijdt CORS-preflights
  * structureel (zie apps/api/src/app.ts / apps/web/src/api/client.ts, Render's edge
- * geeft op een preflight een niet-JSON 404 vóór onze eigen backend). Alle
- * schrijfacties hieronder lopen daarom via POST, ook wat conceptueel een
+ * geeft op een preflight een niet-JSON 404 vóór onze eigen backend ooit bereikt
+ * wordt). Alle schrijfacties hieronder lopen daarom via POST, ook wat conceptueel een
  * update/delete is (bv. `.../update`, `.../remove`) — net als het bestaande
  * `/teamleader/oauth/disconnect`-patroon.
  */
@@ -178,4 +178,55 @@ export interface ProjectSyncResponseBody {
   syncedCount: number;
   skippedWithoutCustomerCount: number;
   archivedCount: number;
+}
+
+/**
+ * Phase 4 — timer ("START WERK"). Zie apps/api/src/modules/time-entries/.
+ *
+ * RUNNING → PAUSED (herhaaldelijk mogelijk) → RUNNING, en uiteindelijk
+ * RUNNING/PAUSED → STOPPED (eindstatus). Business rule 1 (sectie 24): een
+ * werknemer heeft nooit meer dan één RUNNING/PAUSED-registratie tegelijk.
+ */
+export const TIME_ENTRY_STATUSES = ['RUNNING', 'PAUSED', 'STOPPED'] as const;
+export type TimeEntryStatus = (typeof TIME_ENTRY_STATUSES)[number];
+
+/**
+ * Publieke weergave van een tijdsregistratie. Bevat bewust enkel de ruwe
+ * tijdstippen (`startedAt`/`pausedSeconds`/`currentPauseStartedAt`), geen
+ * kant-en-klare "verstreken tijd" — die is tijdsafhankelijk en zou meteen
+ * verouderd zijn. De frontend berekent en toont de live tellende tijd zelf
+ * (zie ProjectTimerPage.tsx), op basis van deze velden + het huidige moment.
+ */
+export interface TimeEntrySummary {
+  id: string;
+  projectId: string;
+  projectName: string;
+  customerName: string;
+  status: TimeEntryStatus;
+  startedAt: string;
+  endedAt: string | null;
+  /** Som van alle afgeronde pauze-intervallen, in seconden. */
+  pausedSeconds: number;
+  /** Enkel gezet wanneer status = PAUSED — start van de huidige, nog lopende pauze. */
+  currentPauseStartedAt: string | null;
+  description: string | null;
+}
+
+/** Response van GET /time-entries/active — null wanneer de werknemer geen actieve (RUNNING/PAUSED) registratie heeft. */
+export interface ActiveTimeEntryResponseBody {
+  timeEntry: TimeEntrySummary | null;
+}
+
+/** Response van POST /time-entries/start, .../pause, .../resume en .../stop. */
+export interface TimeEntryResponseBody {
+  timeEntry: TimeEntrySummary;
+}
+
+export interface StartTimeEntryBody {
+  projectId: string;
+}
+
+/** Body van POST /time-entries/:id/stop — `description` is optioneel. */
+export interface StopTimeEntryBody {
+  description?: string;
 }
