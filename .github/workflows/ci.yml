@@ -23,9 +23,23 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # Phase 9 — BullMQ-syncqueue (sectie 15). De integratietests roepen
+      # `/work-orders/:id/sync/retry` en de `/sign`-flow aan, die effectief
+      # een job op deze queue plaatsen (SyncJobService) — een echte Redis
+      # hier laat dat pad meetesten i.p.v. enkel de queue-aanroep te mocken.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     env:
       DATABASE_URL: postgresql://swatt:swatt_ci@localhost:5432/swatt_test
+      REDIS_URL: redis://localhost:6379
       SESSION_COOKIE_SECRET: ci-test-secret-minstens-32-tekens-lang
       NODE_ENV: test
       # Teamleader OAuth (Phase 2) — vaste test-waarden, geen echte secrets.
