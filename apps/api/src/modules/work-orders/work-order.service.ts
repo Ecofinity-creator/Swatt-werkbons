@@ -49,9 +49,17 @@ export interface WorkOrderRecord {
   createdByEmployeeId: string;
   createdAt: Date;
   updatedAt: Date;
+  /** Phase 8 — PDF-generatie (secties 12/13/31), zie work-order-pdf.service.ts. */
+  pdfStatus: 'PDF_PENDING' | 'PDF_GENERATING' | 'PDF_READY' | 'PDF_FAILED';
+  pdfFileKey: string | null;
+  pdfFileName: string | null;
+  pdfGeneratedAt: Date | null;
+  pdfError: string | null;
   project: {
     name: string;
-    customer: { name: string };
+    projectNumber: string | null;
+    address: string | null;
+    customer: { name: string; address: string | null; vatNumber: string | null };
   };
   createdByEmployee: { displayName: string };
   timeEntries: Array<{
