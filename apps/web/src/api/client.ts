@@ -104,10 +104,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const authApi = {
-  login: (email: string, password: string) =>
+  login: (email: string, password: string, rememberMe = false) =>
     request<LoginResponseBody>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, rememberMe }),
     }),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
   me: () => request<LoginResponseBody>('/auth/me', { method: 'GET' }),
@@ -199,6 +199,15 @@ export const workOrdersApi = {
   /** Phase 7 — verplichte klanthandtekening (sectie 10). Zet de werkbon DRAFT → SIGNED. */
   sign: (workOrderId: string, body: SignWorkOrderBody) =>
     request<WorkOrderResponseBody>(`/work-orders/${workOrderId}/sign`, { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * Phase 8 — handmatige herstelactie bij pdfStatus === 'PDF_FAILED'
+   * (sectie 13). Het downloaden van de PDF zelf gaat NIET via deze client —
+   * dat is een gewone `<a href="/work-orders/:id/pdf">`-link (zie
+   * WorkOrderReviewPage.tsx), die dezelfde sessiecookie meestuurt als een
+   * normale paginanavigatie.
+   */
+  regeneratePdf: (workOrderId: string) =>
+    request<WorkOrderResponseBody>(`/work-orders/${workOrderId}/pdf/regenerate`, { method: 'POST' }),
 };
 
 /**
