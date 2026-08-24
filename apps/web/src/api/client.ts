@@ -9,10 +9,12 @@ import type {
   LoginResponseBody,
   PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
+  CreateWorkOrderBody,
   TeamleaderStatusResponseBody,
   TimeEntryResponseBody,
   UpdateUserBody,
   UpdateUserResponseBody,
+  WorkOrderResponseBody,
 } from '@swatt/shared-types';
 
 /**
@@ -179,6 +181,19 @@ export const timeEntriesApi = {
       method: 'POST',
       body: JSON.stringify(description ? { description } : {}),
     }),
+};
+
+/**
+ * Phase 5 — werkbonnen (basis). `create` wordt automatisch aangeroepen
+ * meteen na een geslaagde `timeEntriesApi.stop()` (zie ProjectTimerPage.tsx)
+ * — er is bewust geen aparte "werkbon aanmaken"-knop, in lijn met sectie 1
+ * van de brief ("controleert werkbon" is een controle-stap, geen aparte
+ * aanmaak-actie).
+ */
+export const workOrdersApi = {
+  create: (body: CreateWorkOrderBody) =>
+    request<WorkOrderResponseBody>('/work-orders', { method: 'POST', body: JSON.stringify(body) }),
+  get: (workOrderId: string) => request<WorkOrderResponseBody>(`/work-orders/${workOrderId}`, { method: 'GET' }),
 };
 
 export const projectsApi = {
