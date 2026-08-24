@@ -1,9 +1,11 @@
 import { roleAtLeast, type WorkOrderPhotoSummary, type WorkOrderResponseBody, type WorkOrderSummary } from '@swatt/shared-types';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuthErrors, WorkOrderErrors } from '../../errors';
+import { CompanySettingsService } from '../company-settings/company-settings.service';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
 import type { WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
 import { WorkOrderService } from './work-order.service';
+import { WorkOrderPdfService } from './work-order-pdf.service';
 import { WorkOrderPhotoService } from './work-order-photo.service';
 import { WorkOrderSignatureService } from './work-order-signature.service';
 import {
@@ -27,6 +29,8 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
   const storage: StorageService = new DatabaseStorageService(app.prisma);
   const photoService = new WorkOrderPhotoService(app.prisma, storage);
   const signatureService = new WorkOrderSignatureService(app.prisma, storage);
+  const companySettingsService = new CompanySettingsService(app.prisma);
+  const pdfService = new WorkOrderPdfService(app.prisma, storage, service, companySettingsService);
 
   app.post('/work-orders', { preHandler: [app.authenticate] }, async (request, reply): Promise<WorkOrderResponseBody> => {
     const employeeId = requireEmployeeId(request);
@@ -98,11 +102,57 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
       });
 
+      // Phase 8 — de PDF wordt automatisch gegenereerd meteen na ondertekenen
+      // (sectie 34, stappen 3-5). `generate()` gooit zelf nooit verder (zie
+      // work-order-pdf.service.ts) — bij een mislukking staat de reeds
+      // ondertekende, immutable werkbon gewoon met pdfStatus PDF_FAILED in de
+      // response, met "PDF opnieuw genereren" als handmatige herstelactie.
+      await pdfService.generate(params.id);
+
       const workOrder = await service.get(params.id);
       reply.code(201);
       return { workOrder: await toSummary(storage, workOrder) };
     },
   );
+
+  /**
+   * Phase 8 — handmatige herstelactie (sectie 13: "Administrator moet
+   * handmatig: Opnieuw synchroniseren kunnen kiezen", hier toegepast op
+   * PDF-generatie specifiek). SUPERVISOR+ omdat zij per sectie 4
+   * "synchronisatiefouten behandelen".
+   */
+  app.post(
+    '/work-orders/:id/pdf/regenerate',
+    { preHandler: [app.authenticate] },
+    async (request): Promise<WorkOrderResponseBody> => {
+      const user = request.currentUser;
+      if (!user || !roleAtLeast(user.role, 'SUPERVISOR')) {
+        throw AuthErrors.insufficientRole();
+      }
+      const params = workOrderIdParamsSchema.parse(request.params);
+
+      await pdfService.generate(params.id);
+
+      const workOrder = await service.get(params.id);
+      return { workOrder: await toSummary(storage, workOrder) };
+    },
+  );
+
+  /** Phase 8 — downloadt de gegenereerde PDF zelf (i.p.v. enkel de metadata in WorkOrderSummary). Zelfde toegangsregels als GET /work-orders/:id. */
+  app.get('/work-orders/:id/pdf', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const params = workOrderIdParamsSchema.parse(request.params);
+    const workOrder = await service.get(params.id);
+    requireWorkOrderAccess(request, workOrder);
+
+    if (workOrder.pdfStatus !== 'PDF_READY' || !workOrder.pdfFileKey) {
+      throw WorkOrderErrors.pdfNotReady();
+    }
+
+    const file = await storage.read(workOrder.pdfFileKey);
+    reply.header('Content-Type', file.mimeType);
+    reply.header('Content-Disposition', `inline; filename="${workOrder.pdfFileName ?? 'werkbon.pdf'}"`);
+    return reply.send(file.data);
+  });
 }
 
 function requireEmployeeId(request: FastifyRequest): string {
@@ -189,6 +239,10 @@ async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): P
     })),
     photos,
     signature,
+    pdfStatus: workOrder.pdfStatus,
+    pdfFileName: workOrder.pdfFileName,
+    pdfGeneratedAt: workOrder.pdfGeneratedAt ? workOrder.pdfGeneratedAt.toISOString() : null,
+    pdfError: workOrder.pdfError,
   };
 }
 
