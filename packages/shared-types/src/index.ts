@@ -1,205 +1,362 @@
-import { Prisma, type PrismaClient } from '@prisma/client';
-import { describe, expect, it, vi } from 'vitest';
-import type { StorageService } from '../src/modules/storage/storage.service';
-import { WorkOrderSignatureService } from '../src/modules/work-orders/work-order-signature.service';
-
 /**
- * Unit-tests met een minimale fake-Prisma + fake StorageService — zelfde
- * patroon als work-order-photo.service.test.ts. Dekt: de overgang
- * DRAFT → SIGNED, dezelfde anti-enumeratie-/immutability-checks als de
- * foto-service, en de P2002-racevertaling naar WORK_ORDER_ALREADY_SIGNED.
- * De reeks Postgres-constraints zelf (unieke `work_order_id` op
- * work_order_signature) is al rechtstreeks tegen een lokale database
- * geverifieerd bij het schrijven van de migratie.
+ * Types die gedeeld worden tussen apps/api en apps/web.
+ * Bron van waarheid voor de rol-enum en de vorm van de "ingelogde gebruiker"-payload
+ * die de backend teruggeeft aan de frontend (GET /auth/me).
+ *
+ * Let op: dit zijn *transport*-types (wat over de API-grens gaat), niet de volledige
+ * Prisma-modellen. De Prisma-modellen (zie apps/api/prisma/schema.prisma) zijn de bron
+ * van waarheid voor de database-vorm; deze types zijn er bewust een klein, expliciet
+ * afgeleid subset van, zodat we nooit per ongeluk een password_hash o.i.d. lekken.
  */
 
-interface FakeEmployee {
-  id: string;
+export const USER_ROLES = ['EMPLOYEE', 'SUPERVISOR', 'ADMIN'] as const;
+
+export type UserRole = (typeof USER_ROLES)[number];
+
+/** Rolhiërarchie: index in deze array bepaalt "minstens zo veel rechten als". */
+export const ROLE_HIERARCHY: readonly UserRole[] = ['EMPLOYEE', 'SUPERVISOR', 'ADMIN'];
+
+export function roleAtLeast(role: UserRole, minimum: UserRole): boolean {
+  return ROLE_HIERARCHY.indexOf(role) >= ROLE_HIERARCHY.indexOf(minimum);
 }
 
-interface FakeWorkOrder {
+/** Publieke, veilige weergave van de ingelogde gebruiker (nooit een password hash e.d.). */
+export interface AuthenticatedUser {
   id: string;
-  status: string;
-  createdByEmployeeId: string;
+  email: string;
+  role: UserRole;
+  isActive: boolean;
+  employee: {
+    id: string;
+    displayName: string;
+  } | null;
+}
+
+export interface LoginRequestBody {
+  email: string;
+  password: string;
+}
+
+export interface LoginResponseBody {
+  user: AuthenticatedUser;
+}
+
+/** Body van POST /auth/forgot-password. Response is altijd 204, ongeacht of het e-mailadres bestaat (voorkomt account-enumeratie). */
+export interface ForgotPasswordBody {
+  email: string;
+}
+
+/** Body van POST /auth/reset-password — `token` komt uit de link in de uitnodigings-/reset-e-mail. */
+export interface ResetPasswordBody {
+  token: string;
+  password: string;
+}
+
+export interface ApiErrorBody {
+  error: {
+    /** Machine-leesbare code, bv. "INVALID_CREDENTIALS" — voor i18n/UI-logica. */
+    code: string;
+    /** Mensentaal-boodschap, geschikt om rechtstreeks te tonen (zie sectie 27 van de brief). */
+    message: string;
+  };
+}
+
+/** Phase 2 — Teamleader OAuth. Zie apps/api/src/modules/teamleader/. */
+export const TEAMLEADER_CONNECTION_STATUSES = ['DISCONNECTED', 'CONNECTED', 'ERROR'] as const;
+
+export type TeamleaderConnectionStatus = (typeof TEAMLEADER_CONNECTION_STATUSES)[number];
+
+/** Response van GET /teamleader/status — data-only (nooit tokens), datums als ISO-strings over de wire. */
+export interface TeamleaderStatusResponseBody {
+  status: TeamleaderConnectionStatus;
+  connectedAt: string | null;
+  tokenExpiresAt: string | null;
+  lastError: string | null;
+}
+
+/**
+ * Response van POST /teamleader/oauth/prepare-authorize — een kortlevend,
+ * eenmalig bruikbaar token (zie de uitgebreide toelichting in
+ * apps/api/src/modules/teamleader/teamleader.routes.ts bij
+ * AUTHORIZE_HANDOFF_TTL_MS) dat de frontend meegeeft in de daaropvolgende
+ * top-level navigatie naar /teamleader/oauth/authorize. Nodig omdat cross-site
+ * cookiebescherming in moderne browsers (Firefox Total Cookie Protection e.d.)
+ * de normale sessiecookie op dát exacte moment onbetrouwbaar maakt.
+ */
+export interface PrepareAuthorizeResponseBody {
+  token: string;
+}
+
+/**
+ * Phase 3 (slice) — gebruikersbeheer (admin) + projectcache/koppeling.
+ * Zie apps/api/src/modules/users/ en apps/api/src/modules/projects/.
+ *
+ * BELANGRIJK — bewust geen PATCH/DELETE-routes: deze app vermijdt CORS-preflights
+ * structureel (zie apps/api/src/app.ts / apps/web/src/api/client.ts, Render's edge
+ * geeft op een preflight een niet-JSON 404 vóór onze eigen backend). Alle
+ * schrijfacties hieronder lopen daarom via POST, ook wat conceptueel een
+ * update/delete is (bv. `.../update`, `.../remove`) — net als het bestaande
+ * `/teamleader/oauth/disconnect`-patroon.
+ */
+
+/** Publieke weergave van een door een admin beheerde gebruiker (nooit een password hash). */
+export interface AdminUserSummary {
+  id: string;
+  email: string;
+  role: UserRole;
+  isActive: boolean;
+  employee: {
+    id: string;
+    displayName: string;
+    phone: string | null;
+  } | null;
+  createdAt: string;
+}
+
+export interface ListUsersResponseBody {
+  users: AdminUserSummary[];
+}
+
+export interface CreateUserBody {
+  email: string;
+  displayName: string;
+  role: UserRole;
+  phone?: string;
+}
+
+/** `inviteEmailSent` is false wanneer het account wél is aangemaakt maar de uitnodigingsmail niet kon worden verstuurd (zie business rule 9 — externe-dienst-storing mag nooit lokale data laten verloren gaan). */
+export interface CreateUserResponseBody {
+  user: AdminUserSummary;
+  inviteEmailSent: boolean;
+}
+
+/** Body van POST /admin/users/:id/update — alle velden optioneel (partial update). */
+export interface UpdateUserBody {
+  role?: UserRole;
+  isActive?: boolean;
+  displayName?: string;
+  phone?: string | null;
+}
+
+export interface UpdateUserResponseBody {
+  user: AdminUserSummary;
+}
+
+/** Publieke weergave van een uit Teamleader gesynchroniseerd project. */
+export interface ProjectSummary {
+  id: string;
+  teamleaderId: string;
+  projectNumber: string | null;
+  name: string;
   description: string | null;
-  timeEntries: Array<{ timeEntryId: string; timeEntry: { employeeId: string } }>;
-  photos: Array<{ id: string }>;
+  address: string | null;
+  status: string | null;
+  customerName: string;
+  isArchivedInTl: boolean;
 }
 
-function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
-  const workOrders = new Map((options.workOrders ?? []).map((w) => [w.id, w]));
-  const signaturesByWorkOrder = new Map<string, unknown>();
-  let signatureIdCounter = 0;
-
-  const workOrder = {
-    findUnique: vi.fn(async ({ where }: { where: { id: string } }) => workOrders.get(where.id) ?? null),
-    update: vi.fn(async ({ where, data }: { where: { id: string }; data: { status: string } }) => {
-      const existing = workOrders.get(where.id);
-      if (existing) {
-        existing.status = data.status;
-      }
-      return existing ?? null;
-    }),
-  };
-
-  const workOrderSignature = {
-    create: vi.fn(
-      async ({
-        data,
-      }: {
-        data: {
-          workOrderId: string;
-          signerName: string;
-          signerFunction: string | null;
-          signatureFileKey: string;
-          signedAt: Date;
-          ipAddress: string | null;
-          contentHash: string;
-          requestedByUserId: string;
-        };
-      }) => {
-        if (signaturesByWorkOrder.has(data.workOrderId)) {
-          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-            code: 'P2002',
-            clientVersion: Prisma.prismaVersion.client,
-          });
-        }
-        const created = { ...data, id: `sig-${++signatureIdCounter}` };
-        signaturesByWorkOrder.set(data.workOrderId, created);
-        return created;
-      },
-    ),
-  };
-
-  return {
-    prisma: {
-      workOrder,
-      workOrderSignature,
-      $transaction: vi.fn(async (operations: Array<Promise<unknown>>) => Promise.all(operations)),
-    } as unknown as PrismaClient,
-    workOrders,
-  };
+export interface ListProjectsResponseBody {
+  projects: ProjectSummary[];
 }
 
-function createFakeStorage(): StorageService {
-  const saved = new Map<string, { data: Buffer; mimeType: string }>();
-  let keyCounter = 0;
-  return {
-    save: vi.fn(async (data: Buffer, mimeType: string) => {
-      const key = `stored-${++keyCounter}`;
-      saved.set(key, { data, mimeType });
-      return key;
-    }),
-    read: vi.fn(async (key: string) => {
-      const found = saved.get(key);
-      if (!found) {
-        throw new Error(`Onbekende storage-key: ${key}`);
-      }
-      return found;
-    }),
-    delete: vi.fn(async (key: string) => {
-      saved.delete(key);
-    }),
-  };
+/** Response van GET /admin/employees/:employeeId/project-assignments. */
+export interface ListProjectAssignmentsResponseBody {
+  projectIds: string[];
 }
 
-const EMPLOYEE: FakeEmployee = { id: 'employee-1' };
-const OTHER_EMPLOYEE: FakeEmployee = { id: 'employee-2' };
-const REQUESTED_BY_USER_ID = 'user-1';
-
-function draftWorkOrder(overrides: Partial<FakeWorkOrder> = {}): FakeWorkOrder {
-  return {
-    id: 'wo-1',
-    status: 'DRAFT',
-    createdByEmployeeId: EMPLOYEE.id,
-    description: 'Onderhoud uitgevoerd.',
-    timeEntries: [{ timeEntryId: 'entry-1', timeEntry: { employeeId: EMPLOYEE.id } }],
-    photos: [{ id: 'photo-1' }],
-    ...overrides,
-  };
+/** Body van POST .../project-assignments en .../project-assignments/remove. */
+export interface ProjectAssignmentBody {
+  projectId: string;
 }
 
-function signInput() {
-  return {
-    signerName: 'Jan Janssens',
-    signerFunction: 'Zaakvoerder',
-    requestedByUserId: REQUESTED_BY_USER_ID,
-    ipAddress: '203.0.113.5',
-    image: { data: Buffer.from('signature-png-bytes'), mimeType: 'image/png' },
-  };
+export const TEAMLEADER_PROJECTS_MODULES = ['LEGACY', 'PROJECTS_V2'] as const;
+export type TeamleaderProjectsModule = (typeof TEAMLEADER_PROJECTS_MODULES)[number];
+
+/** Response van POST /admin/teamleader/sync/projects. */
+export interface ProjectSyncResponseBody {
+  module: TeamleaderProjectsModule;
+  syncedCount: number;
+  skippedWithoutCustomerCount: number;
+  archivedCount: number;
 }
 
-describe('WorkOrderSignatureService', () => {
-  it('sign() maakt de handtekening aan en zet de werkbon op SIGNED', async () => {
-    const { prisma, workOrders } = createFakePrisma({ workOrders: [draftWorkOrder()] });
-    const storage = createFakeStorage();
-    const service = new WorkOrderSignatureService(prisma, storage);
+/**
+ * Phase 4 — timer ("START WERK"). Zie apps/api/src/modules/time-entries/.
+ *
+ * RUNNING → PAUSED (herhaaldelijk mogelijk) → RUNNING, en uiteindelijk
+ * RUNNING/PAUSED → STOPPED (eindstatus). Business rule 1 (sectie 24): een
+ * werknemer heeft nooit meer dan één RUNNING/PAUSED-registratie tegelijk.
+ */
+export const TIME_ENTRY_STATUSES = ['RUNNING', 'PAUSED', 'STOPPED'] as const;
+export type TimeEntryStatus = (typeof TIME_ENTRY_STATUSES)[number];
 
-    const signature = await service.sign(EMPLOYEE.id, 'wo-1', signInput());
+/**
+ * Publieke weergave van een tijdsregistratie. Bevat bewust enkel de ruwe
+ * tijdstippen (`startedAt`/`pausedSeconds`/`currentPauseStartedAt`), geen
+ * kant-en-klare "verstreken tijd" — die is tijdsafhankelijk en zou meteen
+ * verouderd zijn. De frontend berekent en toont de live tellende tijd zelf
+ * (zie ProjectTimerPage.tsx), op basis van deze velden + het huidige moment.
+ */
+export interface TimeEntrySummary {
+  id: string;
+  projectId: string;
+  projectName: string;
+  customerName: string;
+  status: TimeEntryStatus;
+  startedAt: string;
+  endedAt: string | null;
+  /** Som van alle afgeronde pauze-intervallen, in seconden. */
+  pausedSeconds: number;
+  /** Enkel gezet wanneer status = PAUSED — start van de huidige, nog lopende pauze. */
+  currentPauseStartedAt: string | null;
+  description: string | null;
+}
 
-    expect(signature.signerName).toBe('Jan Janssens');
-    expect(signature.signerFunction).toBe('Zaakvoerder');
-    expect(signature.contentHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(workOrders.get('wo-1')?.status).toBe('SIGNED');
-    expect(storage.save).toHaveBeenCalledTimes(1);
-  });
+/** Response van GET /time-entries/active — null wanneer de werknemer geen actieve (RUNNING/PAUSED) registratie heeft. */
+export interface ActiveTimeEntryResponseBody {
+  timeEntry: TimeEntrySummary | null;
+}
 
-  it('sign() berekent dezelfde contentHash voor eenzelfde werkbon-inhoud, ongeacht tijdstip', async () => {
-    const { prisma: prismaA } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-a' })] });
-    const { prisma: prismaB } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-b' })] });
-    const serviceA = new WorkOrderSignatureService(prismaA, createFakeStorage());
-    const serviceB = new WorkOrderSignatureService(prismaB, createFakeStorage());
+/** Response van POST /time-entries/start, .../pause, .../resume en .../stop. */
+export interface TimeEntryResponseBody {
+  timeEntry: TimeEntrySummary;
+}
 
-    const sigA = await serviceA.sign(EMPLOYEE.id, 'wo-a', signInput());
-    const sigB = await serviceB.sign(EMPLOYEE.id, 'wo-b', signInput());
+export interface StartTimeEntryBody {
+  projectId: string;
+}
 
-    expect(sigA.contentHash).toBe(sigB.contentHash);
-  });
+/** Body van POST /time-entries/:id/stop — `description` is optioneel. */
+export interface StopTimeEntryBody {
+  description?: string;
+}
 
-  it('sign() weigert met WORK_ORDER_NOT_FOUND voor een onbestaande werkbon', async () => {
-    const { prisma } = createFakePrisma();
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+/**
+ * Phase 5 — werkbonnen (basis). Zie apps/api/src/modules/work-orders/.
+ * Statusnamen matchen het overzicht uit sectie 20 van de projectbrief; deze
+ * ronde gebruikt enkel DRAFT.
+ */
+export const WORK_ORDER_STATUSES = [
+  'DRAFT',
+  'READY_FOR_SIGNATURE',
+  'SIGNED',
+  'SYNC_PENDING',
+  'SYNC_FAILED',
+  'READY_FOR_INVOICING',
+  'INVOICED',
+] as const;
+export type WorkOrderStatus = (typeof WORK_ORDER_STATUSES)[number];
 
-    await expect(service.sign(EMPLOYEE.id, 'onbestaand', signInput())).rejects.toMatchObject({
-      code: 'WORK_ORDER_NOT_FOUND',
-    });
-  });
+/** Eén tijdsregistratie zoals opgenomen in een werkbon (sectie 8 — meerdere werknemers per werf). */
+export interface WorkOrderTimeEntrySummary {
+  id: string;
+  employeeId: string;
+  employeeDisplayName: string;
+  startedAt: string;
+  endedAt: string | null;
+  pausedSeconds: number;
+}
 
-  it('sign() weigert met WORK_ORDER_NOT_FOUND voor een werknemer die geen deelnemer is (anti-enumeratie)', async () => {
-    const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder()] });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+/**
+ * Phase 6 — foto's op een werkbon (sectie 9). Matcht de voorbeeldcategorieën
+ * uit sectie 9 letterlijk; categorie is optioneel (`null`).
+ */
+export const WORK_ORDER_PHOTO_CATEGORIES = [
+  'SITUATIE_VOOR',
+  'UITVOERING',
+  'SITUATIE_NA',
+  'SERIENUMMER',
+  'TECHNISCHE_INSTALLATIE',
+  'PROBLEEM_SCHADE',
+  'OVERIGE',
+] as const;
+export type WorkOrderPhotoCategory = (typeof WORK_ORDER_PHOTO_CATEGORIES)[number];
 
-    await expect(service.sign(OTHER_EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
-      code: 'WORK_ORDER_NOT_FOUND',
-    });
-  });
+/** Mensentaal-labels voor de categorie-kiezer in de UI. */
+export const WORK_ORDER_PHOTO_CATEGORY_LABELS: Record<WorkOrderPhotoCategory, string> = {
+  SITUATIE_VOOR: 'Situatie voor werken',
+  UITVOERING: 'Uitvoering',
+  SITUATIE_NA: 'Situatie na werken',
+  SERIENUMMER: 'Serienummer',
+  TECHNISCHE_INSTALLATIE: 'Technische installatie',
+  PROBLEEM_SCHADE: 'Probleem/schade',
+  OVERIGE: 'Overige',
+};
 
-  it('sign() weigert met WORK_ORDER_ALREADY_SIGNED zodra de werkbon al niet meer DRAFT is', async () => {
-    const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder({ status: 'SIGNED' })] });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+/**
+ * Publieke weergave van één foto. Bevat de foto-bytes rechtstreeks als
+ * data-URLs (i.p.v. een aparte GET-route per foto) — bewuste keuze voor
+ * architecturale eenvoud, aanvaardbaar omdat dit enkel opgehaald wordt bij
+ * het bekijken van één specifieke werkbon, nooit in een lijstweergave.
+ */
+export interface WorkOrderPhotoSummary {
+  id: string;
+  category: WorkOrderPhotoCategory | null;
+  description: string | null;
+  /** ~1600px, JPEG kwaliteit 0.8 — client-side gecomprimeerd vóór upload (zie apps/web/src/lib/image.ts). */
+  optimizedDataUrl: string;
+  /** ~320px, JPEG kwaliteit 0.7. */
+  thumbnailDataUrl: string;
+  uploadedByEmployeeDisplayName: string;
+  createdAt: string;
+}
 
-    await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
-      code: 'WORK_ORDER_ALREADY_SIGNED',
-    });
-  });
+/** Body van POST /work-orders/:id/photos — foto's als base64 in de gewone JSON-body (zie work-order.schemas.ts). */
+export interface AddWorkOrderPhotoBody {
+  category?: WorkOrderPhotoCategory | null;
+  description?: string;
+  optimizedMimeType: 'image/jpeg';
+  optimizedDataBase64: string;
+  thumbnailMimeType: 'image/jpeg';
+  thumbnailDataBase64: string;
+}
 
-  it('sign() vertaalt een unique-constraint-fout (P2002) naar WORK_ORDER_ALREADY_SIGNED', async () => {
-    // Simuleert de race condition tussen twee gelijktijdige ondertekenpogingen
-    // op dezelfde werkbon: de statuscheck vond op dat moment nog DRAFT, maar
-    // de create() zelf botst alsnog op de unieke `work_order_id`-index.
-    const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder()] });
-    const fakeSignature = (prisma as unknown as { workOrderSignature: { create: ReturnType<typeof vi.fn> } })
-      .workOrderSignature;
-    fakeSignature.create = vi.fn(async () => {
-      throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
-        code: 'P2002',
-        clientVersion: Prisma.prismaVersion.client,
-      });
-    });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+/**
+ * Phase 7 — digitale handtekening van de klant (sectie 10). Ten hoogste één
+ * per werkbon; zodra aanwezig is de werkbon SIGNED en dus immutable
+ * (business rule 3).
+ */
+export interface WorkOrderSignatureSummary {
+  signerName: string;
+  signerFunction: string | null;
+  signedAt: string;
+  /** PNG van het handtekening-canvas, als data-URL. */
+  imageDataUrl: string;
+}
 
-    await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
-      code: 'WORK_ORDER_ALREADY_SIGNED',
-    });
-  });
-});
+/** Body van POST /work-orders/:id/sign. */
+export interface SignWorkOrderBody {
+  signerName: string;
+  signerFunction?: string;
+  /** Sectie 10: "Ik bevestig dat bovenstaande werkzaamheden werden uitgevoerd." — verplicht `true`. */
+  confirmed: true;
+  mimeType: 'image/png';
+  signatureDataBase64: string;
+}
+
+export interface WorkOrderSummary {
+  id: string;
+  workOrderNumber: string;
+  projectId: string;
+  projectName: string;
+  customerName: string;
+  status: WorkOrderStatus;
+  description: string | null;
+  createdByEmployeeDisplayName: string;
+  createdAt: string;
+  timeEntries: WorkOrderTimeEntrySummary[];
+  photos: WorkOrderPhotoSummary[];
+  signature: WorkOrderSignatureSummary | null;
+}
+
+/** Body van POST /work-orders. */
+export interface CreateWorkOrderBody {
+  projectId: string;
+  timeEntryIds: string[];
+  description?: string;
+}
+
+/** Response van POST /work-orders, GET /work-orders/:id, .../photos, .../photos/:photoId/remove en .../sign. */
+export interface WorkOrderResponseBody {
+  workOrder: WorkOrderSummary;
+}
