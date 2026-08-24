@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
+import { Logo } from '../components/Logo';
 import { ROLE_LABELS } from '../constants';
 
 /**
@@ -32,8 +33,8 @@ export function HomePage() {
 
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
-      <header className="mb-8">
-        <h1 className="text-2xl font-extrabold tracking-tight">SWATT</h1>
+      <header className="mb-8 flex flex-col gap-2">
+        <Logo size="md" />
         <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">
           Technical Support Team
         </p>
