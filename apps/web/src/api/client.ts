@@ -1,4 +1,5 @@
 import type {
+  ActiveTimeEntryResponseBody,
   ApiErrorBody,
   CreateUserBody,
   CreateUserResponseBody,
@@ -9,6 +10,7 @@ import type {
   PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
   TeamleaderStatusResponseBody,
+  TimeEntryResponseBody,
   UpdateUserBody,
   UpdateUserResponseBody,
 } from '@swatt/shared-types';
@@ -155,6 +157,27 @@ export const usersApi = {
     request<UpdateUserResponseBody>(`/admin/users/${userId}/update`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+};
+
+/**
+ * Phase 4 — timer ("START WERK"). Elke aanroep werkt op de EIGEN
+ * tijdsregistratie van de ingelogde gebruiker — er is bewust geen
+ * `employeeId`-parameter nodig, de backend leidt dat af uit de sessie
+ * (zie apps/api/src/modules/time-entries/time-entry.routes.ts).
+ */
+export const timeEntriesApi = {
+  active: () => request<ActiveTimeEntryResponseBody>('/time-entries/active', { method: 'GET' }),
+  start: (projectId: string) =>
+    request<TimeEntryResponseBody>('/time-entries/start', { method: 'POST', body: JSON.stringify({ projectId }) }),
+  pause: (timeEntryId: string) =>
+    request<TimeEntryResponseBody>(`/time-entries/${timeEntryId}/pause`, { method: 'POST' }),
+  resume: (timeEntryId: string) =>
+    request<TimeEntryResponseBody>(`/time-entries/${timeEntryId}/resume`, { method: 'POST' }),
+  stop: (timeEntryId: string, description?: string) =>
+    request<TimeEntryResponseBody>(`/time-entries/${timeEntryId}/stop`, {
+      method: 'POST',
+      body: JSON.stringify(description ? { description } : {}),
     }),
 };
 
