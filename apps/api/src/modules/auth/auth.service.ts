@@ -16,7 +16,11 @@ export class AuthService {
    * bestaat, of het wachtwoord fout is — nooit onthullen of een e-mailadres
    * bestaat (voorkomt account-enumeratie).
    */
-  async login(email: string, password: string): Promise<{ sessionId: string; user: AuthenticatedUser }> {
+  async login(
+    email: string,
+    password: string,
+    rememberMe = false,
+  ): Promise<{ sessionId: string; user: AuthenticatedUser; expiresAt: Date }> {
     const user = await this.prisma.user.findUnique({
       where: { email },
       include: { employee: true },
@@ -42,9 +46,9 @@ export class AuthService {
       throw AuthErrors.accountDeactivated();
     }
 
-    const session = await this.sessions.createSession(user.id);
+    const session = await this.sessions.createSession(user.id, rememberMe);
 
-    return { sessionId: session.sessionId, user: toAuthenticatedUser(user) };
+    return { sessionId: session.sessionId, user: toAuthenticatedUser(user), expiresAt: session.expiresAt };
   }
 
   async logout(sessionId: string): Promise<void> {
