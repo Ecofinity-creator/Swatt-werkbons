@@ -35,6 +35,8 @@ export interface AuthenticatedUser {
 export interface LoginRequestBody {
   email: string;
   password: string;
+  /** "Onthou mij" — bepaalt de sessieduur (30 vs. 7 dagen), zie session.service.ts. */
+  rememberMe?: boolean;
 }
 
 export interface LoginResponseBody {
@@ -334,6 +336,21 @@ export interface SignWorkOrderBody {
   signatureDataBase64: string;
 }
 
+/**
+ * Phase 8 — PDF-generatie (secties 12/13/31). Bewust losgekoppeld van de
+ * Teamleader-upload-statussen (die horen bij Phase 9).
+ */
+export const WORK_ORDER_PDF_STATUSES = ['PDF_PENDING', 'PDF_GENERATING', 'PDF_READY', 'PDF_FAILED'] as const;
+export type WorkOrderPdfStatus = (typeof WORK_ORDER_PDF_STATUSES)[number];
+
+/** Mensentaal-labels voor de PDF-statusbadge in de UI. */
+export const WORK_ORDER_PDF_STATUS_LABELS: Record<WorkOrderPdfStatus, string> = {
+  PDF_PENDING: 'PDF nog niet aangevraagd',
+  PDF_GENERATING: 'PDF wordt gegenereerd...',
+  PDF_READY: 'PDF beschikbaar',
+  PDF_FAILED: 'PDF genereren mislukt',
+};
+
 export interface WorkOrderSummary {
   id: string;
   workOrderNumber: string;
@@ -347,6 +364,11 @@ export interface WorkOrderSummary {
   timeEntries: WorkOrderTimeEntrySummary[];
   photos: WorkOrderPhotoSummary[];
   signature: WorkOrderSignatureSummary | null;
+  pdfStatus: WorkOrderPdfStatus;
+  pdfFileName: string | null;
+  pdfGeneratedAt: string | null;
+  /** Mensentaal-boodschap (sectie 27) — enkel gezet wanneer pdfStatus === 'PDF_FAILED'. */
+  pdfError: string | null;
 }
 
 /** Body van POST /work-orders. */
