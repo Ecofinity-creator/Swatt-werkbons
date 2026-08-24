@@ -84,6 +84,22 @@ export async function buildApp(): Promise<FastifyInstance> {
       return;
     }
 
+    // Phase 6/7 — een te grote foto-/handtekening-upload (zie de per-route
+    // `bodyLimit`-overrides in work-order.routes.ts). Fastify gooit dit zelf,
+    // vóór onze route-handler of zod ooit bereikt wordt — vandaar sectie 27's
+    // regel ("nooit kaal HTTP 422/413 tonen") hier expliciet afgevangen i.p.v.
+    // via de generieke fallback hieronder.
+    if ((error as { code?: string }).code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      const body: ApiErrorBody = {
+        error: {
+          code: 'PAYLOAD_TOO_LARGE',
+          message: 'Deze upload is te groot. Maak een nieuwe foto met minder resolutie of kies een kleinere afbeelding.',
+        },
+      };
+      reply.code(413).send(body);
+      return;
+    }
+
     // Onverwachte fout: loggen met volledige details (server-side), maar
     // NOOIT interne details teruggeven aan de client (sectie 25/27 van de brief).
     request.log.error({ err: error }, 'Onverwachte fout');
