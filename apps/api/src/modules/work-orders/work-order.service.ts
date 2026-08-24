@@ -55,6 +55,10 @@ export interface WorkOrderRecord {
   pdfFileName: string | null;
   pdfGeneratedAt: Date | null;
   pdfError: string | null;
+  /** Phase 9 — upload van de PDF naar Teamleader (sectie 13/31), zie file-sync.service.ts. */
+  teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING' | 'TEAMLEADER_UPLOADED' | 'TEAMLEADER_UPLOAD_FAILED';
+  teamleaderUploadedAt: Date | null;
+  teamleaderUploadError: string | null;
   project: {
     name: string;
     projectNumber: string | null;
@@ -71,10 +75,36 @@ export interface WorkOrderRecord {
       endedAt: Date | null;
       pausedSeconds: number;
       employee: { displayName: string };
+      /** Phase 9 — sync naar Teamleader (sectie 14), zie time-tracking-sync.service.ts. */
+      syncStatus: 'NOT_SYNCED' | 'PENDING' | 'SYNCED' | 'FAILED';
+      syncError: string | null;
     };
   }>;
   photos: WorkOrderPhotoRecord[];
   signature: WorkOrderSignatureRecord | null;
+}
+
+/**
+ * Phase 9 — samengestelde tijdregistratie-sync-status over de hele werkbon
+ * (zie WORK_ORDER_TIME_TRACKING_SYNC_STATUS_LABELS in shared-types): SYNCED
+ * enkel als élke gekoppelde tijdsregistratie SYNCED is, FAILED zodra er
+ * minstens één FAILED is (ongeacht de rest — een admin moet dat meteen zien),
+ * anders PENDING zodra er minstens één nog niet klaar is, anders NOT_SYNCED.
+ */
+export function deriveTimeTrackingSyncStatus(
+  timeEntries: WorkOrderRecord['timeEntries'],
+): 'NOT_SYNCED' | 'PENDING' | 'SYNCED' | 'FAILED' {
+  if (timeEntries.length === 0) return 'NOT_SYNCED';
+  const statuses = timeEntries.map((link) => link.timeEntry.syncStatus);
+  if (statuses.some((status) => status === 'FAILED')) return 'FAILED';
+  if (statuses.every((status) => status === 'SYNCED')) return 'SYNCED';
+  if (statuses.some((status) => status === 'PENDING' || status === 'SYNCED')) return 'PENDING';
+  return 'NOT_SYNCED';
+}
+
+/** Mensentaal-samenvatting van de eerste mislukte tijdregistratie-sync, indien van toepassing — voor WorkOrderSummary.timeTrackingSyncError. */
+export function deriveTimeTrackingSyncError(timeEntries: WorkOrderRecord['timeEntries']): string | null {
+  return timeEntries.find((link) => link.timeEntry.syncError)?.timeEntry.syncError ?? null;
 }
 
 /**
@@ -95,6 +125,27 @@ export class WorkOrderService {
       throw WorkOrderErrors.notFound();
     }
     return workOrder;
+  }
+
+  /**
+   * Phase 9 — overzicht "Synchronisatiefouten" (sectie 4/13: supervisors
+   * "behandelen synchronisatiefouten"). Bewust een lichtgewicht, gerichte
+   * lijst i.p.v. het volledige werkbonnenoverzicht (sectie 20, nog niet
+   * gebouwd — zie Phase 8-overdracht) — enkel werkbonnen die ergens in de
+   * Teamleader-sync vastzitten of mislukt zijn.
+   */
+  async listSyncIssues(): Promise<WorkOrderRecord[]> {
+    return this.prisma.workOrder.findMany({
+      where: {
+        OR: [
+          { status: { in: ['SYNC_PENDING', 'SYNC_FAILED'] } },
+          { teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_FAILED' },
+          { timeEntries: { some: { timeEntry: { syncStatus: 'FAILED' } } } },
+        ],
+      },
+      orderBy: { updatedAt: 'desc' },
+      ...WITH_DETAILS,
+    });
   }
 
   async create(

@@ -62,6 +62,15 @@ const rawEnvSchema = z.object({
   RESEND_API_KEY: z.string().min(1).optional(),
   /** Bv. "SWATT <noreply@ecofinity.eu>", of tijdelijk "onboarding@resend.dev" (Resend-sandbox, levert enkel af aan je eigen Resend-accountmail). */
   EMAIL_FROM_ADDRESS: z.string().min(1).optional(),
+
+  /**
+   * Phase 9 — Redis voor de BullMQ-achtergrondwerker (sectie 15). Bewust een
+   * default i.p.v. verplicht: dit houdt lokale dev/test zonder Redis werkend
+   * voor alles wat geen sync triggert (queue.ts verbindt pas lazy, bij het
+   * eerste effectieve gebruik — zie de toelichting daar). In productie wijst
+   * dit naar de Render Key Value-instance uit render.yaml.
+   */
+  REDIS_URL: z.string().min(1).default('redis://localhost:6379'),
 });
 
 const envSchema = rawEnvSchema.superRefine((value, ctx) => {

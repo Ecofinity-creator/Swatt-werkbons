@@ -2,12 +2,20 @@ import { randomBytes } from 'node:crypto';
 import type {
   PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
+  TeamleaderSettingsResponseBody,
   TeamleaderStatusResponseBody,
+  UpdateTeamleaderSettingsBody,
 } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { env } from '../../config/env';
 import { AuthErrors } from '../../errors';
 import { requireRole } from '../rbac/rbac.middleware';
+import { TEAMLEADER_CONNECTION_SINGLETON_ID } from './teamleader-auth.service';
+
+const updateTeamleaderSettingsBodySchema = z.object({
+  defaultMilestoneResponsibleTeamleaderUserId: z.string().trim().min(1).nullable(),
+});
 
 /** Kortlevende httpOnly cookie die het CSRF-`state` bewaart tussen /authorize en /callback. */
 const STATE_COOKIE_NAME = 'swatt_tl_oauth_state';
@@ -197,6 +205,41 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
     async (): Promise<ProjectSyncResponseBody> => {
       const result = await app.projectSyncService.syncAll();
       return result;
+    },
+  );
+
+  /**
+   * Phase 9 — instelling voor automatische milestone-aanmaak (zie
+   * MilestoneSyncService.resolveOrCreateTeamleaderMilestoneId). ADMIN-only,
+   * zelfde als de rest van de Teamleader-koppelingsinstellingen.
+   */
+  app.get(
+    '/admin/teamleader/settings',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (): Promise<TeamleaderSettingsResponseBody> => {
+      const connection = await app.prisma.teamleaderConnection.findUnique({
+        where: { id: TEAMLEADER_CONNECTION_SINGLETON_ID },
+      });
+      return {
+        defaultMilestoneResponsibleTeamleaderUserId: connection?.defaultMilestoneResponsibleTeamleaderUserId ?? null,
+      };
+    },
+  );
+
+  app.post(
+    '/admin/teamleader/settings',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<TeamleaderSettingsResponseBody> => {
+      const body: UpdateTeamleaderSettingsBody = updateTeamleaderSettingsBodySchema.parse(request.body);
+      const connection = await app.prisma.teamleaderConnection.upsert({
+        where: { id: TEAMLEADER_CONNECTION_SINGLETON_ID },
+        create: {
+          id: TEAMLEADER_CONNECTION_SINGLETON_ID,
+          defaultMilestoneResponsibleTeamleaderUserId: body.defaultMilestoneResponsibleTeamleaderUserId,
+        },
+        update: { defaultMilestoneResponsibleTeamleaderUserId: body.defaultMilestoneResponsibleTeamleaderUserId },
+      });
+      return { defaultMilestoneResponsibleTeamleaderUserId: connection.defaultMilestoneResponsibleTeamleaderUserId };
     },
   );
 }

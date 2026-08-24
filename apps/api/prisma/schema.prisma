@@ -104,6 +104,61 @@ enum WorkOrderPdfStatus {
   @@map("work_order_pdf_status")
 }
 
+/// Phase 9 — Teamleader-sync (sectie 13/14/15/31). Bewust een APARTE enum van
+/// WorkOrderPdfStatus hierboven (sectie 31: "PDF EN TEAMLEADER MOETEN
+/// LOSGEKOPPELD ZIJN") — dit bewaakt enkel of ONZE eigen, al-gegenereerde PDF
+/// intussen ook effectief als bestand in Teamleader staat, los van de
+/// PDF-generatie zelf. Naamgeving letterlijk uit sectie 13 van de brief.
+enum WorkOrderTeamleaderUploadStatus {
+  TEAMLEADER_UPLOAD_PENDING
+  TEAMLEADER_UPLOADED
+  TEAMLEADER_UPLOAD_FAILED
+
+  @@map("work_order_teamleader_upload_status")
+}
+
+/// Phase 9 — sync-status per tijdsregistratie (sectie 14). NOT_SYNCED is de
+/// starttoestand voor elke nieuwe TimeEntry (ongeacht of ze ooit gesynchroniseerd
+/// zal worden — enkel tijdsregistraties die uiteindelijk in een ondertekende
+/// werkbon terechtkomen doorlopen PENDING → SYNCED/FAILED, zie TimeTrackingSyncService).
+enum TimeEntrySyncStatus {
+  NOT_SYNCED
+  PENDING
+  SYNCED
+  FAILED
+
+  @@map("time_entry_sync_status")
+}
+
+/// Phase 9 — het type achtergrondwerk achter één SyncJob-rij (sectie 15/23).
+/// Bewust twee aparte types (i.p.v. één gecombineerde "sync werkbon"-job) zodat
+/// een mislukte PDF-upload de tijdsregistratie-sync niet blokkeert en
+/// omgekeerd — elk kan onafhankelijk hersynchroniseren (sectie 13: "Een
+/// mislukte Teamleader upload mag NOOIT leiden tot verlies van de werkbon").
+enum SyncJobType {
+  TIME_ENTRIES
+  PDF_UPLOAD
+
+  @@map("sync_job_type")
+}
+
+enum SyncJobStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+
+  @@map("sync_job_status")
+}
+
+enum SyncLogStatus {
+  STARTED
+  SUCCEEDED
+  FAILED
+
+  @@map("sync_log_status")
+}
+
 model User {
   id     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email  String   @unique @db.Citext
@@ -241,6 +296,16 @@ model TeamleaderConnection {
   /// Mensentaal-samenvatting van de laatste fout (sectie 27) — null zolang alles goed gaat.
   lastError String? @map("last_error")
 
+  /// Phase 9 — Teamleader-user-ID gebruikt als `responsible_user_id` wanneer
+  /// TimeTrackingSyncService automatisch een nieuwe milestone aanmaakt voor
+  /// een project zonder gekozen/bestaande milestone (zie MilestoneSyncService).
+  /// Null = automatische aanmaak is niet geconfigureerd; de sync geeft dan een
+  /// duidelijke, actiegerichte foutmelding i.p.v. te gokken wie
+  /// verantwoordelijk moet zijn. Ingesteld door een admin op het
+  /// Teamleader-instellingenscherm (dropdown, gevuld via een live
+  /// `users.list`-aanroep — zie GET /admin/teamleader/users).
+  defaultMilestoneResponsibleTeamleaderUserId String? @map("default_milestone_responsible_teamleader_user_id")
+
   connectedByUserId String?   @map("connected_by_user_id") @db.Uuid
   connectedAt       DateTime? @map("connected_at") @db.Timestamptz
 
@@ -311,16 +376,78 @@ model Project {
   lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
 
+  /// Phase 9 — welke Teamleader-milestone van dit (legacy) project de
+  /// werkbon-uren van dit project ontvangt (zie MilestoneSyncService). Null
+  /// tot een admin/supervisor er één kiest, of tot de eerste sync er zelf één
+  /// aanmaakt (afhankelijk van TeamleaderConnection.defaultMilestoneResponsibleTeamleaderUserId).
+  /// Een aparte, expliciet genoemde relatie (i.p.v. de standaard/impliciete
+  /// Milestone.projectId-relatie hieronder) omdat een project meerdere
+  /// milestones kan hebben (via sync), maar hoogstens één ervan "de" milestone
+  /// voor werkbon-uren is.
+  timeTrackingMilestoneId String?    @map("time_tracking_milestone_id") @db.Uuid
+  timeTrackingMilestone   Milestone? @relation("ProjectTimeTrackingMilestone", fields: [timeTrackingMilestoneId], references: [id], onDelete: SetNull)
+
   customer    Customer             @relation(fields: [customerId], references: [id])
   assignments ProjectAssignment[]
   /// Tijdsregistraties op dit project (Phase 4 — zie TimeEntry hieronder).
   timeEntries TimeEntry[]
   /// Werkbonnen op dit project (Phase 5 — zie WorkOrder hieronder).
   workOrders  WorkOrder[]
+  /// Alle gesynchroniseerde milestones van dit project (Phase 9 — zie Milestone hieronder).
+  milestones  Milestone[]
 
   @@index([customerId])
   @@index([isArchivedInTl])
+  @@index([timeTrackingMilestoneId])
   @@map("project")
+}
+
+// ============================================================
+// Phase 9 — Teamleader-sync: tijdregistratie + PDF-upload (secties 13-15/23
+// van de projectbrief). Zie apps/api/src/modules/teamleader/milestone-sync.service.ts,
+// time-tracking-sync.service.ts, file-sync.service.ts en apps/api/src/modules/sync/.
+//
+// BELANGRIJKE, tegen de officiële Teamleader-API-documentatie geverifieerde
+// beperking (github.com/teamleadercrm/api/blob/master/apiary.apib, sectie
+// "Time Tracking"): `timeTracking.add` accepteert als `subject.type` enkel
+// company/contact/event/todo/milestone/ticket — GEEN `project` (sinds de
+// wijziging van 2019-07-03: "We won't accept `project` as a subject anymore
+// [...] time tracking always needs to be coupled to a milestone") en GEEN
+// `nextgenProject`/task. Swatt/Ecofinity's Teamleader-account gebruikt de
+// LEGACY-projectenmodule (bevestigd door Steven) — vandaar dat gesynchroniseerde
+// uren via een `milestone` moeten lopen, niet rechtstreeks via het project.
+// Voor een `projects-v2`-account biedt de huidige publieke API géén
+// gedocumenteerde manier om tijd aan het project/een taak te koppelen; die
+// tak is bewust NIET geïmplementeerd (zie TimeTrackingSyncService — geeft een
+// duidelijke, actiegerichte fout i.p.v. te gokken).
+// ============================================================
+
+/// Lokale cache van Teamleader-milestones (enkel relevant voor legacy-projecten
+/// — projects-v2 heeft geen milestone-concept). Gevuld door MilestoneSyncService
+/// via `milestones.list` (filter op `project_id`), of door onszelf aangemaakt
+/// via `milestones.create` wanneer een project nog geen (gekozen) milestone heeft.
+model Milestone {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  teamleaderId   String   @unique @map("teamleader_id")
+  projectId      String   @map("project_id") @db.Uuid
+  name           String
+  /// Ruwe Teamleader-statuswaarde ('open'/'closed') — puur informatief, zelfde patroon als Project.status.
+  status         String
+  dueOn          DateTime? @map("due_on") @db.Date
+  isArchivedInTl Boolean  @default(false) @map("is_archived_in_tl")
+
+  lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// Projecten die deze milestone als hun "werkbon-uren"-milestone gekozen hebben
+  /// (normaliter hoogstens één — de eigen `project` hierboven — maar Prisma vereist
+  /// deze inverse zijde voor de expliciet genoemde relatie op Project).
+  defaultForProjects Project[] @relation("ProjectTimeTrackingMilestone")
+
+  @@index([projectId])
+  @@map("milestone")
 }
 
 model ProjectAssignment {
@@ -373,6 +500,24 @@ model TimeEntry {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
+  /// Phase 9 — sync naar Teamleader (`timeTracking.add`, sectie 14). Business
+  /// rule 5: "Iedere tijdregistratie mag maar één keer naar Teamleader
+  /// gestuurd worden" — afgedwongen doordat TimeTrackingSyncService een
+  /// entry met syncStatus SYNCED altijd overslaat (nooit opnieuw post), plus
+  /// de unieke `teamleaderTimeTrackingId` hieronder als backstop tegen een
+  /// race condition tussen twee gelijktijdige sync-pogingen.
+  syncStatus               TimeEntrySyncStatus @default(NOT_SYNCED) @map("sync_status")
+  teamleaderTimeTrackingId String?             @unique @map("teamleader_time_tracking_id")
+  syncedAt                 DateTime?           @map("synced_at") @db.Timestamptz
+  /// SHA-256 van de canonieke payload die naar `timeTracking.add` gestuurd
+  /// werd/wordt — audit/diagnose-signaal (sectie 14: "payload hash"), niet de
+  /// idempotentiegarantie zelf (die zit in syncStatus/teamleaderTimeTrackingId
+  /// hierboven — een immutable, ondertekende werkbon kan sowieso nooit een
+  /// gewijzigde payload opnieuw genereren).
+  syncPayloadHash          String?             @map("sync_payload_hash")
+  /// Mensentaal-fout (sectie 27) van de laatste mislukte synchronisatiepoging — null zolang alles goed gaat of nog niet geprobeerd is.
+  syncError                String?             @map("sync_error")
+
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   project  Project  @relation(fields: [projectId], references: [id], onDelete: Restrict)
 
@@ -383,6 +528,7 @@ model TimeEntry {
 
   @@index([employeeId])
   @@index([projectId])
+  @@index([syncStatus])
   @@map("time_entry")
 }
 
@@ -446,10 +592,74 @@ model WorkOrder {
   pdfGeneratedAt DateTime?          @map("pdf_generated_at") @db.Timestamptz
   pdfError       String?            @map("pdf_error")
 
+  /// Phase 9 — upload van de (Phase 8-)PDF naar het gekoppelde Teamleader-project
+  /// (sectie 13), bewust losgekoppeld van pdfStatus hierboven (sectie 31).
+  /// `teamleaderFileId` is business rule 6's "hoogstens één actieve
+  /// Teamleader-file" — FileSyncService verwijdert (best-effort) het vorige
+  /// bestand vóór een reupload (bv. na "PDF opnieuw genereren").
+  teamleaderUploadStatus WorkOrderTeamleaderUploadStatus @default(TEAMLEADER_UPLOAD_PENDING) @map("teamleader_upload_status")
+  teamleaderFileId       String?                         @map("teamleader_file_id")
+  teamleaderUploadedAt   DateTime?                       @map("teamleader_uploaded_at") @db.Timestamptz
+  teamleaderUploadError  String?                         @map("teamleader_upload_error")
+
+  /// Phase 9 — achtergrond-syncjobs voor deze werkbon (TIME_ENTRIES + PDF_UPLOAD, zie SyncJob hieronder).
+  syncJobs SyncJob[]
+
   @@index([projectId])
   @@index([status])
   @@index([pdfStatus])
+  @@index([teamleaderUploadStatus])
   @@map("work_order")
+}
+
+/// Eén rij per (werkbon, syncsoort) — durable state, onafhankelijk van de
+/// BullMQ/Redis-queue zelf (sectie 15/23): zelfs als Redis leeg raakt, blijft
+/// hier zichtbaar wélke werkbonnen nog moeten (her)synchroniseren, en kan een
+/// admin "Opnieuw synchroniseren" gewoon een nieuwe queue-job aanmaken die
+/// deze rij hergebruikt (business rule 9 — externe-infrastructuurstoring mag
+/// nooit lokale data laten verloren gaan).
+model SyncJob {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workOrderId String        @map("work_order_id") @db.Uuid
+  type        SyncJobType
+  status      SyncJobStatus @default(PENDING)
+  attempts    Int           @default(0)
+
+  lastError       String?   @map("last_error")
+  lastAttemptedAt DateTime? @map("last_attempted_at") @db.Timestamptz
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  logs      SyncLog[]
+
+  /// Eén job per (werkbon, syncsoort) — een "opnieuw synchroniseren"-aanvraag
+  /// werkt de bestaande rij bij (attempts++) i.p.v. een duplicaat aan te maken.
+  @@unique([workOrderId, type])
+  @@index([status])
+  @@map("sync_job")
+}
+
+/// Append-only audittrail van elke sync-*poging* (sectie 23/26 — "Teamleader
+/// sync" / "Teamleader sync mislukt" moeten auditbaar zijn). `detail` is de
+/// ruwe/technische foutinformatie (sectie 27: "Administrator kan detail
+/// openen voor technische foutinformatie"); `message` is altijd mensentaal.
+model SyncLog {
+  id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  syncJobId String        @map("sync_job_id") @db.Uuid
+  attempt   Int
+  status    SyncLogStatus
+  message   String
+  detail    String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  syncJob SyncJob @relation(fields: [syncJobId], references: [id], onDelete: Cascade)
+
+  @@index([syncJobId])
+  @@map("sync_log")
 }
 
 /// Koppeltabel werkbon ↔ tijdsregistratie. `timeEntryId` is uniek: elke

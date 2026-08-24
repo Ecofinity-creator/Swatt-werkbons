@@ -1,13 +1,23 @@
 import type {
   ListProjectAssignmentsResponseBody,
   ListProjectsResponseBody,
+  MilestoneSummary,
+  MilestoneSyncResponseBody,
   ProjectSummary,
+  SelectProjectMilestoneBody,
+  SelectProjectMilestoneResponseBody,
 } from '@swatt/shared-types';
 import { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { AuthErrors, ProjectErrors } from '../../errors';
 import { requireRole } from '../rbac/rbac.middleware';
-import { employeeIdParamsSchema, listProjectsQuerySchema, projectAssignmentBodySchema } from './project.schemas';
+import {
+  employeeIdParamsSchema,
+  listProjectsQuerySchema,
+  projectAssignmentBodySchema,
+  projectIdParamsSchema,
+  selectProjectMilestoneBodySchema,
+} from './project.schemas';
 
 /**
  * Phase 3 (slice): read-only toegang tot de gesynchroniseerde Teamleader-
@@ -152,6 +162,55 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
       return null;
     },
   );
+
+  /**
+   * Phase 9 — haalt de (legacy-)milestones van dit project op via
+   * `milestones.list` en cachet ze lokaal (zie MilestoneSyncService). Bewust
+   * SUPERVISOR+ (net als de projectenlijst hierboven) — een supervisor kiest
+   * hier welke milestone de werkbon-uren van dit project ontvangt.
+   */
+  app.post(
+    '/admin/projects/:id/milestones/sync',
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+    async (request): Promise<MilestoneSyncResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const milestones = await app.milestoneSyncService.syncForProject(params.id);
+      const project = await app.prisma.project.findUniqueOrThrow({ where: { id: params.id } });
+      return {
+        milestones: milestones.map(toMilestoneSummary),
+        selectedMilestoneId: project.timeTrackingMilestoneId,
+      };
+    },
+  );
+
+  app.post(
+    '/admin/projects/:id/milestones/select',
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+    async (request): Promise<SelectProjectMilestoneResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const body: SelectProjectMilestoneBody = selectProjectMilestoneBodySchema.parse(request.body);
+      await app.milestoneSyncService.setProjectMilestone(params.id, body.milestoneId);
+      return { selectedMilestoneId: body.milestoneId };
+    },
+  );
+}
+
+function toMilestoneSummary(milestone: {
+  id: string;
+  teamleaderId: string;
+  name: string;
+  status: string;
+  dueOn: Date | null;
+  isArchivedInTl: boolean;
+}): MilestoneSummary {
+  return {
+    id: milestone.id,
+    teamleaderId: milestone.teamleaderId,
+    name: milestone.name,
+    status: milestone.status,
+    dueOn: milestone.dueOn ? milestone.dueOn.toISOString().slice(0, 10) : null,
+    isArchivedInTl: milestone.isArchivedInTl,
+  };
 }
 
 async function assertEmployeeExists(app: FastifyInstance, employeeId: string): Promise<void> {

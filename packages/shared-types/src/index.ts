@@ -113,6 +113,8 @@ export interface AdminUserSummary {
     phone: string | null;
   } | null;
   createdAt: string;
+  /** Phase 9 — gekoppelde Teamleader-gebruiker (sectie 14), `null` = nog niet gekoppeld. */
+  teamleaderUserId: string | null;
 }
 
 export interface ListUsersResponseBody {
@@ -351,6 +353,45 @@ export const WORK_ORDER_PDF_STATUS_LABELS: Record<WorkOrderPdfStatus, string> = 
   PDF_FAILED: 'PDF genereren mislukt',
 };
 
+/**
+ * Phase 9 — Teamleader-sync (secties 13-15/31). Bewust losgekoppeld van
+ * pdfStatus (Phase 8) — zie het uitgebreide commentaar bij
+ * WorkOrderTeamleaderUploadStatus in schema.prisma over waarom er géén
+ * gedocumenteerde manier bestaat om dit rechtstreeks aan een `nextgenProject`
+ * (Projects V2) te koppelen; Swatt/Ecofinity's account gebruikt de legacy-module.
+ */
+export const WORK_ORDER_TEAMLEADER_UPLOAD_STATUSES = [
+  'TEAMLEADER_UPLOAD_PENDING',
+  'TEAMLEADER_UPLOADED',
+  'TEAMLEADER_UPLOAD_FAILED',
+] as const;
+export type WorkOrderTeamleaderUploadStatus = (typeof WORK_ORDER_TEAMLEADER_UPLOAD_STATUSES)[number];
+
+export const WORK_ORDER_TEAMLEADER_UPLOAD_STATUS_LABELS: Record<WorkOrderTeamleaderUploadStatus, string> = {
+  TEAMLEADER_UPLOAD_PENDING: 'Nog niet naar Teamleader geüpload',
+  TEAMLEADER_UPLOADED: 'Geüpload naar Teamleader',
+  TEAMLEADER_UPLOAD_FAILED: 'Uploaden naar Teamleader mislukt',
+};
+
+/** Phase 9 — sync-status per tijdsregistratie (sectie 14). */
+export const TIME_ENTRY_SYNC_STATUSES = ['NOT_SYNCED', 'PENDING', 'SYNCED', 'FAILED'] as const;
+export type TimeEntrySyncStatus = (typeof TIME_ENTRY_SYNC_STATUSES)[number];
+
+/**
+ * Samengestelde weergave van de tijdregistratie-sync over de hele werkbon
+ * (i.p.v. een aparte status per tijdregistratie in de UI) — berekend in de
+ * backend (zie work-order.service.ts, `deriveTimeTrackingSyncStatus`):
+ * SYNCED enkel als élke gekoppelde tijdregistratie SYNCED is, FAILED als er
+ * minstens één FAILED is (ongeacht de rest), anders PENDING/NOT_SYNCED naar
+ * de "minst gevorderde" toestand.
+ */
+export const WORK_ORDER_TIME_TRACKING_SYNC_STATUS_LABELS: Record<TimeEntrySyncStatus, string> = {
+  NOT_SYNCED: 'Uren nog niet gesynchroniseerd',
+  PENDING: 'Uren worden gesynchroniseerd...',
+  SYNCED: 'Uren gesynchroniseerd',
+  FAILED: 'Synchroniseren van uren mislukt',
+};
+
 export interface WorkOrderSummary {
   id: string;
   workOrderNumber: string;
@@ -369,6 +410,13 @@ export interface WorkOrderSummary {
   pdfGeneratedAt: string | null;
   /** Mensentaal-boodschap (sectie 27) — enkel gezet wanneer pdfStatus === 'PDF_FAILED'. */
   pdfError: string | null;
+  /** Phase 9 — zie WORK_ORDER_TIME_TRACKING_SYNC_STATUS_LABELS hierboven. */
+  timeTrackingSyncStatus: TimeEntrySyncStatus;
+  /** Mensentaal-boodschap van de laatst mislukte tijdregistratie-sync, indien van toepassing. */
+  timeTrackingSyncError: string | null;
+  teamleaderUploadStatus: WorkOrderTeamleaderUploadStatus;
+  teamleaderUploadedAt: string | null;
+  teamleaderUploadError: string | null;
 }
 
 /** Body van POST /work-orders. */
@@ -382,3 +430,88 @@ export interface CreateWorkOrderBody {
 export interface WorkOrderResponseBody {
   workOrder: WorkOrderSummary;
 }
+
+// ============================================================
+// Phase 9 — Teamleader-sync. Zie apps/api/src/modules/sync/,
+// apps/api/src/modules/teamleader/{milestone,time-tracking,file}-sync.service.ts.
+// ============================================================
+
+/** Publieke weergave van een uit Teamleader gesynchroniseerde (legacy) milestone. */
+export interface MilestoneSummary {
+  id: string;
+  teamleaderId: string;
+  name: string;
+  status: string;
+  dueOn: string | null;
+  isArchivedInTl: boolean;
+}
+
+/** Response van POST /admin/projects/:id/milestones/sync. */
+export interface MilestoneSyncResponseBody {
+  milestones: MilestoneSummary[];
+  /** De op dit moment ingestelde "werkbon-uren"-milestone voor dit project, indien gekozen (zie project.timeTrackingMilestoneId). */
+  selectedMilestoneId: string | null;
+}
+
+/** Body van POST /admin/projects/:id/milestones/select. */
+export interface SelectProjectMilestoneBody {
+  /** `null` = koppeling opheffen (project valt terug op automatische aanmaak bij de volgende sync). */
+  milestoneId: string | null;
+}
+
+export interface SelectProjectMilestoneResponseBody {
+  selectedMilestoneId: string | null;
+}
+
+/** Eén Teamleader-gebruiker zoals live opgehaald via `users.list` (GET /admin/teamleader/users) — geen lokale cache/tabel, zie teamleader-user.service.ts. */
+export interface TeamleaderUserOption {
+  id: string;
+  /** Voor- en achternaam samengevoegd, of het e-mailadres wanneer Teamleader geen naam teruggeeft. */
+  displayName: string;
+}
+
+export interface ListTeamleaderUsersResponseBody {
+  users: TeamleaderUserOption[];
+}
+
+/** Body van POST /admin/users/:id/update — uitgebreid met de Phase 9-koppeling (los van UpdateUserBody hierboven, dezelfde route accepteert beide). */
+export interface LinkTeamleaderUserBody {
+  /** `null` = koppeling opheffen. */
+  teamleaderUserId?: string | null;
+}
+
+/** Body van POST /admin/teamleader/settings — instelling voor automatische milestone-aanmaak (zie TeamleaderConnection.defaultMilestoneResponsibleTeamleaderUserId). */
+export interface UpdateTeamleaderSettingsBody {
+  defaultMilestoneResponsibleTeamleaderUserId: string | null;
+}
+
+export interface TeamleaderSettingsResponseBody {
+  defaultMilestoneResponsibleTeamleaderUserId: string | null;
+}
+
+/** Eén regel in het overzicht "Synchronisatiefouten" (sectie 4/13 — supervisor behandelt sync-fouten). */
+export interface WorkOrderSyncIssueSummary {
+  id: string;
+  workOrderNumber: string;
+  projectName: string;
+  customerName: string;
+  status: WorkOrderStatus;
+  timeTrackingSyncStatus: TimeEntrySyncStatus;
+  timeTrackingSyncError: string | null;
+  teamleaderUploadStatus: WorkOrderTeamleaderUploadStatus;
+  teamleaderUploadError: string | null;
+  updatedAt: string;
+}
+
+/** Response van GET /admin/work-orders/sync-issues. */
+export interface ListWorkOrderSyncIssuesResponseBody {
+  workOrders: WorkOrderSyncIssueSummary[];
+}
+
+/**
+ * Response van POST /work-orders/:id/sync/retry — handmatige herstelactie
+ * (sectie 13: "Administrator moet handmatig: Opnieuw synchroniseren kunnen
+ * kiezen"), herbruikt dezelfde WorkOrderResponseBody-vorm als de rest van de
+ * werkbon-routes zodat de UI na een retry gewoon de bijgewerkte werkbon toont.
+ */
+export type RetryWorkOrderSyncResponseBody = WorkOrderResponseBody;

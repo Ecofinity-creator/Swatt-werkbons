@@ -1,10 +1,17 @@
-import { roleAtLeast, type WorkOrderPhotoSummary, type WorkOrderResponseBody, type WorkOrderSummary } from '@swatt/shared-types';
+import {
+  roleAtLeast,
+  type ListWorkOrderSyncIssuesResponseBody,
+  type WorkOrderPhotoSummary,
+  type WorkOrderResponseBody,
+  type WorkOrderSummary,
+  type WorkOrderSyncIssueSummary,
+} from '@swatt/shared-types';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuthErrors, WorkOrderErrors } from '../../errors';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
 import type { WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
-import { WorkOrderService } from './work-order.service';
+import { WorkOrderService, deriveTimeTrackingSyncError, deriveTimeTrackingSyncStatus } from './work-order.service';
 import { WorkOrderPdfService } from './work-order-pdf.service';
 import { WorkOrderPhotoService } from './work-order-photo.service';
 import { WorkOrderSignatureService } from './work-order-signature.service';
@@ -109,9 +116,62 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
       // response, met "PDF opnieuw genereren" als handmatige herstelactie.
       await pdfService.generate(params.id);
 
+      // Phase 9 — meteen daarna de Teamleader-sync inplannen (sectie 34,
+      // stappen 6-8: tijdregistraties + PDF naar Teamleader). Dit gebeurt
+      // asynchroon via de queue (SyncJobService) — het antwoord op deze
+      // request wacht daar niet op, de werkbon toont meteen status
+      // SYNC_PENDING en de UI kan nadien pollen/vernieuwen.
+      await app.syncJobService.enqueueForWorkOrder(params.id);
+
       const workOrder = await service.get(params.id);
       reply.code(201);
       return { workOrder: await toSummary(storage, workOrder) };
+    },
+  );
+
+  /**
+   * Phase 9 — handmatige herstelactie (sectie 13: "Administrator moet
+   * handmatig: Opnieuw synchroniseren kunnen kiezen"), voor de
+   * tijdregistratie- én PDF-upload-sync samen (SyncJobService.retry() slaat
+   * reeds geslaagde onderdelen automatisch over). SUPERVISOR+, zelfde reden
+   * als PDF-regeneratie hierboven (sectie 4: "synchronisatiefouten behandelen").
+   */
+  app.post(
+    '/work-orders/:id/sync/retry',
+    { preHandler: [app.authenticate] },
+    async (request): Promise<WorkOrderResponseBody> => {
+      const user = request.currentUser;
+      if (!user || !roleAtLeast(user.role, 'SUPERVISOR')) {
+        throw AuthErrors.insufficientRole();
+      }
+      const params = workOrderIdParamsSchema.parse(request.params);
+
+      const workOrder = await service.get(params.id);
+      if (workOrder.status === 'DRAFT' || workOrder.status === 'READY_FOR_SIGNATURE') {
+        throw WorkOrderErrors.notSignedForSync();
+      }
+
+      await app.syncJobService.retry(params.id);
+
+      const refreshed = await service.get(params.id);
+      return { workOrder: await toSummary(storage, refreshed) };
+    },
+  );
+
+  /**
+   * Phase 9 — overzicht "Synchronisatiefouten" (sectie 4/13). SUPERVISOR+,
+   * zelfde rechten als de rest van het sync-beheer.
+   */
+  app.get(
+    '/admin/work-orders/sync-issues',
+    { preHandler: [app.authenticate] },
+    async (request): Promise<ListWorkOrderSyncIssuesResponseBody> => {
+      const user = request.currentUser;
+      if (!user || !roleAtLeast(user.role, 'SUPERVISOR')) {
+        throw AuthErrors.insufficientRole();
+      }
+      const workOrders = await service.listSyncIssues();
+      return { workOrders: workOrders.map(toSyncIssueSummary) };
     },
   );
 
@@ -243,9 +303,30 @@ async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): P
     pdfFileName: workOrder.pdfFileName,
     pdfGeneratedAt: workOrder.pdfGeneratedAt ? workOrder.pdfGeneratedAt.toISOString() : null,
     pdfError: workOrder.pdfError,
+    timeTrackingSyncStatus: deriveTimeTrackingSyncStatus(workOrder.timeEntries),
+    timeTrackingSyncError: deriveTimeTrackingSyncError(workOrder.timeEntries),
+    teamleaderUploadStatus: workOrder.teamleaderUploadStatus,
+    teamleaderUploadedAt: workOrder.teamleaderUploadedAt ? workOrder.teamleaderUploadedAt.toISOString() : null,
+    teamleaderUploadError: workOrder.teamleaderUploadError,
   };
 }
 
 function toDataUrl(mimeType: string, data: Buffer): string {
   return `data:${mimeType};base64,${data.toString('base64')}`;
+}
+
+/** Phase 9 — lichte rij voor het overzicht "Synchronisatiefouten" (geen foto's/handtekening-bytes nodig). */
+function toSyncIssueSummary(workOrder: WorkOrderRecord): WorkOrderSyncIssueSummary {
+  return {
+    id: workOrder.id,
+    workOrderNumber: workOrder.workOrderNumber,
+    projectName: workOrder.project.name,
+    customerName: workOrder.project.customer.name,
+    status: workOrder.status,
+    timeTrackingSyncStatus: deriveTimeTrackingSyncStatus(workOrder.timeEntries),
+    timeTrackingSyncError: deriveTimeTrackingSyncError(workOrder.timeEntries),
+    teamleaderUploadStatus: workOrder.teamleaderUploadStatus,
+    teamleaderUploadError: workOrder.teamleaderUploadError,
+    updatedAt: workOrder.updatedAt.toISOString(),
+  };
 }

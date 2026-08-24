@@ -6,14 +6,22 @@ import type {
   CreateUserResponseBody,
   ListProjectAssignmentsResponseBody,
   ListProjectsResponseBody,
+  ListTeamleaderUsersResponseBody,
   ListUsersResponseBody,
+  ListWorkOrderSyncIssuesResponseBody,
+  LinkTeamleaderUserBody,
   LoginResponseBody,
+  MilestoneSyncResponseBody,
   PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
   CreateWorkOrderBody,
+  RetryWorkOrderSyncResponseBody,
+  SelectProjectMilestoneResponseBody,
   SignWorkOrderBody,
+  TeamleaderSettingsResponseBody,
   TeamleaderStatusResponseBody,
   TimeEntryResponseBody,
+  UpdateTeamleaderSettingsBody,
   UpdateUserBody,
   UpdateUserResponseBody,
   WorkOrderResponseBody,
@@ -146,6 +154,19 @@ export const teamleaderApi = {
     window.location.href = `${TEAMLEADER_DIRECT_API_URL}/teamleader/oauth/authorize?token=${encodeURIComponent(token)}`;
   },
   syncProjects: () => request<ProjectSyncResponseBody>('/admin/teamleader/sync/projects', { method: 'POST' }),
+  /**
+   * Phase 9 — instelling voor automatische milestone-aanmaak (sectie 14,
+   * `milestones.create`'s verplichte `responsible_user_id`), zie
+   * MilestoneSyncService.resolveOrCreateTeamleaderMilestoneId.
+   */
+  settings: {
+    get: () => request<TeamleaderSettingsResponseBody>('/admin/teamleader/settings', { method: 'GET' }),
+    update: (body: UpdateTeamleaderSettingsBody) =>
+      request<TeamleaderSettingsResponseBody>('/admin/teamleader/settings', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+  },
 };
 
 /**
@@ -157,11 +178,18 @@ export const usersApi = {
   list: () => request<ListUsersResponseBody>('/admin/users', { method: 'GET' }),
   create: (body: CreateUserBody) =>
     request<CreateUserResponseBody>('/admin/users', { method: 'POST', body: JSON.stringify(body) }),
-  update: (userId: string, body: UpdateUserBody) =>
+  /**
+   * Zelfde route accepteert zowel UpdateUserBody-velden (rol, actief, ...)
+   * als de Phase 9-koppeling (teamleaderUserId) — zie LinkTeamleaderUserBody
+   * in shared-types en user.routes.ts.
+   */
+  update: (userId: string, body: UpdateUserBody & LinkTeamleaderUserBody) =>
     request<UpdateUserResponseBody>(`/admin/users/${userId}/update`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** Phase 9 — live opvraging van Teamleader-gebruikers voor de koppelingsdropdown (zie teamleader-user.service.ts). */
+  teamleaderUsers: () => request<ListTeamleaderUsersResponseBody>('/admin/teamleader/users', { method: 'GET' }),
 };
 
 /**
@@ -208,6 +236,18 @@ export const workOrdersApi = {
    */
   regeneratePdf: (workOrderId: string) =>
     request<WorkOrderResponseBody>(`/work-orders/${workOrderId}/pdf/regenerate`, { method: 'POST' }),
+  /**
+   * Phase 9 — sectie 13: "Administrator moet handmatig: Opnieuw
+   * synchroniseren kunnen kiezen". Herqueuet enkel de nog-niet-geslaagde
+   * synctypes (uren/PDF) — zie SyncJobService.retry.
+   */
+  retrySync: (workOrderId: string) =>
+    request<RetryWorkOrderSyncResponseBody>(`/work-orders/${workOrderId}/sync/retry`, { method: 'POST' }),
+};
+
+/** Phase 9 — overzicht "Synchronisatiefouten" (sectie 4/13). */
+export const syncIssuesApi = {
+  list: () => request<ListWorkOrderSyncIssuesResponseBody>('/admin/work-orders/sync-issues', { method: 'GET' }),
 };
 
 /**
@@ -245,6 +285,20 @@ export const projectsApi = {
       request<void>(`/admin/employees/${employeeId}/project-assignments/remove`, {
         method: 'POST',
         body: JSON.stringify({ projectId }),
+      }),
+  },
+  /**
+   * Phase 9 — de "flexibele" milestone-strategie (zie MilestoneSyncService):
+   * een supervisor haalt de legacy-milestones van een project op en kiest er
+   * eentje om de werkbon-uren van dat project te ontvangen (sectie 14).
+   */
+  milestones: {
+    sync: (projectId: string) =>
+      request<MilestoneSyncResponseBody>(`/admin/projects/${projectId}/milestones/sync`, { method: 'POST' }),
+    select: (projectId: string, milestoneId: string | null) =>
+      request<SelectProjectMilestoneResponseBody>(`/admin/projects/${projectId}/milestones/select`, {
+        method: 'POST',
+        body: JSON.stringify({ milestoneId }),
       }),
   },
 };

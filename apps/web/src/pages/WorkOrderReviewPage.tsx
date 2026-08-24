@@ -1,5 +1,11 @@
 import type { WorkOrderPhotoCategory, WorkOrderSummary } from '@swatt/shared-types';
-import { roleAtLeast, WORK_ORDER_PHOTO_CATEGORY_LABELS, WORK_ORDER_PDF_STATUS_LABELS } from '@swatt/shared-types';
+import {
+  roleAtLeast,
+  WORK_ORDER_PHOTO_CATEGORY_LABELS,
+  WORK_ORDER_PDF_STATUS_LABELS,
+  WORK_ORDER_TEAMLEADER_UPLOAD_STATUS_LABELS,
+  WORK_ORDER_TIME_TRACKING_SYNC_STATUS_LABELS,
+} from '@swatt/shared-types';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { workOrderPhotosApi, workOrdersApi } from '../api/client';
@@ -42,6 +48,9 @@ export function WorkOrderReviewPage() {
 
   const [isRegeneratingPdf, setIsRegeneratingPdf] = useState(false);
   const [regeneratePdfError, setRegeneratePdfError] = useState<string | null>(null);
+
+  const [isRetryingSync, setIsRetryingSync] = useState(false);
+  const [retrySyncError, setRetrySyncError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!workOrderId) return;
@@ -145,6 +154,21 @@ export function WorkOrderReviewPage() {
     }
   }
 
+  /** Phase 9 — sectie 13: handmatige "Opnieuw synchroniseren" (SUPERVISOR+, zie SyncJobService.retry). */
+  async function handleRetrySync() {
+    if (!workOrderId) return;
+    setRetrySyncError(null);
+    setIsRetryingSync(true);
+    try {
+      const response = await workOrdersApi.retrySync(workOrderId);
+      setWorkOrder(response.workOrder);
+    } catch (err) {
+      setRetrySyncError(err instanceof ApiRequestError ? err.message : 'Opnieuw synchroniseren is mislukt.');
+    } finally {
+      setIsRetryingSync(false);
+    }
+  }
+
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
       <header className="mb-8 flex items-center justify-between">
@@ -169,6 +193,9 @@ export function WorkOrderReviewPage() {
           isRegeneratingPdf={isRegeneratingPdf}
           regeneratePdfError={regeneratePdfError}
           onRegeneratePdf={() => void handleRegeneratePdf()}
+          isRetryingSync={isRetryingSync}
+          retrySyncError={retrySyncError}
+          onRetrySync={() => void handleRetrySync()}
         />
       )}
 
@@ -479,12 +506,18 @@ function SignedWorkOrderView({
   isRegeneratingPdf,
   regeneratePdfError,
   onRegeneratePdf,
+  isRetryingSync,
+  retrySyncError,
+  onRetrySync,
 }: {
   workOrder: WorkOrderSummary;
   canManagePdf: boolean;
   isRegeneratingPdf: boolean;
   regeneratePdfError: string | null;
   onRegeneratePdf: () => void;
+  isRetryingSync: boolean;
+  retrySyncError: string | null;
+  onRetrySync: () => void;
 }) {
   return (
     <div className="flex flex-col gap-6">
@@ -492,6 +525,15 @@ function SignedWorkOrderView({
         Deze werkbon is ondertekend en kan niet meer gewijzigd worden.
       </div>
       <WorkOrderSummaryCard workOrder={workOrder} />
+
+      {canManagePdf && (
+        <TeamleaderSyncSection
+          workOrder={workOrder}
+          isRetryingSync={isRetryingSync}
+          retrySyncError={retrySyncError}
+          onRetrySync={onRetrySync}
+        />
+      )}
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-swatt-gold">Werkbon-PDF</h2>
@@ -556,6 +598,65 @@ function SignedWorkOrderView({
         </section>
       )}
     </div>
+  );
+}
+
+/**
+ * Phase 9 — sectie 13/14/34: toont de voortgang van de Teamleader-sync (uren
+ * + PDF-upload) en biedt SUPERVISOR+ de "Opnieuw synchroniseren"-herstelactie
+ * uit sectie 13 aan zodra minstens één van beide gefaald is. Enkel zichtbaar
+ * voor wie de PDF ook mag beheren (canManagePdf) — dezelfde SUPERVISOR+-grens.
+ */
+function TeamleaderSyncSection({
+  workOrder,
+  isRetryingSync,
+  retrySyncError,
+  onRetrySync,
+}: {
+  workOrder: WorkOrderSummary;
+  isRetryingSync: boolean;
+  retrySyncError: string | null;
+  onRetrySync: () => void;
+}) {
+  const hasFailure = workOrder.timeTrackingSyncStatus === 'FAILED' || workOrder.teamleaderUploadStatus === 'TEAMLEADER_UPLOAD_FAILED';
+
+  return (
+    <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-swatt-gold">Teamleader-synchronisatie</h2>
+      <dl className="space-y-2 text-sm">
+        <div className="flex items-center justify-between">
+          <dt className="text-neutral-400">Uren</dt>
+          <dd className={workOrder.timeTrackingSyncStatus === 'FAILED' ? 'text-red-300' : 'text-neutral-200'}>
+            {WORK_ORDER_TIME_TRACKING_SYNC_STATUS_LABELS[workOrder.timeTrackingSyncStatus]}
+          </dd>
+        </div>
+        <div className="flex items-center justify-between">
+          <dt className="text-neutral-400">Werkbon-PDF</dt>
+          <dd className={workOrder.teamleaderUploadStatus === 'TEAMLEADER_UPLOAD_FAILED' ? 'text-red-300' : 'text-neutral-200'}>
+            {WORK_ORDER_TEAMLEADER_UPLOAD_STATUS_LABELS[workOrder.teamleaderUploadStatus]}
+          </dd>
+        </div>
+      </dl>
+
+      {workOrder.timeTrackingSyncError && (
+        <p className="mt-3 text-sm text-red-300">{workOrder.timeTrackingSyncError}</p>
+      )}
+      {workOrder.teamleaderUploadError && (
+        <p className="mt-1 text-sm text-red-300">{workOrder.teamleaderUploadError}</p>
+      )}
+      {retrySyncError && <p className="mt-2 text-sm text-red-300">{retrySyncError}</p>}
+
+      {hasFailure && (
+        <button
+          type="button"
+          onClick={onRetrySync}
+          disabled={isRetryingSync}
+          className="mt-4 rounded-lg border border-neutral-700 px-4 py-3 text-sm font-semibold text-neutral-200 disabled:opacity-60"
+        >
+          {isRetryingSync ? 'Bezig...' : 'Opnieuw synchroniseren'}
+        </button>
+      )}
+    </section>
   );
 }
 

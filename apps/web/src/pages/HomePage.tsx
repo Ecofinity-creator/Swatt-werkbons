@@ -71,6 +71,24 @@ export function HomePage() {
         </Link>
       )}
 
+      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
+        <Link
+          to="/backoffice/projecten"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Projecten
+        </Link>
+      )}
+
+      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
+        <Link
+          to="/backoffice/sync-fouten"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Synchronisatiefouten
+        </Link>
+      )}
+
       {user.role === 'ADMIN' && (
         <Link
           to="/instellingen/teamleader"

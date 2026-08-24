@@ -18,6 +18,8 @@ export const updateUserBodySchema = z.object({
   isActive: z.boolean().optional(),
   displayName: z.string().trim().min(1, 'Naam mag niet leeg zijn').optional(),
   phone: z.string().trim().min(1).nullable().optional(),
+  /** Phase 9 — koppeling met een Teamleader-gebruiker (sectie 14/23), zie GET /admin/teamleader/users. `null` heft de koppeling op. */
+  teamleaderUserId: z.string().trim().min(1).nullable().optional(),
 });
 
 export type UpdateUserBody = z.infer<typeof updateUserBodySchema>;

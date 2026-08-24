@@ -11,6 +11,8 @@ import { ProjectTimerPage } from './pages/ProjectTimerPage';
 import { SetPasswordPage } from './pages/SetPasswordPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
 import { WorkOrderReviewPage } from './pages/WorkOrderReviewPage';
+import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
+import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { UsersPage } from './pages/admin/UsersPage';
 
@@ -104,6 +106,22 @@ export function App() {
         element={
           <RequireAuth minimumRole="SUPERVISOR">
             <UserDetailPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/projecten"
+        element={
+          <RequireAuth minimumRole="SUPERVISOR">
+            <ProjectMilestonesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/sync-fouten"
+        element={
+          <RequireAuth minimumRole="SUPERVISOR">
+            <SyncIssuesPage />
           </RequireAuth>
         }
       />

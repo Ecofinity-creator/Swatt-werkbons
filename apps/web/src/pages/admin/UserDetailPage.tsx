@@ -1,4 +1,4 @@
-import type { AdminUserSummary, ProjectSummary, UserRole } from '@swatt/shared-types';
+import type { AdminUserSummary, ProjectSummary, TeamleaderUserOption, UserRole } from '@swatt/shared-types';
 import { USER_ROLES } from '@swatt/shared-types';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -27,6 +27,10 @@ export function UserDetailPage() {
   const [assignedProjectIds, setAssignedProjectIds] = useState<Set<string>>(new Set());
   const [projectSearch, setProjectSearch] = useState('');
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
+
+  // Phase 9 — koppeling met een Teamleader-gebruiker (sectie 14: `timeTracking.add`'s `user_id`).
+  const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
+  const [isSavingTeamleaderLink, setIsSavingTeamleaderLink] = useState(false);
 
   const loadUser = useCallback(async () => {
     if (!userId) return;
@@ -59,6 +63,26 @@ export function UserDetailPage() {
       .then((response) => setAllProjects(response.projects))
       .catch(() => setAllProjects([]));
   }, [projectSearch]);
+
+  useEffect(() => {
+    usersApi
+      .teamleaderUsers()
+      .then((response) => setTeamleaderUsers(response.users))
+      .catch(() => setTeamleaderUsers([]));
+  }, []);
+
+  async function updateTeamleaderUserId(teamleaderUserId: string) {
+    if (!userId) return;
+    setIsSavingTeamleaderLink(true);
+    try {
+      const response = await usersApi.update(userId, { teamleaderUserId: teamleaderUserId || null });
+      setUser(response.user);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Koppelen aan een Teamleader-gebruiker is mislukt.');
+    } finally {
+      setIsSavingTeamleaderLink(false);
+    }
+  }
 
   async function updateRole(role: UserRole) {
     if (!userId) return;
@@ -173,6 +197,30 @@ export function UserDetailPage() {
                 {user.isActive ? 'Deactiveren' : 'Heractiveren'}
               </button>
             </div>
+          </section>
+
+          <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+            <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Teamleader-gebruiker</h2>
+            <p className="mb-4 text-sm text-neutral-500">
+              Nodig om tijdsregistraties op naam van deze medewerker naar Teamleader te synchroniseren (sectie 14).
+            </p>
+            {teamleaderUsers === null ? (
+              <p className="text-sm text-neutral-500">Teamleader-gebruikers laden...</p>
+            ) : (
+              <select
+                value={user.teamleaderUserId ?? ''}
+                disabled={isSavingTeamleaderLink}
+                onChange={(e) => void updateTeamleaderUserId(e.target.value)}
+                className="w-full max-w-sm rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+              >
+                <option value="">Niet gekoppeld</option>
+                {teamleaderUsers.map((teamleaderUser) => (
+                  <option key={teamleaderUser.id} value={teamleaderUser.id}>
+                    {teamleaderUser.displayName}
+                  </option>
+                ))}
+              </select>
+            )}
           </section>
 
           {user.employee && (

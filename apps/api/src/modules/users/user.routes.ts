@@ -1,13 +1,15 @@
 import type {
   AdminUserSummary,
   CreateUserResponseBody,
+  ListTeamleaderUsersResponseBody,
   ListUsersResponseBody,
   UpdateUserResponseBody,
   UserRole,
 } from '@swatt/shared-types';
+import { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { UserErrors } from '../../errors';
+import { TeamleaderErrors, UserErrors } from '../../errors';
 import { buildInviteEmail } from '../auth/auth-emails';
 import { requireRole } from '../rbac/rbac.middleware';
 import { createUserBodySchema, updateUserBodySchema } from './user.schemas';
@@ -128,11 +130,44 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
+      // Phase 9 — koppeling met een Teamleader-gebruiker (sectie 14/23). Geen
+      // aparte uniciteitscontrole nodig: User.teamleaderUserId heeft al een
+      // unieke DB-constraint (zie schema.prisma) — een dubbele koppeling geeft
+      // dus gewoon een duidelijke P2002-gebaseerde fout via de generieke
+      // errorhandler i.p.v. hier zelf te controleren.
+      if (body.teamleaderUserId !== undefined) {
+        try {
+          await app.prisma.user.update({
+            where: { id: params.id },
+            data: { teamleaderUserId: body.teamleaderUserId },
+          });
+        } catch (err) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+            throw TeamleaderErrors.teamleaderUserAlreadyLinked();
+          }
+          throw err;
+        }
+      }
+
       const updated = await app.prisma.user.findUniqueOrThrow({
         where: { id: params.id },
         include: { employee: true },
       });
       return { user: toAdminUserSummary(updated) };
+    },
+  );
+
+  /**
+   * Phase 9 — live opvraging van Teamleader-gebruikers voor de
+   * koppelingsdropdown hierboven (zie teamleader-user.service.ts). Bewust
+   * ADMIN-only, zelfde als de rest van het gebruikersbeheer.
+   */
+  app.get(
+    '/admin/teamleader/users',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (): Promise<ListTeamleaderUsersResponseBody> => {
+      const users = await app.teamleaderUserService.listActiveUsers();
+      return { users };
     },
   );
 }
@@ -147,6 +182,7 @@ function toAdminUserSummary(user: {
   role: UserRole;
   isActive: boolean;
   createdAt: Date;
+  teamleaderUserId: string | null;
   employee: { id: string; displayName: string; phone: string | null } | null;
 }): AdminUserSummary {
   return {
@@ -158,5 +194,6 @@ function toAdminUserSummary(user: {
       ? { id: user.employee.id, displayName: user.employee.displayName, phone: user.employee.phone }
       : null,
     createdAt: user.createdAt.toISOString(),
+    teamleaderUserId: user.teamleaderUserId,
   };
 }

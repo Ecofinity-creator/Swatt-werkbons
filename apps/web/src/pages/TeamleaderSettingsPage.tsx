@@ -1,7 +1,7 @@
-import type { ProjectSyncResponseBody, TeamleaderStatusResponseBody } from '@swatt/shared-types';
+import type { ProjectSyncResponseBody, TeamleaderStatusResponseBody, TeamleaderUserOption } from '@swatt/shared-types';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { teamleaderApi } from '../api/client';
+import { teamleaderApi, usersApi } from '../api/client';
 import { ApiRequestError } from '../auth/AuthContext';
 
 const PROJECTS_MODULE_LABELS: Record<string, string> = {
@@ -53,6 +53,13 @@ export function TeamleaderSettingsPage() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
+  // Phase 9 — instelling voor automatische milestone-aanmaak (sectie 14).
+  const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
+  const [defaultMilestoneUserId, setDefaultMilestoneUserId] = useState<string | null>(null);
+  const [isSavingMilestoneSetting, setIsSavingMilestoneSetting] = useState(false);
+  const [milestoneSettingError, setMilestoneSettingError] = useState<string | null>(null);
+  const [milestoneSettingSaved, setMilestoneSettingSaved] = useState(false);
+
   const callbackError = searchParams.get('teamleaderError');
   const justConnected = searchParams.get('teamleaderConnected') === '1';
 
@@ -69,6 +76,35 @@ export function TeamleaderSettingsPage() {
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
+
+  useEffect(() => {
+    if (status?.status !== 'CONNECTED') return;
+    teamleaderApi.settings
+      .get()
+      .then((response) => setDefaultMilestoneUserId(response.defaultMilestoneResponsibleTeamleaderUserId))
+      .catch(() => {
+        // Best-effort — de rest van de pagina blijft bruikbaar zonder deze instelling geladen te hebben.
+      });
+    usersApi
+      .teamleaderUsers()
+      .then((response) => setTeamleaderUsers(response.users))
+      .catch(() => setTeamleaderUsers([]));
+  }, [status?.status]);
+
+  async function handleSaveMilestoneSetting(userId: string) {
+    setIsSavingMilestoneSetting(true);
+    setMilestoneSettingError(null);
+    setMilestoneSettingSaved(false);
+    try {
+      const response = await teamleaderApi.settings.update({ defaultMilestoneResponsibleTeamleaderUserId: userId || null });
+      setDefaultMilestoneUserId(response.defaultMilestoneResponsibleTeamleaderUserId);
+      setMilestoneSettingSaved(true);
+    } catch (err) {
+      setMilestoneSettingError(err instanceof ApiRequestError ? err.message : 'Opslaan van de instelling is mislukt.');
+    } finally {
+      setIsSavingMilestoneSetting(false);
+    }
+  }
 
   useEffect(() => {
     // Query-params opruimen zodat een herlaadbeurt de melding niet blijft herhalen.
@@ -204,6 +240,41 @@ export function TeamleaderSettingsPage() {
           >
             {isSyncingProjects ? 'Bezig met synchroniseren...' : 'Synchroniseer projecten'}
           </button>
+        </section>
+      )}
+
+      {status?.status === 'CONNECTED' && (
+        <section className="mt-6 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+          <p className="text-sm text-neutral-400">Automatische milestone-aanmaak</p>
+          <p className="mt-1 text-sm text-neutral-300">
+            Wanneer een project (zie{' '}
+            <Link to="/backoffice/projecten" className="underline">
+              Projecten
+            </Link>
+            ) geen werkbon-uren-milestone gekozen heeft, maakt de app er automatisch één aan in Teamleader — dit
+            vereist een verantwoordelijke Teamleader-gebruiker (verplicht veld bij <code>milestones.create</code>).
+          </p>
+
+          {milestoneSettingError && <p className="mt-3 text-sm text-red-300">{milestoneSettingError}</p>}
+          {milestoneSettingSaved && <p className="mt-3 text-sm text-emerald-300">Instelling opgeslagen.</p>}
+
+          {teamleaderUsers === null ? (
+            <p className="mt-4 text-sm text-neutral-400">Gebruikers laden...</p>
+          ) : (
+            <select
+              value={defaultMilestoneUserId ?? ''}
+              disabled={isSavingMilestoneSetting}
+              onChange={(event) => void handleSaveMilestoneSetting(event.target.value)}
+              className="mt-4 w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-sm text-white outline-none focus:border-swatt-gold"
+            >
+              <option value="">Geen verantwoordelijke ingesteld (automatische aanmaak niet mogelijk)</option>
+              {teamleaderUsers.map((teamleaderUser) => (
+                <option key={teamleaderUser.id} value={teamleaderUser.id}>
+                  {teamleaderUser.displayName}
+                </option>
+              ))}
+            </select>
+          )}
         </section>
       )}
 

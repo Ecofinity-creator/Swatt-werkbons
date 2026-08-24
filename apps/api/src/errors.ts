@@ -72,6 +72,32 @@ export const TeamleaderErrors = {
   /** Onverwacht antwoord van de Teamleader-API zelf (niet-2xx, of een onherkenbare response-vorm). */
   syncFailed: (detail: string) =>
     new ApiError(502, 'TEAMLEADER_SYNC_FAILED', `Synchroniseren met Teamleader is mislukt: ${detail}`),
+  /**
+   * Phase 9 — een project heeft nog geen "werkbon-uren"-milestone (gekozen of
+   * automatisch aangemaakt) én er is geen `defaultMilestoneResponsibleTeamleaderUserId`
+   * geconfigureerd om er automatisch één aan te maken (zie MilestoneSyncService).
+   * Actiegerichte fout (sectie 27) i.p.v. te gokken wie verantwoordelijk is.
+   */
+  milestoneNotConfigured: () =>
+    new ApiError(
+      409,
+      'TEAMLEADER_MILESTONE_NOT_CONFIGURED',
+      'Er is nog geen Teamleader-milestone gekozen voor dit project, en er is geen standaard verantwoordelijke ingesteld om er automatisch één aan te maken. Kies een milestone bij het project, of stel een standaard verantwoordelijke in via Instellingen → Teamleader-integratie.',
+    ),
+  /** Deze Teamleader-gebruiker is al aan een andere lokale gebruiker gekoppeld (User.teamleaderUserId is uniek). */
+  teamleaderUserAlreadyLinked: () =>
+    new ApiError(
+      409,
+      'TEAMLEADER_USER_ALREADY_LINKED',
+      'Deze Teamleader-gebruiker is al aan een andere medewerker gekoppeld.',
+    ),
+  /** Een medewerker heeft nog geen gekoppelde Teamleader-gebruiker (nodig voor `timeTracking.add`'s `user_id`, sectie 14). */
+  employeeNotLinkedToTeamleaderUser: (displayName: string) =>
+    new ApiError(
+      409,
+      'TEAMLEADER_EMPLOYEE_NOT_LINKED',
+      `${displayName} is nog niet gekoppeld aan een Teamleader-gebruiker. Koppel dit eerst via Medewerkers → ${displayName} → Teamleader-koppeling.`,
+    ),
 };
 
 export const UserErrors = {
@@ -160,6 +186,13 @@ export const WorkOrderErrors = {
       409,
       'WORK_ORDER_PDF_NOT_READY',
       'De PDF van deze werkbon is nog niet beschikbaar. Probeer het zo dadelijk opnieuw, of gebruik "PDF opnieuw genereren".',
+    ),
+  /** Phase 9 — een "opnieuw synchroniseren"-aanvraag op een werkbon die nog niet ondertekend is (dus nooit gesynchroniseerd kán zijn). */
+  notSignedForSync: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_NOT_SIGNED_FOR_SYNC',
+      'Deze werkbon is nog niet ondertekend — er is nog niets om naar Teamleader te synchroniseren.',
     ),
 };
 
