@@ -10,10 +10,11 @@ import { ApiRequestError } from '../auth/AuthContext';
  * `/projects/mine` teruggeeft: de backend filtert al op ProjectAssignment,
  * dus deze pagina hoeft zelf geen rechten-logica te kennen.
  *
- * Bewust nog geen "START WERK"-knop op de projectkaart: de timer zelf is
- * Phase 4 van de roadmap. Deze pagina levert het stuk dat nu gevraagd is —
- * "een werknemer kan enkel de projecten selecteren die aan hem gekoppeld
- * zijn" — als een selecteerbare lijst.
+ * Elke kaart linkt door naar de timerpagina (Phase 4) voor dat project. Het
+ * volledige `ProjectSummary`-object wordt meegegeven als router-`state`,
+ * zodat ProjectTimerPage.tsx het project meteen kan tonen zonder een extra
+ * fetch — bij een rechtstreekse navigatie (geen state, bv. een herlaad) valt
+ * die pagina terug op een eigen `projectsApi.mine()`-aanroep.
  */
 export function EmployeeProjectsPage() {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
@@ -59,13 +60,19 @@ export function EmployeeProjectsPage() {
 
       <ul className="flex flex-col gap-3">
         {projects?.map((project) => (
-          <li key={project.id} className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
-            <p className="text-xs font-medium uppercase tracking-wide text-swatt-gold">{project.customerName}</p>
-            <p className="mt-1 text-lg font-semibold">{project.name}</p>
-            <div className="mt-2 space-y-0.5 text-sm text-neutral-400">
-              {project.projectNumber && <p>Projectnr. {project.projectNumber}</p>}
-              {project.address && <p>{project.address}</p>}
-            </div>
+          <li key={project.id}>
+            <Link
+              to={`/projecten/${project.id}`}
+              state={{ project }}
+              className="block rounded-xl border border-neutral-800 bg-neutral-900 p-5 transition active:border-swatt-gold"
+            >
+              <p className="text-xs font-medium uppercase tracking-wide text-swatt-gold">{project.customerName}</p>
+              <p className="mt-1 text-lg font-semibold">{project.name}</p>
+              <div className="mt-2 space-y-0.5 text-sm text-neutral-400">
+                {project.projectNumber && <p>Projectnr. {project.projectNumber}</p>}
+                {project.address && <p>{project.address}</p>}
+              </div>
+            </Link>
           </li>
         ))}
       </ul>
