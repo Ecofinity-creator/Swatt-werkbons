@@ -1,9 +1,9 @@
 import type { WorkOrderPhotoCategory, WorkOrderSummary } from '@swatt/shared-types';
-import { WORK_ORDER_PHOTO_CATEGORY_LABELS } from '@swatt/shared-types';
+import { roleAtLeast, WORK_ORDER_PHOTO_CATEGORY_LABELS, WORK_ORDER_PDF_STATUS_LABELS } from '@swatt/shared-types';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { workOrderPhotosApi, workOrdersApi } from '../api/client';
-import { ApiRequestError } from '../auth/AuthContext';
+import { ApiRequestError, useAuth } from '../auth/AuthContext';
 import { SignatureCanvas, type SignatureCanvasHandle } from '../components/SignatureCanvas';
 import { compressImageFile } from '../lib/image';
 
@@ -20,6 +20,7 @@ import { compressImageFile } from '../lib/image';
  */
 export function WorkOrderReviewPage() {
   const { workOrderId } = useParams<{ workOrderId: string }>();
+  const { user } = useAuth();
 
   const [workOrder, setWorkOrder] = useState<WorkOrderSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -38,6 +39,9 @@ export function WorkOrderReviewPage() {
   const [isSigning, setIsSigning] = useState(false);
   const [signatureIsEmpty, setSignatureIsEmpty] = useState(true);
   const signatureRef = useRef<SignatureCanvasHandle>(null);
+
+  const [isRegeneratingPdf, setIsRegeneratingPdf] = useState(false);
+  const [regeneratePdfError, setRegeneratePdfError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!workOrderId) return;
@@ -127,6 +131,20 @@ export function WorkOrderReviewPage() {
     }
   }
 
+  async function handleRegeneratePdf() {
+    if (!workOrderId) return;
+    setRegeneratePdfError(null);
+    setIsRegeneratingPdf(true);
+    try {
+      const response = await workOrdersApi.regeneratePdf(workOrderId);
+      setWorkOrder(response.workOrder);
+    } catch (err) {
+      setRegeneratePdfError(err instanceof ApiRequestError ? err.message : 'Kon de PDF niet opnieuw genereren.');
+    } finally {
+      setIsRegeneratingPdf(false);
+    }
+  }
+
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
       <header className="mb-8 flex items-center justify-between">
@@ -144,7 +162,15 @@ export function WorkOrderReviewPage() {
 
       {isLoading && !errorMessage && <p className="text-neutral-400">Laden...</p>}
 
-      {!isLoading && workOrder && workOrder.status !== 'DRAFT' && <SignedWorkOrderView workOrder={workOrder} />}
+      {!isLoading && workOrder && workOrder.status !== 'DRAFT' && (
+        <SignedWorkOrderView
+          workOrder={workOrder}
+          canManagePdf={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
+          isRegeneratingPdf={isRegeneratingPdf}
+          regeneratePdfError={regeneratePdfError}
+          onRegeneratePdf={() => void handleRegeneratePdf()}
+        />
+      )}
 
       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'review' && (
         <ReviewStep
@@ -447,13 +473,60 @@ function SignStep({
   );
 }
 
-function SignedWorkOrderView({ workOrder }: { workOrder: WorkOrderSummary }) {
+function SignedWorkOrderView({
+  workOrder,
+  canManagePdf,
+  isRegeneratingPdf,
+  regeneratePdfError,
+  onRegeneratePdf,
+}: {
+  workOrder: WorkOrderSummary;
+  canManagePdf: boolean;
+  isRegeneratingPdf: boolean;
+  regeneratePdfError: string | null;
+  onRegeneratePdf: () => void;
+}) {
   return (
     <div className="flex flex-col gap-6">
       <div className="rounded-xl border border-emerald-900 bg-emerald-950 p-4 text-center text-sm text-emerald-200">
         Deze werkbon is ondertekend en kan niet meer gewijzigd worden.
       </div>
       <WorkOrderSummaryCard workOrder={workOrder} />
+
+      <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-swatt-gold">Werkbon-PDF</h2>
+        <p className="text-sm text-neutral-300">{WORK_ORDER_PDF_STATUS_LABELS[workOrder.pdfStatus]}</p>
+
+        {workOrder.pdfStatus === 'PDF_READY' && (
+          
+            href={`/work-orders/${workOrder.id}/pdf`}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 inline-block rounded-lg bg-swatt-gold px-4 py-3 text-sm font-bold text-swatt-black"
+          >
+            Download PDF
+          </a>
+        )}
+
+        {workOrder.pdfStatus === 'PDF_FAILED' && (
+          <div className="mt-3">
+            {workOrder.pdfError && <p className="mb-2 text-sm text-red-300">{workOrder.pdfError}</p>}
+            {canManagePdf ? (
+              <button
+                type="button"
+                onClick={onRegeneratePdf}
+                disabled={isRegeneratingPdf}
+                className="rounded-lg border border-neutral-700 px-4 py-3 text-sm font-semibold text-neutral-200 disabled:opacity-60"
+              >
+                {isRegeneratingPdf ? 'Bezig...' : 'PDF opnieuw genereren'}
+              </button>
+            ) : (
+              <p className="text-sm text-neutral-500">Vraag een supervisor of beheerder om de PDF opnieuw te genereren.</p>
+            )}
+            {regeneratePdfError && <p className="mt-2 text-sm text-red-300">{regeneratePdfError}</p>}
+          </div>
+        )}
+      </section>
 
       {workOrder.photos.length > 0 && (
         <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
