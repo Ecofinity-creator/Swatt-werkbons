@@ -1,5 +1,6 @@
 import type {
   ActiveTimeEntryResponseBody,
+  AddWorkOrderPhotoBody,
   ApiErrorBody,
   CreateUserBody,
   CreateUserResponseBody,
@@ -10,6 +11,7 @@ import type {
   PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
   CreateWorkOrderBody,
+  SignWorkOrderBody,
   TeamleaderStatusResponseBody,
   TimeEntryResponseBody,
   UpdateUserBody,
@@ -194,6 +196,24 @@ export const workOrdersApi = {
   create: (body: CreateWorkOrderBody) =>
     request<WorkOrderResponseBody>('/work-orders', { method: 'POST', body: JSON.stringify(body) }),
   get: (workOrderId: string) => request<WorkOrderResponseBody>(`/work-orders/${workOrderId}`, { method: 'GET' }),
+  /** Phase 7 — verplichte klanthandtekening (sectie 10). Zet de werkbon DRAFT → SIGNED. */
+  sign: (workOrderId: string, body: SignWorkOrderBody) =>
+    request<WorkOrderResponseBody>(`/work-orders/${workOrderId}/sign`, { method: 'POST', body: JSON.stringify(body) }),
+};
+
+/**
+ * Phase 6 — foto's op een werkbon (sectie 9). `add`/`remove` geven telkens de
+ * volledige, bijgewerkte werkbon terug (i.p.v. enkel de gewijzigde foto) —
+ * eenvoudiger voor de UI, die toch meteen de volledige fotolijst opnieuw wil tonen.
+ */
+export const workOrderPhotosApi = {
+  add: (workOrderId: string, body: AddWorkOrderPhotoBody) =>
+    request<WorkOrderResponseBody>(`/work-orders/${workOrderId}/photos`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  remove: (workOrderId: string, photoId: string) =>
+    request<WorkOrderResponseBody>(`/work-orders/${workOrderId}/photos/${photoId}/remove`, { method: 'POST' }),
 };
 
 export const projectsApi = {
