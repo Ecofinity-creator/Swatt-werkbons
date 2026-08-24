@@ -1,7 +1,10 @@
 import type { PrismaClient } from '@prisma/client';
 
 export const SESSION_COOKIE_NAME = 'swatt_session';
-const SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 7; // 7 dagen
+/** Standaardduur (zonder "Onthou mij") — ongewijzigd t.o.v. voorheen. */
+const DEFAULT_SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 7; // 7 dagen
+/** "Onthou mij" (sectie 21 — UX-verzoek van Steven): langere, expliciet gekozen sessieduur. */
+const REMEMBER_ME_SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 30; // 30 dagen
 
 export interface SessionInfo {
   sessionId: string;
@@ -18,8 +21,14 @@ export interface SessionInfo {
 export class SessionService {
   constructor(private readonly prisma: PrismaClient) {}
 
-  async createSession(userId: string): Promise<SessionInfo> {
-    const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
+  /**
+   * `rememberMe` bepaalt enkel de sessieduur (30 vs. 7 dagen) — de cookie die
+   * de route hieruit opzet volgt exact deze `expiresAt` (zie auth.routes.ts),
+   * zodat cookie en server-side sessie nooit uit elkaar kunnen lopen.
+   */
+  async createSession(userId: string, rememberMe = false): Promise<SessionInfo> {
+    const durationMs = rememberMe ? REMEMBER_ME_SESSION_DURATION_MS : DEFAULT_SESSION_DURATION_MS;
+    const expiresAt = new Date(Date.now() + durationMs);
     const session = await this.prisma.session.create({
       data: { userId, expiresAt },
     });
