@@ -154,14 +154,38 @@ export function WorkOrderReviewPage() {
     }
   }
 
-  /** Phase 9 — sectie 13: handmatige "Opnieuw synchroniseren" (SUPERVISOR+, zie SyncJobService.retry). */
+  /**
+   * Phase 9 — sectie 13: handmatige "Opnieuw synchroniseren" (SUPERVISOR+,
+   * zie SyncJobService.retry).
+   *
+   * BELANGRIJK: de `retrySync`-aanroep zet de synctaken enkel op de wachtrij
+   * en wácht niet op het echte Teamleader-resultaat — dat gebeurt
+   * asynchroon door de (inline of aparte) worker, meestal binnen enkele
+   * seconden. Het antwoord van `retrySync` zelf toont daardoor nog de
+   * VORIGE foutmelding, wat verwarrend overkwam als "hij probeert niet eens
+   * opnieuw" (live vastgesteld: de knop gaf ogenschijnlijk meteen dezelfde
+   * fout terug). We pollen hierna een aantal keer tot beide syncstatussen
+   * niet meer PENDING zijn, zodat de gebruiker het échte resultaat ziet
+   * zonder zelf handmatig te moeten verversen.
+   */
   async function handleRetrySync() {
     if (!workOrderId) return;
     setRetrySyncError(null);
     setIsRetryingSync(true);
     try {
-      const response = await workOrdersApi.retrySync(workOrderId);
-      setWorkOrder(response.workOrder);
+      await workOrdersApi.retrySync(workOrderId);
+
+      const MAX_ATTEMPTS = 8;
+      const POLL_DELAY_MS = 2000;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_DELAY_MS));
+        const response = await workOrdersApi.get(workOrderId);
+        setWorkOrder(response.workOrder);
+
+        const timeSettled = response.workOrder.timeTrackingSyncStatus !== 'PENDING';
+        const uploadSettled = response.workOrder.teamleaderUploadStatus !== 'TEAMLEADER_UPLOAD_PENDING';
+        if (timeSettled && uploadSettled) break;
+      }
     } catch (err) {
       setRetrySyncError(err instanceof ApiRequestError ? err.message : 'Opnieuw synchroniseren is mislukt.');
     } finally {
@@ -647,14 +671,21 @@ function TeamleaderSyncSection({
       {retrySyncError && <p className="mt-2 text-sm text-red-300">{retrySyncError}</p>}
 
       {hasFailure && (
-        <button
-          type="button"
-          onClick={onRetrySync}
-          disabled={isRetryingSync}
-          className="mt-4 rounded-lg border border-neutral-700 px-4 py-3 text-sm font-semibold text-neutral-200 disabled:opacity-60"
-        >
-          {isRetryingSync ? 'Bezig...' : 'Opnieuw synchroniseren'}
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={onRetrySync}
+            disabled={isRetryingSync}
+            className="mt-4 rounded-lg border border-neutral-700 px-4 py-3 text-sm font-semibold text-neutral-200 disabled:opacity-60"
+          >
+            {isRetryingSync ? 'Bezig met synchroniseren met Teamleader...' : 'Opnieuw synchroniseren'}
+          </button>
+          {isRetryingSync && (
+            <p className="mt-2 text-xs text-neutral-500">
+              Dit kan enkele seconden duren — dit scherm werkt zichzelf automatisch bij.
+            </p>
+          )}
+        </>
       )}
     </section>
   );
