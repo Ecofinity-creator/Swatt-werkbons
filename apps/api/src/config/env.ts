@@ -71,6 +71,20 @@ const rawEnvSchema = z.object({
    * dit naar de Render Key Value-instance uit render.yaml.
    */
   REDIS_URL: z.string().min(1).default('redis://localhost:6379'),
+
+  /**
+   * Demo-/testmodus (zie server.ts): laat de BullMQ-syncwerker meedraaien
+   * in hetzelfde proces als de API, i.p.v. als aparte `swatt-sync-worker`-
+   * service. Reden: Render's gratis plan ondersteunt geen Background Worker-
+   * services — deze vlag laat toe om de echte Teamleader-sync te tonen zonder
+   * meteen naar een betaald plan te moeten. Bewust géén productie-oplossing:
+   * bij echt volume moet dit uit en draait de aparte (betaalde) worker-service.
+   * Default `false` — bestaand gedrag blijft ongewijzigd tenzij expliciet aangezet.
+   */
+  RUN_SYNC_WORKER_INLINE: z
+    .string()
+    .default('false')
+    .transform((value) => value === 'true'),
 });
 
 const envSchema = rawEnvSchema.superRefine((value, ctx) => {
