@@ -550,3 +550,66 @@ export interface UpdateCompanySettingsBody {
   logoDataBase64?: string;
   removeLogo?: boolean;
 }
+
+// ============================================================
+// Phase 10 — facturatie-overzicht (sectie 17/29). Zie
+// claude/phase10-facturatie-onderzoek.md (project docs): het effectief
+// aanmaken van een Teamleader-conceptfactuur (`invoices.draft`) is bewust
+// GEEN onderdeel van deze ronde — dit is enkel de lokale "voorbereid voor
+// facturatie"-groepering.
+// ============================================================
+
+/** Enkel DRAFT is deze ronde bereikbaar — de rest staat al klaar voor de latere Teamleader-uitbreiding, zie InvoiceBatchStatus in schema.prisma. */
+export type InvoiceBatchStatus = 'DRAFT' | 'SUBMITTED_TO_TEAMLEADER' | 'INVOICED';
+
+/** Eén werkbon die klaar is om in een facturatiebatch opgenomen te worden — GET /admin/invoice-batches/invoiceable-work-orders. */
+export interface InvoiceableWorkOrderSummary {
+  id: string;
+  workOrderNumber: string;
+  /** ISO-datum, of `null` als de werkbon (uitzonderlijk) nog geen handtekening heeft — kan niet voorkomen bij status READY_FOR_INVOICING, maar het veld blijft defensief nullable. */
+  signedAt: string | null;
+  invoiceableSeconds: number;
+  customer: { id: string; name: string };
+  project: { id: string; name: string; projectNumber: string | null };
+  employeeDisplayNames: string[];
+}
+
+export interface ListInvoiceableWorkOrdersResponseBody {
+  workOrders: InvoiceableWorkOrderSummary[];
+}
+
+export interface InvoiceBatchLineSummary {
+  id: string;
+  workOrderId: string;
+  workOrderNumber: string;
+  projectName: string;
+  invoiceableSeconds: number;
+}
+
+/** Eén "voorbereiden voor facturatie"-groepering (InvoiceBatch). */
+export interface InvoiceBatchSummary {
+  id: string;
+  customerId: string;
+  customerName: string;
+  periodLabel: string;
+  status: InvoiceBatchStatus;
+  totalInvoiceableSeconds: number;
+  createdAt: string;
+  lines: InvoiceBatchLineSummary[];
+}
+
+export interface ListInvoiceBatchesResponseBody {
+  batches: InvoiceBatchSummary[];
+}
+
+/** Body van POST /admin/invoice-batches — de admin-actie "Voorbereiden voor facturatie". */
+export interface CreateInvoiceBatchBody {
+  customerId: string;
+  /** bv. "2026-08" — vrije tekst, zie InvoiceBatch.periodLabel in schema.prisma. */
+  periodLabel: string;
+  workOrderIds: string[];
+}
+
+export interface CreateInvoiceBatchResponseBody {
+  batch: InvoiceBatchSummary;
+}

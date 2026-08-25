@@ -151,6 +151,21 @@ enum SyncJobStatus {
   @@map("sync_job_status")
 }
 
+/// Phase 10 — facturatiebatches (sectie 17). Deze ronde wordt enkel DRAFT
+/// bereikt (een lokale "voorbereid voor facturatie"-groepering) — het
+/// automatisch aanmaken van een echte Teamleader-conceptfactuur
+/// (`invoices.draft`, zie claude/phase10-facturatie-onderzoek.md) is een
+/// volgende stap die eerst een productbeslissing over het uurtarief nodig
+/// heeft. De volledige enum staat hier al klaar zodat die latere stap geen
+/// migratie nodig heeft die bestaande batches raakt.
+enum InvoiceBatchStatus {
+  DRAFT
+  SUBMITTED_TO_TEAMLEADER
+  INVOICED
+
+  @@map("invoice_batch_status")
+}
+
 enum SyncLogStatus {
   STARTED
   SUCCEEDED
@@ -193,6 +208,9 @@ model User {
   /// via zijn eigen ingelogde sessie) aan de klant heeft gevraagd (Phase 6/7 —
   /// zie WorkOrderSignature hieronder).
   requestedWorkOrderSignatures WorkOrderSignature[]
+
+  /// Facturatiebatches die deze admin ooit "voorbereid voor facturatie" heeft (Phase 10).
+  createdInvoiceBatches InvoiceBatch[]
 
   @@index([role])
   @@map("user")
@@ -354,6 +372,9 @@ model Customer {
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   projects Project[]
+
+  /// Facturatiebatches voor deze klant (Phase 10 — zie InvoiceBatch hieronder).
+  invoiceBatches InvoiceBatch[]
 
   @@map("customer")
 }
@@ -605,6 +626,11 @@ model WorkOrder {
   /// Phase 9 — achtergrond-syncjobs voor deze werkbon (TIME_ENTRIES + PDF_UPLOAD, zie SyncJob hieronder).
   syncJobs SyncJob[]
 
+  /// Phase 10 — gezet zodra deze werkbon in een facturatiebatch is opgenomen
+  /// (business rule 7: "een werkbon mag maar één keer gefactureerd worden").
+  /// Ten hoogste één per werkbon, zie InvoiceBatchLine.workOrderId (unique).
+  invoiceBatchLine InvoiceBatchLine?
+
   @@index([projectId])
   @@index([status])
   @@index([pdfStatus])
@@ -794,4 +820,66 @@ model CompanySettings {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   @@map("company_settings")
+}
+
+// ============================================================
+// Phase 10 — facturatie-overzicht (sectie 17/29 van de projectbrief). Zie
+// modules/invoice-batches/ en claude/phase10-facturatie-onderzoek.md (project
+// docs) voor het Teamleader-API-onderzoek dat hieraan voorafging.
+//
+// Bewust GEEN Teamleader-koppeling in deze ronde (geen `teamleaderDraftInvoiceId`
+// e.d.) — het aanmaken van een echte conceptfactuur via `invoices.draft`
+// vereist eerst een productbeslissing over het uurtarief per factuurregel
+// (zie het onderzoeksdoc). Deze twee tabellen zijn puur de lokale
+// "voorbereid voor facturatie"-groepering; de Teamleader-stap volgt als
+// aparte, latere uitbreiding zonder dat dit datamodel opnieuw moet wijzigen.
+// ============================================================
+
+/// Eén "voorbereiden voor facturatie"-actie van een administrator: een
+/// groepering van werkbonnen van dezelfde klant binnen dezelfde periode.
+/// `periodLabel` is een vrije tekst (bv. "2026-08") i.p.v. een aparte
+/// maand/jaar-kolom — simpeler voor filteren/groeperen dan een echte
+/// periode-tabel, en de brief specificeert geen preciezere periode-indeling.
+model InvoiceBatch {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId  String              @map("customer_id") @db.Uuid
+  periodLabel String              @map("period_label")
+  status      InvoiceBatchStatus  @default(DRAFT)
+
+  /// Som van InvoiceBatchLine.invoiceableSeconds op aanmaakmoment — puur een
+  /// snelle weergavewaarde (vermijdt een join/aggregatie bij elke lijst-render),
+  /// de bron van waarheid blijft de som van de lines zelf.
+  totalInvoiceableSeconds Int @default(0) @map("total_invoiceable_seconds")
+
+  createdByUserId String   @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  customer       Customer            @relation(fields: [customerId], references: [id])
+  createdByUser  User                @relation(fields: [createdByUserId], references: [id])
+  lines          InvoiceBatchLine[]
+
+  @@index([customerId])
+  @@index([periodLabel])
+  @@map("invoice_batch")
+}
+
+/// Koppelt één werkbon aan een InvoiceBatch. `workOrderId` is uniek — dat is
+/// de databank-afgedwongen kant van business rule 7 ("een werkbon mag maar
+/// één keer gefactureerd worden"): zolang deze rij bestaat, kan die werkbon
+/// niet in een andere batch terechtkomen. Een per-ongeluk aangemaakte batch
+/// wordt daarom volledig verwijderd (cascade) i.p.v. enkel "geannuleerd" —
+/// er is nog niets extern (Teamleader) gebeurd, dus er valt niets terug te
+/// draaien, enkel deze lokale koppeling weer vrij te geven.
+model InvoiceBatchLine {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceBatchId     String   @map("invoice_batch_id") @db.Uuid
+  workOrderId        String   @unique @map("work_order_id") @db.Uuid
+  invoiceableSeconds Int      @map("invoiceable_seconds")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  invoiceBatch InvoiceBatch @relation(fields: [invoiceBatchId], references: [id], onDelete: Cascade)
+  workOrder    WorkOrder    @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+
+  @@index([invoiceBatchId])
+  @@map("invoice_batch_line")
 }

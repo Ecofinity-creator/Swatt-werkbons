@@ -3,8 +3,12 @@ import type {
   AddWorkOrderPhotoBody,
   ApiErrorBody,
   CompanySettingsResponseBody,
+  CreateInvoiceBatchBody,
+  CreateInvoiceBatchResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
+  ListInvoiceBatchesResponseBody,
+  ListInvoiceableWorkOrdersResponseBody,
   ListProjectAssignmentsResponseBody,
   ListProjectsResponseBody,
   ListTeamleaderUsersResponseBody,
@@ -257,6 +261,36 @@ export const workOrdersApi = {
 /** Phase 9 — overzicht "Synchronisatiefouten" (sectie 4/13). */
 export const syncIssuesApi = {
   list: () => request<ListWorkOrderSyncIssuesResponseBody>('/admin/work-orders/sync-issues', { method: 'GET' }),
+};
+
+/**
+ * Phase 10 — facturatie-overzicht (sectie 17/29). Bewust GEEN "maak
+ * conceptfactuur in Teamleader"-aanroep hier — zie
+ * claude/phase10-facturatie-onderzoek.md (project docs).
+ */
+export const invoiceBatchesApi = {
+  listInvoiceable: (filters: { customerId?: string; projectId?: string; employeeId?: string; periodLabel?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.customerId) params.set('customerId', filters.customerId);
+    if (filters.projectId) params.set('projectId', filters.projectId);
+    if (filters.employeeId) params.set('employeeId', filters.employeeId);
+    if (filters.periodLabel) params.set('periodLabel', filters.periodLabel);
+    const query = params.toString();
+    return request<ListInvoiceableWorkOrdersResponseBody>(
+      `/admin/invoice-batches/invoiceable-work-orders${query ? `?${query}` : ''}`,
+      { method: 'GET' },
+    );
+  },
+  list: (filters: { customerId?: string; periodLabel?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.customerId) params.set('customerId', filters.customerId);
+    if (filters.periodLabel) params.set('periodLabel', filters.periodLabel);
+    const query = params.toString();
+    return request<ListInvoiceBatchesResponseBody>(`/admin/invoice-batches${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
+  create: (body: CreateInvoiceBatchBody) =>
+    request<CreateInvoiceBatchResponseBody>('/admin/invoice-batches', { method: 'POST', body: JSON.stringify(body) }),
+  remove: (id: string) => request<void>(`/admin/invoice-batches/${id}/remove`, { method: 'POST' }),
 };
 
 /**

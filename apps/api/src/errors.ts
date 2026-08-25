@@ -196,6 +196,41 @@ export const WorkOrderErrors = {
     ),
 };
 
+/** Phase 10 — facturatie-overzicht (sectie 17/29). Zie modules/invoice-batches/invoice-batch.service.ts. */
+export const InvoiceBatchErrors = {
+  noWorkOrders: () =>
+    new ApiError(400, 'INVOICE_BATCH_NO_WORK_ORDERS', 'Selecteer minstens één werkbon om te factureren.'),
+  /** Eén of meer meegegeven werkbon-IDs bestaan niet (meer), of staan niet (meer) op READY_FOR_INVOICING. */
+  workOrderNotInvoiceable: () =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_WORK_ORDER_NOT_INVOICEABLE',
+      'Eén of meer geselecteerde werkbonnen zijn niet (meer) klaar voor facturatie. Ververs de pagina en probeer opnieuw.',
+    ),
+  workOrderCustomerMismatch: () =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_CUSTOMER_MISMATCH',
+      'Alle geselecteerde werkbonnen moeten bij dezelfde klant horen.',
+    ),
+  /** Business rule 7: een werkbon mag maar één keer gefactureerd worden. */
+  workOrderAlreadyBatched: () =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_WORK_ORDER_ALREADY_BATCHED',
+      'Eén of meer geselecteerde werkbonnen zijn al in een facturatiebatch opgenomen.',
+    ),
+  notFound: () =>
+    new ApiError(404, 'INVOICE_BATCH_NOT_FOUND', 'Deze facturatiebatch bestaat niet (meer).'),
+  /** Nog niet bereikbaar deze ronde (er bestaat nog geen actie die een batch naar SUBMITTED_TO_TEAMLEADER/INVOICED zet) — toekomstvast. */
+  cannotRemoveNonDraft: () =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_CANNOT_REMOVE',
+      'Deze facturatiebatch is al naar Teamleader gestuurd en kan niet meer verwijderd worden.',
+    ),
+};
+
 export const EmailErrors = {
   notConfigured: () =>
     new ApiError(

@@ -12,6 +12,7 @@ import { SetPasswordPage } from './pages/SetPasswordPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
 import { WorkOrderReviewPage } from './pages/WorkOrderReviewPage';
 import { CompanySettingsPage } from './pages/admin/CompanySettingsPage';
+import { InvoicingPage } from './pages/admin/InvoicingPage';
 import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
 import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
@@ -131,6 +132,14 @@ export function App() {
         element={
           <RequireAuth minimumRole="SUPERVISOR">
             <SyncIssuesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/facturatie"
+        element={
+          <RequireAuth minimumRole="ADMIN">
+            <InvoicingPage />
           </RequireAuth>
         }
       />
