@@ -7,12 +7,15 @@ import type { FileSyncService } from '../src/modules/teamleader/file-sync.servic
 /**
  * `getSyncQueue()` (queue/queue.ts) verbindt lazy met een echte Redis via
  * ioredis/BullMQ — niet beschikbaar/gewenst in een unit-test. We mocken de
- * hele module zodat `tryEnqueue()` een fake `.add()` aanroept i.p.v. een
- * echte Redis-verbinding op te zetten.
+ * hele module zodat `tryEnqueue()` fake `.add()`/`.remove()`-aanroepen doet
+ * i.p.v. een echte Redis-verbinding op te zetten. `.remove()` erbij sinds de
+ * jobId-deduplicatiefix (zie sync-job.service.ts) — zonder deze mock zou
+ * `tryEnqueue()` crashen op "queue.remove is not a function".
  */
 const addMock = vi.fn(async () => undefined);
+const removeMock = vi.fn(async () => 0);
 vi.mock('../src/queue/queue', () => ({
-  getSyncQueue: () => ({ add: addMock }),
+  getSyncQueue: () => ({ add: addMock, remove: removeMock }),
 }));
 
 interface FakeSyncJob {
@@ -127,6 +130,7 @@ function fakeFileSync(result: { success: boolean; message: string | null }): Fil
 describe('SyncJobService', () => {
   beforeEach(() => {
     addMock.mockClear();
+    removeMock.mockClear();
   });
 
   it('enqueueForWorkOrder: maakt beide SyncJob-rijen aan (TIME_ENTRIES + PDF_UPLOAD) en plaatst ze op de queue', async () => {
@@ -179,6 +183,7 @@ describe('SyncJobService', () => {
       update: {},
     });
     addMock.mockClear();
+    removeMock.mockClear();
 
     const service = new SyncJobService(prisma, fakeTimeTrackingSync({ success: true, message: null }), fakeFileSync({ success: true, message: null }));
     await service.retry('wo1');
@@ -276,6 +281,7 @@ describe('SyncJobService', () => {
       update: {},
     });
     addMock.mockClear();
+    removeMock.mockClear();
 
     const service = new SyncJobService(prisma, fakeTimeTrackingSync({ success: true, message: null }), fakeFileSync({ success: true, message: null }));
     const count = await service.reconcilePendingJobs();

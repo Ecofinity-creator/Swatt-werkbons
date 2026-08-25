@@ -85,11 +85,34 @@ export class SyncJobService {
     return jobs.length;
   }
 
-  /** Best-effort push naar BullMQ. Faalt deze (bv. Redis tijdelijk onbereikbaar), dan blijft de SyncJob-rij gewoon PENDING in Postgres (business rule 9) — reconcilePendingJobs() haalt dit later in. */
+  /**
+   * Best-effort push naar BullMQ. Faalt deze (bv. Redis tijdelijk
+   * onbereikbaar), dan blijft de SyncJob-rij gewoon PENDING in Postgres
+   * (business rule 9) — reconcilePendingJobs() haalt dit later in.
+   *
+   * BELANGRIJK — live ontdekt: BullMQ dedupliceert op `jobId` (hier bewust
+   * gelijk aan het SyncJob-ID, voor een 1-op-1 traceerbare koppeling). Een
+   * job die eerder FAILED is, blijft door `removeOnFail` tot 30 dagen in
+   * Redis staan — en `.add()` met datzelfde `jobId` plant zo'n bestaande
+   * (mislukte) job dan NIET opnieuw in, ook al roept "Opnieuw
+   * synchroniseren" deze functie netjes opnieuw aan. Resultaat: de worker
+   * verwerkte de job simpelweg nooit opnieuw, en de oude foutmelding (met
+   * de oude payload, zelfs na een echte codefix) bleef voor altijd staan —
+   * precies wat Steven live rapporteerde. Eerst best-effort verwijderen
+   * vóór het opnieuw toevoegen lost dit op (`remove()` geeft gewoon 0
+   * terug als er niets te verwijderen valt, geen fout).
+   */
   private async tryEnqueue(syncJobId: string, workOrderId: string, type: SyncJobType): Promise<void> {
     try {
+      const queue = getSyncQueue();
+      await queue.remove(syncJobId).catch(() => {
+        // Best effort — een actieve/vergrendelde job kan niet verwijderd
+        // worden (code 0); in dat zeldzame geval ("retry geklikt terwijl
+        // een vorige poging nog letterlijk bezig is") laten we die gewoon
+        // zijn ding doen i.p.v. de hele retry te laten falen.
+      });
       const data: SyncQueueJobData = { workOrderId, type };
-      await getSyncQueue().add(type, data, {
+      await queue.add(type, data, {
         jobId: syncJobId,
         attempts: 3,
         backoff: { type: 'exponential', delay: 30_000 },
