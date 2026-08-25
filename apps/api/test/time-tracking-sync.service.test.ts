@@ -131,7 +131,7 @@ describe('TimeTrackingSyncService', () => {
     expect(client.post).toHaveBeenCalledWith(
       'timeTracking.add',
       expect.objectContaining({
-        started_at: '2026-08-24T08:00:00.000Z',
+        started_at: '2026-08-24T08:00:00+00:00',
         duration: 2 * 60 * 60, // 2 uur netto, pauze reeds afgetrokken
         subject: { type: 'milestone', id: 'tl-m1' },
         user_id: 'tl-user-peter',

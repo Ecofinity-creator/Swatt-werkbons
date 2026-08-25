@@ -113,7 +113,7 @@ export class TimeTrackingSyncService {
         Math.round((entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000) - entry.pausedSeconds,
       );
       const payload = {
-        started_at: entry.startedAt.toISOString(),
+        started_at: toTeamleaderTimestamp(entry.startedAt),
         duration: durationSeconds,
         description: entry.description ?? workOrder.description ?? undefined,
         subject: { type: 'milestone' as const, id: milestoneTeamleaderId },
@@ -149,4 +149,18 @@ export class TimeTrackingSyncService {
 
     return firstErrorMessage ? { success: false, message: firstErrorMessage } : { success: true, message: null };
   }
+}
+
+/**
+ * `timeTracking.add` vereist per het officiële blueprint een `started_at`
+ * die exact matcht met het getoonde voorbeeldformaat (`2017-04-26T10:01:49+00:00`)
+ * — géén milliseconden, en een expliciete `+00:00`-offset i.p.v. de letterlijke
+ * `Z` die JavaScripts `Date.toISOString()` altijd teruggeeft
+ * (`2026-08-25T06:57:21.628Z`). Live bevestigd: Teamleader wees dat laatste
+ * formaat consequent af met "started_at must be valid" (zie
+ * Synchronisatiefouten, WB-2026-000006) — geen documentatie-detail dat
+ * genegeerd kon worden, dit blokkeerde ELKE tijdregistratie-sync.
+ */
+function toTeamleaderTimestamp(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/, '+00:00');
 }
