@@ -81,7 +81,7 @@ export class FileSyncService {
         folder: 'Werkbonnen',
       });
 
-      let teamleaderFileId = await this.postFileBytes(uploadRequest.data.location, file.data, fileName, file.mimeType);
+      let teamleaderFileId = await this.postFileBytes(uploadRequest.data.location, file.data, file.mimeType);
       if (!teamleaderFileId) {
         teamleaderFileId = await this.findUploadedFileId(subjectType, workOrder.project.teamleaderId, fileName);
       }
@@ -128,17 +128,42 @@ export class FileSyncService {
     });
   }
 
-  /** Zie de uitgebreide toelichting bovenaan dit bestand — stap 2 van files.upload, niet verder gespecificeerd in het officiële blueprint. */
-  private async postFileBytes(location: string, data: Buffer, fileName: string, mimeType: string): Promise<string | null> {
-    const formData = new FormData();
-    formData.append('file', new Blob([data], { type: mimeType }), fileName);
-
-    const response = await fetch(location, { method: 'POST', body: formData });
+  /**
+   * Zie de uitgebreide toelichting bovenaan dit bestand — stap 2 van
+   * files.upload, niet verder gespecificeerd in het officiële blueprint
+   * ("a POST request with file contents" — geen woord over multipart/
+   * form-data of een specifieke veldnaam). Een eerdere `multipart/form-data`-
+   * poging (S3-presigned-post-stijl) gaf live een lege 400 terug (geen enkele
+   * foutdetail in de responstekst) — vermoedelijk wijst een tussenlaag die
+   * vorm meteen af vóór er ooit een nette JSON-foutmelding opgebouwd wordt.
+   * Dit probeert nu de ruwe bestandsbytes rechtstreeks als POST-body, met
+   * het echte MIME-type als Content-Type — het andere gangbare patroon voor
+   * dit soort "tijdelijke upload-URL"-API's. Nog steeds niet live bevestigd;
+   * bij een volgende afwijzing loggen/tonen we opnieuw de volledige respons.
+   */
+  private async postFileBytes(location: string, data: Buffer, mimeType: string): Promise<string | null> {
+    const response = await fetch(location, {
+      method: 'POST',
+      headers: { 'Content-Type': mimeType },
+      body: data,
+    });
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       // eslint-disable-next-line no-console -- bewust: dit is precies de plek waar de volledige responstekst nodig is om de nog-niet-live-geverifieerde stap 2 hierboven te diagnosticeren/bij te stellen.
       console.error(`[FileSyncService] Bestandsupload naar Teamleader gaf ${response.status} terug: ${text}`);
-      throw new TeamleaderApiError(response.status, 'files.upload (stap 2)', `bestandsupload gaf ${response.status} terug`);
+      // Tot voor kort ging deze responstekst ENKEL naar de server-log (niet
+      // rechtstreeks bekeken zonder Render-toegang) — de gebruiker zag enkel
+      // "bestandsupload gaf 400 terug" zonder verdere info, onbruikbaar om
+      // deze nog-niet-live-geverifieerde stap te diagnosticeren. Nu ook in de
+      // foutmelding zelf (zoals TeamleaderClient.post() dat al deed voor stap
+      // 1) — afgekapt op 500 tekens, voor het geval het een grote HTML-
+      // foutpagina is i.p.v. een korte JSON-foutmelding.
+      const truncatedText = text.length > 500 ? `${text.slice(0, 500)}…` : text;
+      throw new TeamleaderApiError(
+        response.status,
+        'files.upload (stap 2)',
+        `bestandsupload gaf ${response.status} terug${truncatedText ? `: ${truncatedText}` : ''}`,
+      );
     }
     try {
       const body = (await response.json()) as { data?: { id?: string } };
