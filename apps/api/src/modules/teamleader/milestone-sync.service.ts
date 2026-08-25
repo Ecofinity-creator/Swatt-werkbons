@@ -149,14 +149,19 @@ export class MilestoneSyncService {
         billing_method: 'time_and_materials',
         // Volgens het officiële blueprint is `budget` optioneel bij
         // `time_and_materials` ("If omitted, the budget will default to
-        // zero") — in de praktijk gaf Teamleader bij weglaten toch een 400
-        // terug ("No items were found for key chain budget.currency"; zie
-        // Synchronisatiefouten, WB-2026-000005). Expliciet een budget van
-        // 0 EUR meegeven (nog steeds het gedocumenteerde `Money`-object:
-        // amount + currency, beide verplicht) omzeilt die bug/eigenaardigheid
-        // aan Teamleader-kant. EUR hardcoded: Ecofinity factureert in euro's;
-        // pas aan zodra een multi-currency-klant dit ooit vereist.
-        budget: { amount: 0, currency: 'EUR' },
+        // zero") — in de praktijk gaf Teamleader zowel bij weglaten ALS bij
+        // een expliciet budget van `amount: 0` dezelfde 400 terug ("No items
+        // were found for key chain budget.currency"; zie Synchronisatiefouten,
+        // WB-2026-000003/000005). Vermoeden: Teamleader behandelt een budget
+        // van exact nul intern anders (mogelijk als "geen budget", waarna het
+        // alsnog een niet-bestaande standaardvaluta probeert op te zoeken) —
+        // een klein symbolisch, niet-nul bedrag omzeilt dat. Dit is enkel een
+        // verzamelpunt voor werkbon-uren, geen echte begroting; het bedrag
+        // zelf is betekenisloos. EUR hardcoded: Ecofinity factureert in
+        // euro's. Als dit ALSNOG dezelfde fout geeft, zit het probleem niet
+        // in dit veld maar vermoedelijk in een ontbrekende standaardvaluta op
+        // het Teamleader-project/-account zelf (navragen bij Teamleader-support).
+        budget: { amount: 1, currency: 'EUR' },
       });
     } catch (err) {
       throw this.wrap(err);
