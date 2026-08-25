@@ -147,6 +147,16 @@ export class MilestoneSyncService {
         due_on: dueOn.toISOString().slice(0, 10),
         responsible_user_id: responsibleUserId,
         billing_method: 'time_and_materials',
+        // Volgens het officiële blueprint is `budget` optioneel bij
+        // `time_and_materials` ("If omitted, the budget will default to
+        // zero") — in de praktijk gaf Teamleader bij weglaten toch een 400
+        // terug ("No items were found for key chain budget.currency"; zie
+        // Synchronisatiefouten, WB-2026-000005). Expliciet een budget van
+        // 0 EUR meegeven (nog steeds het gedocumenteerde `Money`-object:
+        // amount + currency, beide verplicht) omzeilt die bug/eigenaardigheid
+        // aan Teamleader-kant. EUR hardcoded: Ecofinity factureert in euro's;
+        // pas aan zodra een multi-currency-klant dit ooit vereist.
+        budget: { amount: 0, currency: 'EUR' },
       });
     } catch (err) {
       throw this.wrap(err);

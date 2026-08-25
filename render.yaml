@@ -101,7 +101,7 @@ services:
         # Render genereert deze zelf, base64-encoded — exact het formaat dat
         # config/env.ts verwacht (32 bytes na decodering).
         generateValue: true
-            # Phase 9 — zie de swatt-redis Key Value-instance hierboven.
+      # Phase 9 — zie de swatt-redis Key Value-instance hierboven.
       - key: REDIS_URL
         fromService:
           type: keyvalue
@@ -117,52 +117,13 @@ services:
       - key: RUN_SYNC_WORKER_INLINE
         value: 'true'
 
-  # Phase 9 — aparte achtergrondwerker voor de Teamleader-sync (sectie 15).
-  # LET OP: draait NIET op het gratis Render-plan (Background Worker-
-  # services zijn niet beschikbaar op Free — bevestigd via render.com/pricing).
-  # Blijft hier gedefinieerd voor wanneer dit naar een betaald plan gaat; tot
-  # dan doet RUN_SYNC_WORKER_INLINE hierboven dienst als gratis alternatief.
-
-  # Phase 9 — aparte achtergrondwerker voor de Teamleader-sync (sectie 15).
-  # `runtime: node` + dezelfde monorepo-buildCommand als swatt-api hierboven
-  # (om exact dezelfde reden: workspace-package @swatt/shared-types moet
-  # gelinkt zijn). Draait `queue/worker.ts` i.p.v. `server.ts` — geen eigen
-  # HTTP-server, dus geen `healthCheckPath`.
-  - type: worker
-    name: swatt-sync-worker
-    runtime: node
-    plan: free
-    region: frankfurt
-    buildCommand: npm ci --include=dev && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
-    startCommand: npm run start:worker --workspace=apps/api
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: swatt-postgres
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: swatt-redis
-          property: connectionString
-      # De worker roept Teamleader rechtstreeks aan (TeamleaderAuthService/
-      # TeamleaderClient, zelfde als swatt-api) — heeft dus dezelfde vier
-      # TEAMLEADER_*-variabelen nodig. `sync: false`: zelfde waarden als bij
-      # swatt-api hierboven handmatig invullen in het Render-dashboard (of,
-      # eenvoudiger: eenmaal instellen en dan "Sync from other service"
-      # gebruiken indien het dashboard dat aanbiedt).
-      - key: TEAMLEADER_CLIENT_ID
-        sync: false
-      - key: TEAMLEADER_CLIENT_SECRET
-        sync: false
-      - key: TEAMLEADER_REDIRECT_URI
-        sync: false
-      - key: TEAMLEADER_TOKEN_ENCRYPTION_KEY
-        # BELANGRIJK: dit moet EXACT dezelfde waarde zijn als bij swatt-api
-        # hierboven (dezelfde versleutelde tokens in dezelfde database) —
-        # `generateValue: true` zou hier een ANDERE sleutel genereren dan bij
-        # swatt-api, wat de tokenopslag onleesbaar zou maken voor de worker.
-        # Kopieer de gegenereerde swatt-api-waarde uit het Render-dashboard.
-        sync: false
+  # Phase 9 — de aparte `swatt-sync-worker`-service (Background Worker) is
+  # HIER BEWUST WEGGEHAALD: Render's gratis plan ondersteunt dat servicetype
+  # niet, en het gewoon laten staan (met `plan: free`) deed de volledige
+  # Blueprint-sync mislukken ("Blueprint sync failed for Swatt werkbons" —
+  # elke push naar main gaf zo een foutmelding, ook al deployde swatt-api
+  # zelf prima). RUN_SYNC_WORKER_INLINE hierboven doet dienst als gratis
+  # alternatief (zie apps/api/src/server.ts) zolang dit niet opgelost is.
+  # Terugzetten zodra er een betaald plan is: de volledige servicedefinitie
+  # (inclusief alle envVars/commentaar) staat nog in de git-geschiedenis —
+  # zie de commit die deze regels toevoegde, of vraag het gewoon opnieuw na.
