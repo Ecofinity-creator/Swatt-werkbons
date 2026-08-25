@@ -115,7 +115,7 @@ export class TimeTrackingSyncService {
       const payload = {
         started_at: toTeamleaderTimestamp(entry.startedAt),
         duration: durationSeconds,
-        description: entry.description ?? workOrder.description ?? undefined,
+        description: buildTeamleaderDescription(entry.employee.displayName, entry.description, workOrder.description),
         subject: { type: 'milestone' as const, id: milestoneTeamleaderId },
         invoiceable: true,
         user_id: teamleaderUserId,
@@ -163,4 +163,28 @@ export class TimeTrackingSyncService {
  */
 function toTeamleaderTimestamp(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, '+00:00');
+}
+
+/**
+ * Alle technieker-uploads lopen bewust via één gedeeld Teamleader-account
+ * (Isabel) i.p.v. een apart betaald Teamleader-gebruikersaccount per
+ * technieker — Swatt wil precies dat die per-gebruiker-kost bij Teamleader
+ * vermijden. `user_id` in de timeTracking.add-payload wijst daardoor altijd
+ * naar dat ene gedeelde account, dus de "Gebruiker"-kolom in Teamleaders
+ * eigen timesheet-rapport toont nooit de échte uitvoerder. Live bevestigd
+ * (screenshot "Rapport timesheets", 2026-08-24): alle uren stonden correct,
+ * maar allemaal onder "Isabel Menschaert".
+ *
+ * Expliciet gevraagd door Steven: de volledige naam van de werkelijke
+ * uitvoerder moet daarom in het `description`-veld zelf terechtkomen, zodat
+ * die minstens zichtbaar blijft in Teamleaders rapportage. We zetten de naam
+ * vooraan (niet enkel als losse toevoeging onderaan) zodat hij ook zichtbaar
+ * blijft wanneer Teamleader een lange omschrijving in een rapport afkapt.
+ * Wanneer er geen eigen omschrijving is (noch op de tijdsregistratie, noch op
+ * de werkbon), sturen we enkel de naam door — nooit een lege of "undefined"-
+ * achtige tekst na de naam.
+ */
+function buildTeamleaderDescription(employeeName: string, entryDescription: string | null, workOrderDescription: string | null): string {
+  const text = entryDescription ?? workOrderDescription ?? null;
+  return text ? `${employeeName} — ${text}` : employeeName;
 }

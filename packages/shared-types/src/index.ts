@@ -515,3 +515,38 @@ export interface ListWorkOrderSyncIssuesResponseBody {
  * werkbon-routes zodat de UI na een retry gewoon de bijgewerkte werkbon toont.
  */
 export type RetryWorkOrderSyncResponseBody = WorkOrderResponseBody;
+
+/**
+ * Bedrijfsgegevens voor de werkbon-PDF-header (secties 7/12 — "Configureerbaar
+ * door administrator"), zie CompanySettingsService. `logoDataUrl` is `null`
+ * zolang er geen logo geüpload is (de PDF valt dan terug op een gestileerd
+ * "SWATT"-tekstlogo, zie work-order-pdf-document.ts).
+ */
+export interface CompanySettingsResponseBody {
+  companyName: string;
+  addressLine: string | null;
+  vatNumber: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+  workOrderLegalText: string;
+  logoDataUrl: string | null;
+}
+
+/**
+ * Body van POST /admin/company-settings. Het logo is optioneel als base64 in
+ * dezelfde JSON-body (zelfde reden als foto's/handtekening — zie
+ * AddWorkOrderPhotoBody hierboven): weglaten laat het bestaande logo
+ * ongemoeid, `removeLogo: true` verwijdert het (enkel relevant zonder nieuw
+ * logo erbij).
+ */
+export interface UpdateCompanySettingsBody {
+  companyName: string;
+  addressLine?: string | null;
+  vatNumber?: string | null;
+  contactEmail?: string | null;
+  contactPhone?: string | null;
+  workOrderLegalText?: string;
+  logoMimeType?: 'image/png' | 'image/jpeg';
+  logoDataBase64?: string;
+  removeLogo?: boolean;
+}

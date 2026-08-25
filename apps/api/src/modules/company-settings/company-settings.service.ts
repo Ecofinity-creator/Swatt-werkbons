@@ -18,17 +18,33 @@ export interface CompanySettingsRecord {
   workOrderLegalText: string;
 }
 
+/** Patch voor `update()` — enkel de velden die de admin-instellingenpagina daadwerkelijk aanbiedt. */
+export interface CompanySettingsUpdate {
+  companyName: string;
+  addressLine: string | null;
+  vatNumber: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+  workOrderLegalText: string;
+  /**
+   * `undefined` = logo ongemoeid laten (geen nieuwe upload, geen verwijdering);
+   * `null` = logo verwijderen; een string = de nieuwe StorageService-key.
+   * Drie-waardig met opzet — anders is "niet meegegeven" niet te onderscheiden
+   * van "expliciet verwijderen" zodra dit gewoon een `Partial<>`-veld was.
+   */
+  logoFileKey?: string | null;
+}
+
 /**
  * Bedrijfsgegevens voor de werkbon-PDF-header (secties 7/12 van de
  * projectbrief). Zelfde singleton-lazy-upsert-aanpak als TeamleaderConnection
  * (zie teamleader-auth.service.ts): geen aparte seed-migratie nodig, en de
  * allereerste PDF-generatie werkt meteen met verstandige placeholders.
  *
- * Vandaag enkel een `get()` — bewust nog geen `update()`/admin-route deze
- * ronde (Phase 8 focust op PDF-generatie zelf); een klein instellingenscherm
- * om deze gegevens aan te passen is een voor de hand liggende, kleine
- * vervolgstap. Tot dan kunnen de waarden rechtstreeks in de database
- * aangepast worden.
+ * `update()` + het admin-instellingenscherm ("Bedrijfsgegevens") zijn de
+ * kleine vervolgstap die hierboven ooit aangekondigd stond — sectie 7 vraagt
+ * expliciet "Configureerbaar door administrator", en Steven had de logo/
+ * adresgegevens nodig vóór de eerstvolgende live werkbon.
  */
 export class CompanySettingsService {
   constructor(private readonly prisma: PrismaClient) {}
@@ -42,6 +58,28 @@ export class CompanySettingsService {
         companyName: 'Jouw bedrijf',
         workOrderLegalText: DEFAULT_LEGAL_TEXT,
       },
+    });
+  }
+
+  async update(patch: CompanySettingsUpdate): Promise<CompanySettingsRecord> {
+    const fields = {
+      companyName: patch.companyName,
+      addressLine: patch.addressLine,
+      vatNumber: patch.vatNumber,
+      contactEmail: patch.contactEmail,
+      contactPhone: patch.contactPhone,
+      workOrderLegalText: patch.workOrderLegalText,
+      // Enkel meesturen wanneer expliciet gezet — `logoFileKey: undefined` zou
+      // Prisma anders interpreteren als "dit veld niet wijzigen", wat hier
+      // toevallig ook het gewenste gedrag is, maar dat willen we niet stilzwijgend
+      // van Prisma's eigen semantiek laten afhangen (zie exactOptionalPropertyTypes
+      // elders in deze codebase — bewust expliciet i.p.v. impliciet).
+      ...(patch.logoFileKey !== undefined ? { logoFileKey: patch.logoFileKey } : {}),
+    };
+    return this.prisma.companySettings.upsert({
+      where: { id: COMPANY_SETTINGS_SINGLETON_ID },
+      update: fields,
+      create: { id: COMPANY_SETTINGS_SINGLETON_ID, ...fields },
     });
   }
 }

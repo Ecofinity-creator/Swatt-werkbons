@@ -60,6 +60,67 @@ async function drawAndEncode(bitmap: ImageBitmap, maxDimension: number, quality:
   return blobToBase64(blob);
 }
 
+export interface CompressedLogo {
+  mimeType: 'image/png';
+  dataBase64: string;
+  /** Voor een meteen bruikbare `<img src>`-preview zonder een aparte round-trip. */
+  dataUrl: string;
+}
+
+const LOGO_MAX_DIMENSION = 600;
+
+/**
+ * Instellingenscherm "Bedrijfsgegevens" (sectie 7: "Configureerbaar door
+ * administrator"). Bewust PNG i.p.v. JPEG (zoals hierboven voor foto's) —
+ * een logo is meestal tekst/lijnwerk op een effen achtergrond, waar JPEG's
+ * lossy compressie zichtbare artefacten rond scherpe randen geeft. Enkel
+ * verkleind wanneer het groter is dan nodig voor de PDF-header (die het logo
+ * op ~110×48pt toont) — geen kwaliteitsverlies bij een al kleine upload.
+ */
+export async function compressLogoFile(file: File): Promise<CompressedLogo> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, LOGO_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Kon het logo niet verwerken op dit toestel (canvas niet beschikbaar).');
+    }
+    context.drawImage(bitmap, 0, 0, width, height);
+
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      throw new Error('Kon het logo niet verwerken.');
+    }
+    const dataUrl = await blobToDataUrl(blob);
+    const commaIndex = dataUrl.indexOf(',');
+    return { mimeType: 'image/png', dataBase64: dataUrl.slice(commaIndex + 1), dataUrl };
+  } finally {
+    bitmap.close();
+  }
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error('Onverwacht resultaat bij het lezen van het logo.'));
+        return;
+      }
+      resolve(result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Kon het logo niet lezen.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

@@ -136,8 +136,36 @@ describe('TimeTrackingSyncService', () => {
         subject: { type: 'milestone', id: 'tl-m1' },
         user_id: 'tl-user-peter',
         invoiceable: true,
+        // Gedeeld Teamleader-account voor alle uploads (zie buildTeamleaderDescription):
+        // de echte uitvoerder moet daarom vooraan in de omschrijving staan.
+        description: 'Peter Janssens — Onderhoud uitgevoerd. Filters gereinigd.',
       }),
     );
+  });
+
+  it('zet enkel de naam van de uitvoerder in de omschrijving wanneer er geen eigen tekst is (gedeeld Teamleader-account)', async () => {
+    const { prisma } = createFakePrisma({
+      id: 'wo1',
+      projectId: 'p1',
+      description: null,
+      timeEntries: [
+        {
+          id: 'te1',
+          startedAt: new Date('2026-08-24T08:00:00Z'),
+          endedAt: new Date('2026-08-24T09:00:00Z'),
+          pausedSeconds: 0,
+          description: null,
+          syncStatus: 'PENDING',
+          employee: employee(),
+        },
+      ],
+    });
+    const client = fakeClient(async () => ({ data: { id: 'tl-time-1' } }));
+    const service = new TimeTrackingSyncService(prisma, client, fakeMilestoneSync('tl-m1'));
+
+    await service.syncWorkOrder('wo1');
+
+    expect(client.post).toHaveBeenCalledWith('timeTracking.add', expect.objectContaining({ description: 'Peter Janssens' }));
   });
 
   it('markeert alle nog-niet-gesynchroniseerde registraties als FAILED wanneer de milestone niet bepaald kan worden', async () => {

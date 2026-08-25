@@ -98,6 +98,15 @@ export function HomePage() {
         </Link>
       )}
 
+      {user.role === 'ADMIN' && (
+        <Link
+          to="/instellingen/bedrijf"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Bedrijfsgegevens
+        </Link>
+      )}
+
       {logoutError && (
         <p role="alert" className="mt-6 rounded-lg bg-red-950 px-4 py-3 text-sm text-red-300">
           {logoutError}

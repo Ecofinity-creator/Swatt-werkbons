@@ -11,6 +11,7 @@ import { ProjectTimerPage } from './pages/ProjectTimerPage';
 import { SetPasswordPage } from './pages/SetPasswordPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
 import { WorkOrderReviewPage } from './pages/WorkOrderReviewPage';
+import { CompanySettingsPage } from './pages/admin/CompanySettingsPage';
 import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
 import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
@@ -58,6 +59,14 @@ export function App() {
         element={
           <RequireAuth minimumRole="ADMIN">
             <TeamleaderSettingsPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/instellingen/bedrijf"
+        element={
+          <RequireAuth minimumRole="ADMIN">
+            <CompanySettingsPage />
           </RequireAuth>
         }
       />

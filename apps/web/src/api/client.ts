@@ -2,6 +2,7 @@ import type {
   ActiveTimeEntryResponseBody,
   AddWorkOrderPhotoBody,
   ApiErrorBody,
+  CompanySettingsResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
   ListProjectAssignmentsResponseBody,
@@ -21,6 +22,7 @@ import type {
   TeamleaderSettingsResponseBody,
   TeamleaderStatusResponseBody,
   TimeEntryResponseBody,
+  UpdateCompanySettingsBody,
   UpdateTeamleaderSettingsBody,
   UpdateUserBody,
   UpdateUserResponseBody,
@@ -167,6 +169,13 @@ export const teamleaderApi = {
         body: JSON.stringify(body),
       }),
   },
+};
+
+/** Admin-instellingenscherm "Bedrijfsgegevens" (secties 7/12 — logo/adres/btw/contact op de werkbon-PDF). */
+export const companySettingsApi = {
+  get: () => request<CompanySettingsResponseBody>('/admin/company-settings', { method: 'GET' }),
+  update: (body: UpdateCompanySettingsBody) =>
+    request<CompanySettingsResponseBody>('/admin/company-settings', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 /**
