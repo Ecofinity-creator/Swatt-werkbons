@@ -101,12 +101,27 @@ services:
         # Render genereert deze zelf, base64-encoded — exact het formaat dat
         # config/env.ts verwacht (32 bytes na decodering).
         generateValue: true
-      # Phase 9 — zie de swatt-redis Key Value-instance hierboven.
+            # Phase 9 — zie de swatt-redis Key Value-instance hierboven.
       - key: REDIS_URL
         fromService:
           type: keyvalue
           name: swatt-redis
           property: connectionString
+      # Demo-/testmodus (zie apps/api/src/server.ts + config/env.ts): laat de
+      # Teamleader-syncwerker meedraaien in dit (gratis) proces, want de
+      # aparte `swatt-sync-worker`-service hieronder kan NIET gratis draaien
+      # — Render's gratis plan ondersteunt geen Background Worker-services
+      # (bevestigd via render.com/pricing). Zet dit expliciet op 'false' (of
+      # verwijder de regel) zodra swatt-sync-worker op een betaald plan staat,
+      # om te vermijden dat de syncwerker CPU/geheugen deelt met webrequests.
+      - key: RUN_SYNC_WORKER_INLINE
+        value: 'true'
+
+  # Phase 9 — aparte achtergrondwerker voor de Teamleader-sync (sectie 15).
+  # LET OP: draait NIET op het gratis Render-plan (Background Worker-
+  # services zijn niet beschikbaar op Free — bevestigd via render.com/pricing).
+  # Blijft hier gedefinieerd voor wanneer dit naar een betaald plan gaat; tot
+  # dan doet RUN_SYNC_WORKER_INLINE hierboven dienst als gratis alternatief.
 
   # Phase 9 — aparte achtergrondwerker voor de Teamleader-sync (sectie 15).
   # `runtime: node` + dezelfde monorepo-buildCommand als swatt-api hierboven
