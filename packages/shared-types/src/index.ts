@@ -480,13 +480,65 @@ export interface LinkTeamleaderUserBody {
   teamleaderUserId?: string | null;
 }
 
-/** Body van POST /admin/teamleader/settings — instelling voor automatische milestone-aanmaak (zie TeamleaderConnection.defaultMilestoneResponsibleTeamleaderUserId). */
+/**
+ * Body van POST /admin/teamleader/settings. Phase 10b breidde dit uit met de
+ * vier vaste keuzes die `invoices.draft` verplicht vraagt (zie
+ * TeamleaderConnection in schema.prisma / claude/phase10-facturatie-onderzoek.md).
+ * De frontend stuurt bij elke save altijd het volledige object mee (zelfde
+ * patroon als UpdateCompanySettingsBody) — geen losse PATCH-semantiek nodig.
+ */
 export interface UpdateTeamleaderSettingsBody {
   defaultMilestoneResponsibleTeamleaderUserId: string | null;
+  invoiceDepartmentId: string | null;
+  invoiceTaxRateId: string | null;
+  invoicePaymentTermType: string | null;
+  invoicePaymentTermDays: number | null;
 }
 
 export interface TeamleaderSettingsResponseBody {
   defaultMilestoneResponsibleTeamleaderUserId: string | null;
+  invoiceDepartmentId: string | null;
+  invoiceTaxRateId: string | null;
+  invoicePaymentTermType: string | null;
+  invoicePaymentTermDays: number | null;
+}
+
+/** Eén departement/vestiging — GET /admin/teamleader/invoice-options (departments.list). */
+export interface TeamleaderInvoiceDepartmentOption {
+  id: string;
+  name: string;
+}
+
+/** Eén btw-tarief — enkel gevuld wanneer een departementId meegegeven werd (taxRates.list is filterbaar op department_id). */
+export interface TeamleaderInvoiceTaxRateOption {
+  id: string;
+  /** Mensentaal-label, bv. "21% (Standaard btw-tarief)" — opgebouwd uit taxRates.list's `rate`+`description`. */
+  label: string;
+}
+
+/** Eén betalingstermijn — `value` is `"<type>:<days>"`, gebouwd/ontleed door de frontend (zie TeamleaderSettingsPage.tsx). */
+export interface TeamleaderInvoicePaymentTermOption {
+  type: string;
+  days: number;
+  label: string;
+  isDefault: boolean;
+}
+
+export interface TeamleaderInvoiceOptionsResponseBody {
+  departments: TeamleaderInvoiceDepartmentOption[];
+  taxRates: TeamleaderInvoiceTaxRateOption[];
+  paymentTerms: TeamleaderInvoicePaymentTermOption[];
+}
+
+/** Body van POST /admin/customers/:id/hourly-rate (sectie 17/29-uitbreiding — zie Customer.hourlyRateCents in schema.prisma). */
+export interface UpdateCustomerHourlyRateBody {
+  /** In eurocent; `null` wist het tarief weer. */
+  hourlyRateCents: number | null;
+}
+
+export interface UpdateCustomerHourlyRateResponseBody {
+  customerId: string;
+  hourlyRateCents: number | null;
 }
 
 /** Eén regel in het overzicht "Synchronisatiefouten" (sectie 4/13 — supervisor behandelt sync-fouten). */
@@ -569,7 +621,8 @@ export interface InvoiceableWorkOrderSummary {
   /** ISO-datum, of `null` als de werkbon (uitzonderlijk) nog geen handtekening heeft — kan niet voorkomen bij status READY_FOR_INVOICING, maar het veld blijft defensief nullable. */
   signedAt: string | null;
   invoiceableSeconds: number;
-  customer: { id: string; name: string };
+  /** `hourlyRateCents` erbij sinds Phase 10b — zie Customer.hourlyRateCents. */
+  customer: { id: string; name: string; hourlyRateCents: number | null };
   project: { id: string; name: string; projectNumber: string | null };
   employeeDisplayNames: string[];
 }
@@ -591,11 +644,17 @@ export interface InvoiceBatchSummary {
   id: string;
   customerId: string;
   customerName: string;
+  /** Sinds Phase 10b — zie Customer.hourlyRateCents. `null` ⇒ "Maak conceptfactuur in Teamleader" is nog niet mogelijk voor deze batch. */
+  customerHourlyRateCents: number | null;
   periodLabel: string;
   status: InvoiceBatchStatus;
   totalInvoiceableSeconds: number;
   createdAt: string;
   lines: InvoiceBatchLineSummary[];
+  /** Sinds Phase 10b — resultaat van de laatste `invoices.draft`-poging, zie InvoiceBatch in schema.prisma. */
+  teamleaderInvoiceId: string | null;
+  teamleaderSyncError: string | null;
+  teamleaderSubmittedAt: string | null;
 }
 
 export interface ListInvoiceBatchesResponseBody {
@@ -612,4 +671,16 @@ export interface CreateInvoiceBatchBody {
 
 export interface CreateInvoiceBatchResponseBody {
   batch: InvoiceBatchSummary;
+}
+
+/**
+ * Response van POST /admin/invoice-batches/:id/teamleader-draft (Phase 10b —
+ * "Maak conceptfactuur in Teamleader", zie TeamleaderInvoiceService). Geeft
+ * altijd de bijgewerkte batch terug, ook bij een mislukte Teamleader-aanroep
+ * (business rule 9: de batch zelf gaat nooit verloren — `syncResult.success`
+ * is dan `false` en `batch.teamleaderSyncError` bevat de mensentaal-fout).
+ */
+export interface CreateTeamleaderDraftInvoiceResponseBody {
+  batch: InvoiceBatchSummary;
+  syncResult: { success: boolean; message: string | null };
 }

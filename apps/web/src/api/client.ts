@@ -5,6 +5,7 @@ import type {
   CompanySettingsResponseBody,
   CreateInvoiceBatchBody,
   CreateInvoiceBatchResponseBody,
+  CreateTeamleaderDraftInvoiceResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
   ListInvoiceBatchesResponseBody,
@@ -23,10 +24,13 @@ import type {
   RetryWorkOrderSyncResponseBody,
   SelectProjectMilestoneResponseBody,
   SignWorkOrderBody,
+  TeamleaderInvoiceOptionsResponseBody,
   TeamleaderSettingsResponseBody,
   TeamleaderStatusResponseBody,
   TimeEntryResponseBody,
   UpdateCompanySettingsBody,
+  UpdateCustomerHourlyRateBody,
+  UpdateCustomerHourlyRateResponseBody,
   UpdateTeamleaderSettingsBody,
   UpdateUserBody,
   UpdateUserResponseBody,
@@ -173,6 +177,25 @@ export const teamleaderApi = {
         body: JSON.stringify(body),
       }),
   },
+  /**
+   * Phase 10b — vult de "Facturatie-instellingen"-dropdowns. `departmentId`
+   * weglaten geeft enkel departementen/betalingstermijnen terug (taxRates
+   * is dan altijd leeg — die lijst is afhankelijk van het gekozen departement).
+   */
+  invoiceOptions: (departmentId?: string) =>
+    request<TeamleaderInvoiceOptionsResponseBody>(
+      `/admin/teamleader/invoice-options${departmentId ? `?departmentId=${encodeURIComponent(departmentId)}` : ''}`,
+      { method: 'GET' },
+    ),
+};
+
+/** Phase 10b — enkel het uurtarief-veld van een klant (sectie 17-uitbreiding, zie Customer.hourlyRateCents). */
+export const customersApi = {
+  updateHourlyRate: (customerId: string, body: UpdateCustomerHourlyRateBody) =>
+    request<UpdateCustomerHourlyRateResponseBody>(`/admin/customers/${customerId}/hourly-rate`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 };
 
 /** Admin-instellingenscherm "Bedrijfsgegevens" (secties 7/12 — logo/adres/btw/contact op de werkbon-PDF). */
@@ -263,11 +286,7 @@ export const syncIssuesApi = {
   list: () => request<ListWorkOrderSyncIssuesResponseBody>('/admin/work-orders/sync-issues', { method: 'GET' }),
 };
 
-/**
- * Phase 10 — facturatie-overzicht (sectie 17/29). Bewust GEEN "maak
- * conceptfactuur in Teamleader"-aanroep hier — zie
- * claude/phase10-facturatie-onderzoek.md (project docs).
- */
+/** Phase 10 — facturatie-overzicht (sectie 17/29). */
 export const invoiceBatchesApi = {
   listInvoiceable: (filters: { customerId?: string; projectId?: string; employeeId?: string; periodLabel?: string } = {}) => {
     const params = new URLSearchParams();
@@ -291,6 +310,9 @@ export const invoiceBatchesApi = {
   create: (body: CreateInvoiceBatchBody) =>
     request<CreateInvoiceBatchResponseBody>('/admin/invoice-batches', { method: 'POST', body: JSON.stringify(body) }),
   remove: (id: string) => request<void>(`/admin/invoice-batches/${id}/remove`, { method: 'POST' }),
+  /** Phase 10b — sectie 17: "Maak conceptfactuur in Teamleader". Geeft altijd de bijgewerkte batch terug, ook bij een mislukte Teamleader-aanroep (business rule 9). */
+  createTeamleaderDraft: (id: string) =>
+    request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),
 };
 
 /**

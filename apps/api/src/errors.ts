@@ -98,6 +98,18 @@ export const TeamleaderErrors = {
       'TEAMLEADER_EMPLOYEE_NOT_LINKED',
       `${displayName} is nog niet gekoppeld aan een Teamleader-gebruiker. Koppel dit eerst via Medewerkers → ${displayName} → Teamleader-koppeling.`,
     ),
+  /** Phase 10b — de vier vaste keuzes voor invoices.draft staan nog niet (volledig) ingesteld (zie TeamleaderConnection.invoice*). */
+  invoiceSettingsNotConfigured: () =>
+    new ApiError(
+      409,
+      'TEAMLEADER_INVOICE_SETTINGS_NOT_CONFIGURED',
+      'De facturatie-instellingen (departement, btw-tarief, betalingstermijn) zijn nog niet volledig ingesteld. Stel deze eerst in via Instellingen → Teamleader-integratie.',
+    ),
+};
+
+/** Phase 10b — Customer.hourlyRateCents (zie modules/customers/customer.service.ts). */
+export const CustomerErrors = {
+  notFound: () => new ApiError(404, 'CUSTOMER_NOT_FOUND', 'Deze klant bestaat niet (meer).'),
 };
 
 export const UserErrors = {
@@ -222,12 +234,25 @@ export const InvoiceBatchErrors = {
     ),
   notFound: () =>
     new ApiError(404, 'INVOICE_BATCH_NOT_FOUND', 'Deze facturatiebatch bestaat niet (meer).'),
-  /** Nog niet bereikbaar deze ronde (er bestaat nog geen actie die een batch naar SUBMITTED_TO_TEAMLEADER/INVOICED zet) — toekomstvast. */
   cannotRemoveNonDraft: () =>
     new ApiError(
       409,
       'INVOICE_BATCH_CANNOT_REMOVE',
       'Deze facturatiebatch is al naar Teamleader gestuurd en kan niet meer verwijderd worden.',
+    ),
+  /** Phase 10b — "Maak conceptfactuur in Teamleader" aangeroepen op een batch die al SUBMITTED_TO_TEAMLEADER/INVOICED is. */
+  alreadySubmittedToTeamleader: () =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_ALREADY_SUBMITTED',
+      'Voor deze facturatiebatch is al een conceptfactuur aangemaakt in Teamleader.',
+    ),
+  /** Phase 10b — de klant van deze batch heeft nog geen uurtarief (Customer.hourlyRateCents). */
+  hourlyRateNotSet: (customerName: string) =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_HOURLY_RATE_NOT_SET',
+      `Er is nog geen uurtarief ingesteld voor ${customerName}. Vul dit eerst in bij deze facturatiebatch.`,
     ),
 };
 

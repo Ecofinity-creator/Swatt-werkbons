@@ -324,6 +324,23 @@ model TeamleaderConnection {
   /// `users.list`-aanroep — zie GET /admin/teamleader/users).
   defaultMilestoneResponsibleTeamleaderUserId String? @map("default_milestone_responsible_teamleader_user_id")
 
+  /// Phase 10b — vaste keuzes voor `invoices.draft` (department_id/tax_rate_id/
+  /// payment_term zijn allemaal verplicht bij dat endpoint, maar veranderen
+  /// zelden — zie claude/phase10-facturatie-onderzoek.md). Ingesteld door een
+  /// admin op het Teamleader-instellingenscherm (dropdowns, gevuld via live
+  /// departments.list/taxRates.list/paymentTerms.list-opvragingen — zie
+  /// GET /admin/teamleader/invoice-options). Alle vier null tot een admin dit
+  /// instelt; zonder deze waarden geeft TeamleaderInvoiceService een
+  /// actiegerichte foutmelding i.p.v. te gokken.
+  invoiceDepartmentId    String? @map("invoice_department_id")
+  invoiceTaxRateId       String? @map("invoice_tax_rate_id")
+  /// Teamleader's `payment_term.type`-enum (bv. "CASH", "END_OF_MONTH",
+  /// "AFTER_INVOICE_DATE") — als losse tekst opgeslagen i.p.v. een eigen enum,
+  /// want dit is Teamleader's eigen waardenverzameling, niet de onze (zelfde
+  /// reden als Project.status elders in dit schema puur informatief blijft).
+  invoicePaymentTermType String? @map("invoice_payment_term_type")
+  invoicePaymentTermDays Int?    @map("invoice_payment_term_days")
+
   connectedByUserId String?   @map("connected_by_user_id") @db.Uuid
   connectedAt       DateTime? @map("connected_at") @db.Timestamptz
 
@@ -367,6 +384,15 @@ model Customer {
   address        String?
   vatNumber      String? @map("vat_number")
   isArchivedInTl Boolean @default(false) @map("is_archived_in_tl")
+
+  /// Phase 10b — uurtarief voor factuurregels (in eurocent, om afrondingsfouten
+  /// met floats te vermijden). Steven bevestigde dat elke klant zijn eigen
+  /// uurtarief heeft, afgesproken via een offerte — dus GEEN vast bedrijfsbreed
+  /// tarief en GEEN tarief per werk-type (zie claude/phase10-facturatie-onderzoek.md).
+  /// Null tot een admin dit invult op de Facturatie-pagina; zonder waarde kan er
+  /// voor deze klant geen Teamleader-conceptfactuur aangemaakt worden
+  /// (zie TeamleaderInvoiceService.createDraftInvoice).
+  hourlyRateCents Int? @map("hourly_rate_cents")
 
   lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
@@ -827,12 +853,13 @@ model CompanySettings {
 // modules/invoice-batches/ en claude/phase10-facturatie-onderzoek.md (project
 // docs) voor het Teamleader-API-onderzoek dat hieraan voorafging.
 //
-// Bewust GEEN Teamleader-koppeling in deze ronde (geen `teamleaderDraftInvoiceId`
-// e.d.) — het aanmaken van een echte conceptfactuur via `invoices.draft`
-// vereist eerst een productbeslissing over het uurtarief per factuurregel
-// (zie het onderzoeksdoc). Deze twee tabellen zijn puur de lokale
-// "voorbereid voor facturatie"-groepering; de Teamleader-stap volgt als
-// aparte, latere uitbreiding zonder dat dit datamodel opnieuw moet wijzigen.
+// Phase 10b (25 augustus 2026) voegde de effectieve `invoices.draft`-koppeling
+// toe (teamleaderInvoiceId/teamleaderSyncError/teamleaderSubmittedAt
+// hieronder) — mogelijk zodra Steven het uurtarief-vraagstuk beantwoordde
+// ("tarief per klant", zie Customer.hourlyRateCents) en de invoices/departments-
+// scopes aanzette. Precies zoals hieronder al aangekondigd stond: het
+// datamodel hoefde daarvoor niet te wijzigen, enkel deze drie velden toe te
+// voegen.
 // ============================================================
 
 /// Eén "voorbereiden voor facturatie"-actie van een administrator: een
@@ -853,6 +880,17 @@ model InvoiceBatch {
 
   createdByUserId String   @map("created_by_user_id") @db.Uuid
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  /// Phase 10b — resultaat van de `invoices.draft`-aanroep (zie
+  /// TeamleaderInvoiceService). `teamleaderInvoiceId` gezet ⇒ status is
+  /// SUBMITTED_TO_TEAMLEADER (of INVOICED); `teamleaderSyncError` gezet ⇒ de
+  /// laatste poging mislukte en de batch bleef bewust op DRAFT staan (business
+  /// rule 9: een externe fout mag nooit lokale data laten verdwijnen) — een
+  /// admin kan dan gewoon opnieuw op "Maak conceptfactuur in Teamleader"
+  /// klikken. Nooit allebei tegelijk gezet.
+  teamleaderInvoiceId   String?   @map("teamleader_invoice_id")
+  teamleaderSyncError   String?   @map("teamleader_sync_error")
+  teamleaderSubmittedAt DateTime? @map("teamleader_submitted_at") @db.Timestamptz
 
   customer       Customer            @relation(fields: [customerId], references: [id])
   createdByUser  User                @relation(fields: [createdByUserId], references: [id])

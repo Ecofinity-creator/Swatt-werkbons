@@ -1,6 +1,7 @@
 import type {
   CreateInvoiceBatchBody,
   CreateInvoiceBatchResponseBody,
+  CreateTeamleaderDraftInvoiceResponseBody,
   InvoiceBatchSummary,
   InvoiceableWorkOrderSummary,
   ListInvoiceBatchesResponseBody,
@@ -72,6 +73,26 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
       return null;
     },
   );
+
+  // Phase 10b — sectie 17: "Indien mogelijk: Maak conceptfactuur in
+  // Teamleader". Geeft altijd de bijgewerkte batch terug, ook bij een
+  // mislukte Teamleader-aanroep (business rule 9) — zie
+  // TeamleaderInvoiceService.createDraftInvoice voor de volledige uitleg.
+  app.post(
+    '/admin/invoice-batches/:id/teamleader-draft',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<CreateTeamleaderDraftInvoiceResponseBody> => {
+      const params = invoiceBatchIdParamsSchema.parse(request.params);
+      const syncResult = await app.teamleaderInvoiceService.createDraftInvoice(params.id);
+      const batch = await service.getById(params.id);
+      if (!batch) {
+        // Kan in de praktijk niet voorkomen — createDraftInvoice hierboven
+        // gooit al InvoiceBatchErrors.notFound() als de batch niet bestaat.
+        throw new Error('Facturatiebatch niet gevonden na Teamleader-synchronisatie.');
+      }
+      return { batch: toBatchSummary(batch), syncResult };
+    },
+  );
 }
 
 function toInvoiceableSummary(record: InvoiceableWorkOrderRecord): InvoiceableWorkOrderSummary {
@@ -91,6 +112,7 @@ function toBatchSummary(batch: InvoiceBatchRecord): InvoiceBatchSummary {
     id: batch.id,
     customerId: batch.customerId,
     customerName: batch.customer.name,
+    customerHourlyRateCents: batch.customer.hourlyRateCents,
     periodLabel: batch.periodLabel,
     status: batch.status,
     totalInvoiceableSeconds: batch.totalInvoiceableSeconds,
@@ -102,5 +124,8 @@ function toBatchSummary(batch: InvoiceBatchRecord): InvoiceBatchSummary {
       projectName: line.workOrder.project.name,
       invoiceableSeconds: line.invoiceableSeconds,
     })),
+    teamleaderInvoiceId: batch.teamleaderInvoiceId,
+    teamleaderSyncError: batch.teamleaderSyncError,
+    teamleaderSubmittedAt: batch.teamleaderSubmittedAt ? batch.teamleaderSubmittedAt.toISOString() : null,
   };
 }

@@ -1,4 +1,11 @@
-import type { ProjectSyncResponseBody, TeamleaderStatusResponseBody, TeamleaderUserOption } from '@swatt/shared-types';
+import type {
+  ProjectSyncResponseBody,
+  TeamleaderInvoiceDepartmentOption,
+  TeamleaderInvoicePaymentTermOption,
+  TeamleaderInvoiceTaxRateOption,
+  TeamleaderStatusResponseBody,
+  TeamleaderUserOption,
+} from '@swatt/shared-types';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { teamleaderApi, usersApi } from '../api/client';
@@ -60,6 +67,17 @@ export function TeamleaderSettingsPage() {
   const [milestoneSettingError, setMilestoneSettingError] = useState<string | null>(null);
   const [milestoneSettingSaved, setMilestoneSettingSaved] = useState(false);
 
+  // Phase 10b — sectie 17: de vier vaste keuzes voor "Maak conceptfactuur in Teamleader" (invoices.draft).
+  const [departments, setDepartments] = useState<TeamleaderInvoiceDepartmentOption[] | null>(null);
+  const [paymentTerms, setPaymentTerms] = useState<TeamleaderInvoicePaymentTermOption[] | null>(null);
+  const [taxRates, setTaxRates] = useState<TeamleaderInvoiceTaxRateOption[] | null>(null);
+  const [invoiceDepartmentId, setInvoiceDepartmentId] = useState<string | null>(null);
+  const [invoiceTaxRateId, setInvoiceTaxRateId] = useState<string | null>(null);
+  const [invoicePaymentTermValue, setInvoicePaymentTermValue] = useState<string | null>(null);
+  const [isSavingInvoiceSettings, setIsSavingInvoiceSettings] = useState(false);
+  const [invoiceSettingsError, setInvoiceSettingsError] = useState<string | null>(null);
+  const [invoiceSettingsSaved, setInvoiceSettingsSaved] = useState(false);
+
   const callbackError = searchParams.get('teamleaderError');
   const justConnected = searchParams.get('teamleaderConnected') === '1';
 
@@ -81,7 +99,16 @@ export function TeamleaderSettingsPage() {
     if (status?.status !== 'CONNECTED') return;
     teamleaderApi.settings
       .get()
-      .then((response) => setDefaultMilestoneUserId(response.defaultMilestoneResponsibleTeamleaderUserId))
+      .then((response) => {
+        setDefaultMilestoneUserId(response.defaultMilestoneResponsibleTeamleaderUserId);
+        setInvoiceDepartmentId(response.invoiceDepartmentId);
+        setInvoiceTaxRateId(response.invoiceTaxRateId);
+        setInvoicePaymentTermValue(
+          response.invoicePaymentTermType && response.invoicePaymentTermDays !== null
+            ? `${response.invoicePaymentTermType}:${response.invoicePaymentTermDays}`
+            : null,
+        );
+      })
       .catch(() => {
         // Best-effort — de rest van de pagina blijft bruikbaar zonder deze instelling geladen te hebben.
       });
@@ -89,20 +116,83 @@ export function TeamleaderSettingsPage() {
       .teamleaderUsers()
       .then((response) => setTeamleaderUsers(response.users))
       .catch(() => setTeamleaderUsers([]));
+    teamleaderApi
+      .invoiceOptions()
+      .then((response) => {
+        setDepartments(response.departments);
+        setPaymentTerms(response.paymentTerms);
+      })
+      .catch(() => {
+        setDepartments([]);
+        setPaymentTerms([]);
+      });
   }, [status?.status]);
+
+  // Phase 10b — taxRates.list is filterbaar op department_id: pas opnieuw ophalen zodra een departement gekozen is (of wijzigt).
+  useEffect(() => {
+    if (status?.status !== 'CONNECTED' || !invoiceDepartmentId) {
+      setTaxRates(null);
+      return;
+    }
+    teamleaderApi
+      .invoiceOptions(invoiceDepartmentId)
+      .then((response) => setTaxRates(response.taxRates))
+      .catch(() => setTaxRates([]));
+  }, [status?.status, invoiceDepartmentId]);
+
+  // De backend accepteert steeds het volledige instellingenobject (zelfde
+  // patroon als UpdateCompanySettingsBody) — elke save-actie hieronder stuurt
+  // dus de huidige waarde van ALLE vijf velden mee, niet enkel het net
+  // gewijzigde veld.
+  function currentPaymentTerm(): { invoicePaymentTermType: string | null; invoicePaymentTermDays: number | null } {
+    if (!invoicePaymentTermValue) return { invoicePaymentTermType: null, invoicePaymentTermDays: null };
+    const [type, days] = invoicePaymentTermValue.split(':');
+    return { invoicePaymentTermType: type ?? null, invoicePaymentTermDays: days ? Number(days) : null };
+  }
 
   async function handleSaveMilestoneSetting(userId: string) {
     setIsSavingMilestoneSetting(true);
     setMilestoneSettingError(null);
     setMilestoneSettingSaved(false);
     try {
-      const response = await teamleaderApi.settings.update({ defaultMilestoneResponsibleTeamleaderUserId: userId || null });
+      const response = await teamleaderApi.settings.update({
+        defaultMilestoneResponsibleTeamleaderUserId: userId || null,
+        invoiceDepartmentId,
+        invoiceTaxRateId,
+        ...currentPaymentTerm(),
+      });
       setDefaultMilestoneUserId(response.defaultMilestoneResponsibleTeamleaderUserId);
       setMilestoneSettingSaved(true);
     } catch (err) {
       setMilestoneSettingError(err instanceof ApiRequestError ? err.message : 'Opslaan van de instelling is mislukt.');
     } finally {
       setIsSavingMilestoneSetting(false);
+    }
+  }
+
+  async function handleSaveInvoiceSettings() {
+    setIsSavingInvoiceSettings(true);
+    setInvoiceSettingsError(null);
+    setInvoiceSettingsSaved(false);
+    try {
+      const response = await teamleaderApi.settings.update({
+        defaultMilestoneResponsibleTeamleaderUserId: defaultMilestoneUserId,
+        invoiceDepartmentId,
+        invoiceTaxRateId,
+        ...currentPaymentTerm(),
+      });
+      setInvoiceDepartmentId(response.invoiceDepartmentId);
+      setInvoiceTaxRateId(response.invoiceTaxRateId);
+      setInvoicePaymentTermValue(
+        response.invoicePaymentTermType && response.invoicePaymentTermDays !== null
+          ? `${response.invoicePaymentTermType}:${response.invoicePaymentTermDays}`
+          : null,
+      );
+      setInvoiceSettingsSaved(true);
+    } catch (err) {
+      setInvoiceSettingsError(err instanceof ApiRequestError ? err.message : 'Opslaan van de facturatie-instellingen is mislukt.');
+    } finally {
+      setIsSavingInvoiceSettings(false);
     }
   }
 
@@ -275,6 +365,102 @@ export function TeamleaderSettingsPage() {
               ))}
             </select>
           )}
+        </section>
+      )}
+
+      {status?.status === 'CONNECTED' && (
+        <section className="mt-6 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+          <p className="text-sm text-neutral-400">Facturatie-instellingen</p>
+          <p className="mt-1 text-sm text-neutral-300">
+            Nodig voor "Maak conceptfactuur in Teamleader" op de{' '}
+            <Link to="/backoffice/facturatie" className="underline">
+              Facturatie
+            </Link>
+            -pagina — Teamleader vraagt deze drie gegevens verplicht bij elke conceptfactuur.
+          </p>
+
+          {invoiceSettingsError && <p className="mt-3 text-sm text-red-300">{invoiceSettingsError}</p>}
+          {invoiceSettingsSaved && <p className="mt-3 text-sm text-emerald-300">Facturatie-instellingen opgeslagen.</p>}
+
+          <div className="mt-4 space-y-3">
+            <label className="block">
+              <span className="mb-1 block text-sm text-neutral-400">Departement</span>
+              {departments === null ? (
+                <p className="text-sm text-neutral-400">Departementen laden...</p>
+              ) : (
+                <select
+                  value={invoiceDepartmentId ?? ''}
+                  disabled={isSavingInvoiceSettings}
+                  onChange={(event) => {
+                    setInvoiceDepartmentId(event.target.value || null);
+                    setInvoiceTaxRateId(null); // een ander departement heeft andere btw-tarieven — vorige keuze is niet meer geldig.
+                  }}
+                  className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-sm text-white outline-none focus:border-swatt-gold"
+                >
+                  <option value="">Geen departement gekozen</option>
+                  {departments.map((department) => (
+                    <option key={department.id} value={department.id}>
+                      {department.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+
+            <label className="block">
+              <span className="mb-1 block text-sm text-neutral-400">Btw-tarief</span>
+              {!invoiceDepartmentId ? (
+                <p className="text-sm text-neutral-500">Kies eerst een departement.</p>
+              ) : taxRates === null ? (
+                <p className="text-sm text-neutral-400">Btw-tarieven laden...</p>
+              ) : (
+                <select
+                  value={invoiceTaxRateId ?? ''}
+                  disabled={isSavingInvoiceSettings}
+                  onChange={(event) => setInvoiceTaxRateId(event.target.value || null)}
+                  className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-sm text-white outline-none focus:border-swatt-gold"
+                >
+                  <option value="">Geen btw-tarief gekozen</option>
+                  {taxRates.map((taxRate) => (
+                    <option key={taxRate.id} value={taxRate.id}>
+                      {taxRate.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+
+            <label className="block">
+              <span className="mb-1 block text-sm text-neutral-400">Betalingstermijn</span>
+              {paymentTerms === null ? (
+                <p className="text-sm text-neutral-400">Betalingstermijnen laden...</p>
+              ) : (
+                <select
+                  value={invoicePaymentTermValue ?? ''}
+                  disabled={isSavingInvoiceSettings}
+                  onChange={(event) => setInvoicePaymentTermValue(event.target.value || null)}
+                  className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-sm text-white outline-none focus:border-swatt-gold"
+                >
+                  <option value="">Geen betalingstermijn gekozen</option>
+                  {paymentTerms.map((term) => (
+                    <option key={`${term.type}:${term.days}`} value={`${term.type}:${term.days}`}>
+                      {term.label}
+                      {term.isDefault ? ' (standaard)' : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void handleSaveInvoiceSettings()}
+            disabled={isSavingInvoiceSettings}
+            className="mt-4 rounded-lg border border-neutral-700 px-4 py-3 text-sm font-semibold text-neutral-200 active:bg-neutral-800 disabled:opacity-50"
+          >
+            {isSavingInvoiceSettings ? 'Bezig met opslaan...' : 'Facturatie-instellingen opslaan'}
+          </button>
         </section>
       )}
 

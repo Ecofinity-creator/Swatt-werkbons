@@ -1,8 +1,14 @@
 import type { InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { invoiceBatchesApi } from '../../api/client';
+import { customersApi, invoiceBatchesApi } from '../../api/client';
 import { ApiRequestError } from '../../auth/AuthContext';
+
+/** "€ 65,00" — of "niet ingesteld" wanneer nog geen uurtarief gekozen is (zie Customer.hourlyRateCents). */
+function formatEuroCents(cents: number | null): string {
+  if (cents === null) return 'niet ingesteld';
+  return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
 
 function currentPeriodLabel(): string {
   const now = new Date();
@@ -62,11 +68,13 @@ function groupByCustomerAndProject(workOrders: InvoiceableWorkOrderSummary[]): P
 
 /**
  * Backoffice-scherm "Facturatie" (sectie 17/29 — MVP1's "basis
- * facturatieoverzicht"). Bewust GEEN "maak conceptfactuur in
- * Teamleader"-knop deze ronde — zie claude/phase10-facturatie-onderzoek.md
- * (project docs): dat vereist eerst een productbeslissing over het
- * uurtarief. Deze pagina dekt enkel de lokale kant: werkbonnen selecteren en
- * "voorbereiden voor facturatie" (InvoiceBatch/InvoiceBatchLine).
+ * facturatieoverzicht"). Sinds Phase 10b ook de "Maak conceptfactuur in
+ * Teamleader"-knop op elke DRAFT-batch (zie claude/phase10-facturatie-onderzoek.md
+ * — Steven koos "tarief per klant", vandaar het bewerkbare uurtarief hier per
+ * batch). Werkbonnen selecteren en "voorbereiden voor facturatie" blijft de
+ * eerste, lokale stap (InvoiceBatch/InvoiceBatchLine); de Teamleader-stap
+ * hieronder is een losse, latere actie op een reeds voorbereide batch — zie
+ * TeamleaderInvoiceService voor de volledige toelichting.
  */
 export function InvoicingPage() {
   const [periodLabel, setPeriodLabel] = useState(currentPeriodLabel());
@@ -79,6 +87,14 @@ export function InvoicingPage() {
   const [isPreparing, setIsPreparing] = useState(false);
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const [removingBatchId, setRemovingBatchId] = useState<string | null>(null);
+
+  // Phase 10b — sectie 17: uurtarief per klant bewerken, en "Maak conceptfactuur in Teamleader".
+  const [editingRateBatchId, setEditingRateBatchId] = useState<string | null>(null);
+  const [rateInputValue, setRateInputValue] = useState('');
+  const [isSavingRate, setIsSavingRate] = useState(false);
+  const [rateError, setRateError] = useState<string | null>(null);
+  const [creatingDraftBatchId, setCreatingDraftBatchId] = useState<string | null>(null);
+  const [draftErrorByBatchId, setDraftErrorByBatchId] = useState<Record<string, string>>({});
 
   const load = useCallback(async (period: string) => {
     try {
@@ -156,6 +172,53 @@ export function InvoicingPage() {
       setLoadError(err instanceof ApiRequestError ? err.message : 'Verwijderen van de facturatiebatch is mislukt.');
     } finally {
       setRemovingBatchId(null);
+    }
+  }
+
+  function handleStartEditRate(batch: InvoiceBatchSummary) {
+    setEditingRateBatchId(batch.id);
+    setRateInputValue(batch.customerHourlyRateCents !== null ? (batch.customerHourlyRateCents / 100).toFixed(2) : '');
+    setRateError(null);
+  }
+
+  async function handleSaveRate(batch: InvoiceBatchSummary) {
+    const trimmed = rateInputValue.trim().replace(',', '.');
+    const euros = trimmed === '' ? null : Number(trimmed);
+    if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
+      setRateError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om het tarief te wissen.');
+      return;
+    }
+    setIsSavingRate(true);
+    setRateError(null);
+    try {
+      await customersApi.updateHourlyRate(batch.customerId, { hourlyRateCents: euros === null ? null : Math.round(euros * 100) });
+      setEditingRateBatchId(null);
+      await load(periodLabel);
+    } catch (err) {
+      setRateError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uurtarief is mislukt.');
+    } finally {
+      setIsSavingRate(false);
+    }
+  }
+
+  async function handleCreateTeamleaderDraft(batchId: string) {
+    setCreatingDraftBatchId(batchId);
+    setDraftErrorByBatchId((previous) => {
+      const next = { ...previous };
+      delete next[batchId];
+      return next;
+    });
+    try {
+      const response = await invoiceBatchesApi.createTeamleaderDraft(batchId);
+      if (!response.syncResult.success && response.syncResult.message) {
+        setDraftErrorByBatchId((previous) => ({ ...previous, [batchId]: response.syncResult.message! }));
+      }
+      await load(periodLabel);
+    } catch (err) {
+      const message = err instanceof ApiRequestError ? err.message : 'Aanmaken van de conceptfactuur is mislukt.';
+      setDraftErrorByBatchId((previous) => ({ ...previous, [batchId]: message }));
+    } finally {
+      setCreatingDraftBatchId(null);
     }
   }
 
@@ -301,34 +364,116 @@ export function InvoicingPage() {
         )}
         {batches && batches.length > 0 && (
           <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
-            <table className="w-full min-w-[640px] text-left text-sm">
+            <table className="w-full min-w-[900px] text-left text-sm">
               <thead className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
                 <tr>
                   <th className="px-4 py-3">Klant</th>
                   <th className="px-4 py-3">Werkbonnen</th>
                   <th className="px-4 py-3">Uren</th>
+                  <th className="px-4 py-3">Uurtarief</th>
                   <th className="px-4 py-3">Voorbereid op</th>
+                  <th className="px-4 py-3">Teamleader</th>
                   <th className="px-4 py-3" />
                 </tr>
               </thead>
               <tbody>
                 {batches.map((batch) => (
-                  <tr key={batch.id} className="border-b border-neutral-100 last:border-0">
-                    <td className="px-4 py-3 font-medium">{batch.customerName}</td>
-                    <td className="px-4 py-3 text-neutral-600">{batch.lines.map((line) => line.workOrderNumber).join(', ')}</td>
-                    <td className="px-4 py-3 text-neutral-600">{formatHm(batch.totalInvoiceableSeconds)} u</td>
-                    <td className="px-4 py-3 text-neutral-600">{formatDate(batch.createdAt)}</td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => void handleRemoveBatch(batch.id)}
-                        disabled={removingBatchId === batch.id}
-                        className="text-sm font-medium text-red-700 underline disabled:opacity-50"
-                      >
-                        {removingBatchId === batch.id ? 'Bezig...' : 'Verwijderen'}
-                      </button>
-                    </td>
-                  </tr>
+                  <Fragment key={batch.id}>
+                    <tr className="border-b border-neutral-100 last:border-0 align-top">
+                      <td className="px-4 py-3 font-medium">{batch.customerName}</td>
+                      <td className="px-4 py-3 text-neutral-600">{batch.lines.map((line) => line.workOrderNumber).join(', ')}</td>
+                      <td className="px-4 py-3 text-neutral-600">{formatHm(batch.totalInvoiceableSeconds)} u</td>
+                      <td className="px-4 py-3 text-neutral-600">
+                        {editingRateBatchId === batch.id ? (
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={rateInputValue}
+                              onChange={(event) => setRateInputValue(event.target.value)}
+                              placeholder="65,00"
+                              className="w-20 rounded border border-neutral-300 px-2 py-1 text-sm outline-none focus:border-swatt-gold-dark"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => void handleSaveRate(batch)}
+                              disabled={isSavingRate}
+                              className="text-xs font-semibold text-swatt-gold-dark underline disabled:opacity-50"
+                            >
+                              {isSavingRate ? '...' : 'Opslaan'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingRateBatchId(null)}
+                              disabled={isSavingRate}
+                              className="text-xs text-neutral-500 underline"
+                            >
+                              Annuleren
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleStartEditRate(batch)}
+                            className="underline decoration-dotted underline-offset-2"
+                          >
+                            {formatEuroCents(batch.customerHourlyRateCents)}
+                          </button>
+                        )}
+                        {editingRateBatchId === batch.id && rateError && <p className="mt-1 text-xs text-red-700">{rateError}</p>}
+                      </td>
+                      <td className="px-4 py-3 text-neutral-600">{formatDate(batch.createdAt)}</td>
+                      <td className="px-4 py-3">
+                        {batch.status === 'DRAFT' && !batch.teamleaderSyncError && (
+                          <span className="rounded-full bg-neutral-100 px-2 py-1 text-xs font-semibold text-neutral-600">
+                            Nog niet verstuurd
+                          </span>
+                        )}
+                        {batch.status === 'DRAFT' && batch.teamleaderSyncError && (
+                          <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-semibold text-red-700">Mislukt</span>
+                        )}
+                        {(batch.status === 'SUBMITTED_TO_TEAMLEADER' || batch.status === 'INVOICED') && (
+                          <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">
+                            Conceptfactuur aangemaakt
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {batch.status === 'DRAFT' && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateTeamleaderDraft(batch.id)}
+                            disabled={creatingDraftBatchId === batch.id || !batch.customerHourlyRateCents}
+                            title={!batch.customerHourlyRateCents ? 'Stel eerst een uurtarief in voor deze klant.' : undefined}
+                            className="mr-3 text-sm font-medium text-swatt-gold-dark underline disabled:cursor-not-allowed disabled:text-neutral-400 disabled:no-underline"
+                          >
+                            {creatingDraftBatchId === batch.id
+                              ? 'Bezig...'
+                              : batch.teamleaderSyncError
+                                ? 'Opnieuw proberen'
+                                : 'Maak conceptfactuur in Teamleader'}
+                          </button>
+                        )}
+                        {batch.status === 'DRAFT' && (
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveBatch(batch.id)}
+                            disabled={removingBatchId === batch.id}
+                            className="text-sm font-medium text-red-700 underline disabled:opacity-50"
+                          >
+                            {removingBatchId === batch.id ? 'Bezig...' : 'Verwijderen'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {draftErrorByBatchId[batch.id] && (
+                      <tr className="border-b border-neutral-100 bg-red-50/60 last:border-0">
+                        <td colSpan={7} className="px-4 py-2 text-xs text-red-700">
+                          {draftErrorByBatchId[batch.id]}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

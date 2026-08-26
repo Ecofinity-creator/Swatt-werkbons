@@ -6,6 +6,8 @@ import { MilestoneSyncService } from './milestone-sync.service';
 import { ProjectSyncService } from './project-sync.service';
 import { TeamleaderAuthService } from './teamleader-auth.service';
 import { TeamleaderClient } from './teamleader-client.service';
+import { TeamleaderInvoiceOptionsService } from './teamleader-invoice-options.service';
+import { TeamleaderInvoiceService } from './teamleader-invoice.service';
 import { TeamleaderUserService } from './teamleader-user.service';
 import { TimeTrackingSyncService } from './time-tracking-sync.service';
 import { DatabaseStorageService } from '../storage/storage.service';
@@ -23,6 +25,10 @@ declare module 'fastify' {
     milestoneSyncService: MilestoneSyncService;
     /** Phase 9 — orchestreert TIME_ENTRIES/PDF_UPLOAD-syncjobs (queue + durable SyncJob/SyncLog). */
     syncJobService: SyncJobService;
+    /** Phase 10b — live departments.list/taxRates.list/paymentTerms.list-opvraging voor het facturatie-instellingenscherm. */
+    teamleaderInvoiceOptionsService: TeamleaderInvoiceOptionsService;
+    /** Phase 10b — "Maak conceptfactuur in Teamleader" (invoices.draft), zie teamleader-invoice.service.ts. */
+    teamleaderInvoiceService: TeamleaderInvoiceService;
   }
 }
 
@@ -45,4 +51,6 @@ export default fp(async function teamleaderPlugin(app: FastifyInstance) {
   app.decorate('teamleaderUserService', new TeamleaderUserService(teamleaderClient));
   app.decorate('milestoneSyncService', milestoneSyncService);
   app.decorate('syncJobService', new SyncJobService(app.prisma, timeTrackingSyncService, fileSyncService));
+  app.decorate('teamleaderInvoiceOptionsService', new TeamleaderInvoiceOptionsService(teamleaderClient));
+  app.decorate('teamleaderInvoiceService', new TeamleaderInvoiceService(app.prisma, teamleaderClient));
 });

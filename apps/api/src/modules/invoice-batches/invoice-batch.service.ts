@@ -23,8 +23,12 @@ export interface InvoiceBatchRecord {
   totalInvoiceableSeconds: number;
   createdByUserId: string;
   createdAt: Date;
-  customer: { name: string };
+  customer: { name: string; hourlyRateCents: number | null };
   lines: InvoiceBatchLineRecord[];
+  /** Sinds Phase 10b — zie InvoiceBatch in schema.prisma. */
+  teamleaderInvoiceId: string | null;
+  teamleaderSyncError: string | null;
+  teamleaderSubmittedAt: Date | null;
 }
 
 export interface InvoiceableWorkOrderRecord {
@@ -32,7 +36,7 @@ export interface InvoiceableWorkOrderRecord {
   workOrderNumber: string;
   signedAt: Date | null;
   invoiceableSeconds: number;
-  customer: { id: string; name: string };
+  customer: { id: string; name: string; hourlyRateCents: number | null };
   project: { id: string; name: string; projectNumber: string | null };
   employeeDisplayNames: string[];
 }
@@ -58,7 +62,12 @@ interface InvoiceableWorkOrderRow {
   id: string;
   workOrderNumber: string;
   signature: { signedAt: Date } | null;
-  project: { id: string; name: string; projectNumber: string | null; customer: { id: string; name: string } };
+  project: {
+    id: string;
+    name: string;
+    projectNumber: string | null;
+    customer: { id: string; name: string; hourlyRateCents: number | null };
+  };
   timeEntries: Array<{
     timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number; employee: { displayName: string } };
   }>;
@@ -115,13 +124,22 @@ export class InvoiceBatchService {
       workOrderNumber: workOrder.workOrderNumber,
       signedAt: workOrder.signature?.signedAt ?? null,
       invoiceableSeconds: workOrder.timeEntries.reduce((sum, link) => sum + computeWorkedSeconds(link.timeEntry), 0),
-      customer: { id: workOrder.project.customer.id, name: workOrder.project.customer.name },
+      customer: {
+        id: workOrder.project.customer.id,
+        name: workOrder.project.customer.name,
+        hourlyRateCents: workOrder.project.customer.hourlyRateCents,
+      },
       project: { id: workOrder.project.id, name: workOrder.project.name, projectNumber: workOrder.project.projectNumber },
       employeeDisplayNames: Array.from(new Set(workOrder.timeEntries.map((link) => link.timeEntry.employee.displayName))).sort(),
     }));
 
     if (!filters.periodLabel) return records;
     return records.filter((record) => record.signedAt && periodLabelOf(record.signedAt) === filters.periodLabel);
+  }
+
+  /** Phase 10b — na een Teamleader-synchronisatiepoging heeft de route de bijgewerkte batch nodig om terug te geven (zie invoice-batch.routes.ts). */
+  async getById(id: string): Promise<InvoiceBatchRecord | null> {
+    return this.prisma.invoiceBatch.findUnique({ where: { id }, ...WITH_BATCH_DETAILS });
   }
 
   async list(filters: { customerId?: string | undefined; periodLabel?: string | undefined } = {}): Promise<InvoiceBatchRecord[]> {

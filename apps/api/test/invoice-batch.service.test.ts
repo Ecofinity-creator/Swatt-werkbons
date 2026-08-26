@@ -18,7 +18,7 @@ interface FakeWorkOrder {
   workOrderNumber: string;
   status: string;
   projectId: string;
-  project: { id: string; customerId: string; name: string; projectNumber: string | null; customer: { id: string; name: string } };
+  project: { id: string; customerId: string; name: string; projectNumber: string | null; customer: { id: string; name: string; hourlyRateCents: number | null } };
   signature: { signedAt: Date } | null;
   timeEntries: Array<{
     timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number; employeeId: string; employee: { displayName: string } };
@@ -61,7 +61,18 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
     invoiceBatch: {
       create: async ({ data }: { data: { customerId: string; periodLabel: string; createdByUserId: string; totalInvoiceableSeconds: number; lines: { create: Array<{ workOrderId: string; invoiceableSeconds: number }> } } }) => {
         const id = genId('batch');
-        const batch = { id, customerId: data.customerId, periodLabel: data.periodLabel, status: 'DRAFT', totalInvoiceableSeconds: data.totalInvoiceableSeconds, createdByUserId: data.createdByUserId, createdAt: new Date() };
+        const batch = {
+          id,
+          customerId: data.customerId,
+          periodLabel: data.periodLabel,
+          status: 'DRAFT',
+          totalInvoiceableSeconds: data.totalInvoiceableSeconds,
+          createdByUserId: data.createdByUserId,
+          createdAt: new Date(),
+          teamleaderInvoiceId: null,
+          teamleaderSyncError: null,
+          teamleaderSubmittedAt: null,
+        };
         batches.set(id, batch);
         for (const line of data.lines.create) {
           const lineId = genId('line');
@@ -92,7 +103,7 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
     const batch = batches.get(id);
     if (!batch) throw new Error('batch niet gevonden');
     const batchLines = Array.from(lines.values()).filter((line) => line.invoiceBatchId === id);
-    const customer = workOrders.find((wo) => wo.project.customerId === batch.customerId)?.project.customer ?? { id: batch.customerId, name: '?' };
+    const customer = workOrders.find((wo) => wo.project.customerId === batch.customerId)?.project.customer ?? { id: batch.customerId, name: '?', hourlyRateCents: null };
     return {
       ...batch,
       customer,
@@ -106,8 +117,8 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
   return { prisma: prisma as unknown as PrismaClient };
 }
 
-const janssens = { id: 'cust-janssens', name: 'Janssens BV' };
-const deSmet = { id: 'cust-desmet', name: 'De Smet NV' };
+const janssens = { id: 'cust-janssens', name: 'Janssens BV', hourlyRateCents: 6500 };
+const deSmet = { id: 'cust-desmet', name: 'De Smet NV', hourlyRateCents: null };
 const peter = 'emp-peter';
 const wannes = 'emp-wannes';
 

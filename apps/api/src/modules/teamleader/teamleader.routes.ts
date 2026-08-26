@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type {
   PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
+  TeamleaderInvoiceOptionsResponseBody,
   TeamleaderSettingsResponseBody,
   TeamleaderStatusResponseBody,
   UpdateTeamleaderSettingsBody,
@@ -15,6 +16,15 @@ import { TEAMLEADER_CONNECTION_SINGLETON_ID } from './teamleader-auth.service';
 
 const updateTeamleaderSettingsBodySchema = z.object({
   defaultMilestoneResponsibleTeamleaderUserId: z.string().trim().min(1).nullable(),
+  // Phase 10b — sectie 17: de vier vaste keuzes die invoices.draft verplicht vraagt.
+  invoiceDepartmentId: z.string().trim().min(1).nullable(),
+  invoiceTaxRateId: z.string().trim().min(1).nullable(),
+  invoicePaymentTermType: z.string().trim().min(1).nullable(),
+  invoicePaymentTermDays: z.number().int().min(0).nullable(),
+});
+
+const invoiceOptionsQuerySchema = z.object({
+  departmentId: z.string().trim().min(1).optional(),
 });
 
 /** Kortlevende httpOnly cookie die het CSRF-`state` bewaart tussen /authorize en /callback. */
@@ -220,9 +230,7 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
       const connection = await app.prisma.teamleaderConnection.findUnique({
         where: { id: TEAMLEADER_CONNECTION_SINGLETON_ID },
       });
-      return {
-        defaultMilestoneResponsibleTeamleaderUserId: connection?.defaultMilestoneResponsibleTeamleaderUserId ?? null,
-      };
+      return toSettingsResponseBody(connection);
     },
   );
 
@@ -233,13 +241,47 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
       const body: UpdateTeamleaderSettingsBody = updateTeamleaderSettingsBodySchema.parse(request.body);
       const connection = await app.prisma.teamleaderConnection.upsert({
         where: { id: TEAMLEADER_CONNECTION_SINGLETON_ID },
-        create: {
-          id: TEAMLEADER_CONNECTION_SINGLETON_ID,
-          defaultMilestoneResponsibleTeamleaderUserId: body.defaultMilestoneResponsibleTeamleaderUserId,
-        },
-        update: { defaultMilestoneResponsibleTeamleaderUserId: body.defaultMilestoneResponsibleTeamleaderUserId },
+        create: { id: TEAMLEADER_CONNECTION_SINGLETON_ID, ...body },
+        update: body,
       });
-      return { defaultMilestoneResponsibleTeamleaderUserId: connection.defaultMilestoneResponsibleTeamleaderUserId };
+      return toSettingsResponseBody(connection);
     },
   );
+
+  /**
+   * Phase 10b — vult de vier dropdowns in de "Facturatie-instellingen"-sectie
+   * (zie TeamleaderSettingsPage.tsx). `taxRates` is enkel gevuld wanneer een
+   * `departmentId` meegegeven werd (taxRates.list is filterbaar op
+   * department_id) — de frontend vraagt dit opnieuw op zodra de admin een
+   * ander departement kiest.
+   */
+  app.get(
+    '/admin/teamleader/invoice-options',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<TeamleaderInvoiceOptionsResponseBody> => {
+      const query = invoiceOptionsQuerySchema.parse(request.query);
+      const [departments, paymentTerms, taxRates] = await Promise.all([
+        app.teamleaderInvoiceOptionsService.listDepartments(),
+        app.teamleaderInvoiceOptionsService.listPaymentTerms(),
+        query.departmentId ? app.teamleaderInvoiceOptionsService.listTaxRates(query.departmentId) : Promise.resolve([]),
+      ]);
+      return { departments, paymentTerms, taxRates };
+    },
+  );
+}
+
+function toSettingsResponseBody(connection: {
+  defaultMilestoneResponsibleTeamleaderUserId: string | null;
+  invoiceDepartmentId: string | null;
+  invoiceTaxRateId: string | null;
+  invoicePaymentTermType: string | null;
+  invoicePaymentTermDays: number | null;
+} | null): TeamleaderSettingsResponseBody {
+  return {
+    defaultMilestoneResponsibleTeamleaderUserId: connection?.defaultMilestoneResponsibleTeamleaderUserId ?? null,
+    invoiceDepartmentId: connection?.invoiceDepartmentId ?? null,
+    invoiceTaxRateId: connection?.invoiceTaxRateId ?? null,
+    invoicePaymentTermType: connection?.invoicePaymentTermType ?? null,
+    invoicePaymentTermDays: connection?.invoicePaymentTermDays ?? null,
+  };
 }

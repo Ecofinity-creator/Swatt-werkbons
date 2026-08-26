@@ -9,6 +9,7 @@ import authPlugin from './modules/auth/auth.plugin';
 import authRoutes from './modules/auth/auth.routes';
 import seedRoutes from './modules/admin/seed.routes';
 import companySettingsRoutes from './modules/company-settings/company-settings.routes';
+import customerRoutes from './modules/customers/customer.routes';
 import invoiceBatchRoutes from './modules/invoice-batches/invoice-batch.routes';
 import projectRoutes from './modules/projects/project.routes';
 import teamleaderPlugin from './modules/teamleader/teamleader.plugin';
@@ -130,6 +131,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(timeEntryRoutes);
   await app.register(workOrderRoutes);
   await app.register(companySettingsRoutes);
+  await app.register(customerRoutes);
   await app.register(invoiceBatchRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
