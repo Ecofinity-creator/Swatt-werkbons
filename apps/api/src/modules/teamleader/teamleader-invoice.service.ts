@@ -67,14 +67,15 @@ interface TeamleaderConnectionInvoiceSettings {
  * gooien wél een gewone ApiError — die zijn niet "Teamleader is tijdelijk
  * onbereikbaar", maar "dit moet eerst ingesteld worden" (sectie 27).
  *
- * BELANGRIJK — nog niet live geverifieerd tegen een echt Teamleader-account
- * (geen OAuth-verbinding in deze sandbox), met name: het exacte formaat van
- * `unit_price.amount` (hier als JS-getal met 2 decimalen verstuurd — het
- * blueprint specificeert geen string/number-onderscheid) en of `grouped_lines`
- * zonder `section`-veld per groep aanvaard wordt. Bij een afwijzing bevat
- * `teamleaderSyncError` de volledige Teamleader-foutrespons (via
- * TeamleaderApiError, zie teamleader-client.service.ts) — dat is precies wat
- * nodig is om dit snel bij te stellen op basis van de échte foutmelding,
+ * Live geverifieerd op 26/08/2026 tegen het echte Teamleader-account van
+ * Ecofinity: de eerste poging gaf een 400 terug ("tax must be present",
+ * meta.field: "tax") — opgelost door `unit_price.tax: "excluding"` toe te
+ * voegen (verplicht veld volgens apiary.apib → InvoiceGroupedLinesWrite, was
+ * niet duidelijk uit het blueprint-fragment dat eerder geraadpleegd werd).
+ * `grouped_lines` zonder `section`-veld per groep werd wél aanvaard. Bij een
+ * afwijzing bevat `teamleaderSyncError` de volledige Teamleader-foutrespons
+ * (via TeamleaderApiError, zie teamleader-client.service.ts) — dat is precies
+ * wat nodig is om dit snel bij te stellen op basis van de échte foutmelding,
  * zonder Render-logtoegang nodig te hebben.
  */
 export class TeamleaderInvoiceService {
@@ -172,7 +173,13 @@ function buildLineItem(line: DraftBatchLineRow, hourlyRateCents: number, taxRate
   return {
     quantity: hours,
     description,
-    unit_price: { amount: Math.round(hourlyRateCents) / 100, currency: 'EUR' },
+    // `unit_price.tax` is een verplicht veld volgens de officiële Teamleader-
+    // API-specificatie (apiary.apib → InvoiceGroupedLinesWrite): het geeft aan
+    // dat `amount` een bedrag EXCLUSIEF btw is (de enige toegestane waarde is
+    // `excluding` — Teamleader berekent de btw zelf via `tax_rate_id`
+    // hieronder). Live geverifieerd op 26/08/2026: zonder dit veld gaf
+    // invoices.draft een 400 terug met "tax must be present" (meta.field: "tax").
+    unit_price: { amount: Math.round(hourlyRateCents) / 100, tax: 'excluding' as const },
     tax_rate_id: taxRateId,
   };
 }

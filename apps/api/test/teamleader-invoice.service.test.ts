@@ -110,7 +110,7 @@ describe('TeamleaderInvoiceService', () => {
     const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items;
     expect(lineItems).toHaveLength(1);
     expect(lineItems?.[0]?.quantity).toBeCloseTo(2.28, 2); // 2u17 → 2,28u
-    expect(lineItems?.[0]?.unit_price).toEqual({ amount: 65, currency: 'EUR' });
+    expect(lineItems?.[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
     expect(lineItems?.[0]?.tax_rate_id).toBe('tax-21');
     expect(lineItems?.[0]?.description).toContain('WB-2026-000123');
     expect(lineItems?.[0]?.description).toContain('Peter Janssens');
