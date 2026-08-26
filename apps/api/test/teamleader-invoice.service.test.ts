@@ -5,9 +5,12 @@ import { TeamleaderApiError, type TeamleaderClient } from '../src/modules/teamle
 import { TEAMLEADER_CONNECTION_SINGLETON_ID } from '../src/modules/teamleader/teamleader-auth.service';
 
 /**
- * Unit-tests voor "Maak conceptfactuur in Teamleader" (Phase 10b, sectie 17).
- * Fake-Prisma bootst enkel `invoiceBatch.findUnique`/`.update` en
- * `teamleaderConnection.findUnique` na — precies wat deze service gebruikt.
+ * Unit-tests voor "Maak conceptfactuur in Teamleader" (Phase 10b, sectie 17;
+ * sinds de uitbreiding "tarief per medewerker i.p.v. per klant" geprijsd op
+ * basis van Employee.defaultHourlyRateCents / InvoiceBatchEmployeeRate i.p.v.
+ * Customer.hourlyRateCents). Fake-Prisma bootst enkel `invoiceBatch.findUnique`/
+ * `.update` en `teamleaderConnection.findUnique` na — precies wat deze service
+ * gebruikt.
  */
 
 interface FakeConnectionSettings {
@@ -17,6 +20,13 @@ interface FakeConnectionSettings {
   invoicePaymentTermDays: number | null;
 }
 
+interface FakeTimeEntry {
+  startedAt: Date;
+  endedAt: Date | null;
+  pausedSeconds: number;
+  employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
+}
+
 interface FakeBatch {
   id: string;
   status: string;
@@ -24,13 +34,14 @@ interface FakeBatch {
   customer: { name: string; teamleaderId: string; teamleaderType: string; hourlyRateCents: number | null };
   teamleaderInvoiceId?: string | null;
   teamleaderSyncError?: string | null;
+  employeeRates: Array<{ employeeId: string; hourlyRateCents: number }>;
   lines: Array<{
     invoiceableSeconds: number;
     workOrder: {
       workOrderNumber: string;
       description: string | null;
       project: { id: string; name: string; teamleaderId: string };
-      timeEntries: Array<{ timeEntry: { employee: { displayName: string } } }>;
+      timeEntries: Array<{ timeEntry: FakeTimeEntry }>;
     };
   }>;
 }
@@ -68,13 +79,27 @@ const validSettings: FakeConnectionSettings = {
   invoicePaymentTermDays: 0,
 }
 
+const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 };
+
+/** 2u17 gewerkt (08:00 → 10:17, geen pauze) — zelfde uren als het oorspronkelijke voorbeeld. */
+function peterTimeEntry(overrides: Partial<FakeTimeEntry['employee']> = {}) {
+  return {
+    timeEntry: {
+      startedAt: new Date('2026-08-20T08:00:00Z'),
+      endedAt: new Date('2026-08-20T10:17:00Z'),
+      pausedSeconds: 0,
+      employee: { ...peter, ...overrides },
+    },
+  };
+}
+
 const baseLine = {
   invoiceableSeconds: 2 * 60 * 60 + 17 * 60, // 2u17
   workOrder: {
     workOrderNumber: 'WB-2026-000123',
     description: 'Onderhoud uitgevoerd.',
     project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1' },
-    timeEntries: [{ timeEntry: { employee: { displayName: 'Peter Janssens' } } }],
+    timeEntries: [peterTimeEntry()],
   },
 };
 
@@ -83,14 +108,15 @@ function baseBatch(overrides: Partial<FakeBatch> = {}): FakeBatch {
     id: 'batch-1',
     status: 'DRAFT',
     customerId: 'cust-1',
-    customer: { name: 'Janssens BV', teamleaderId: 'tl-cust-1', teamleaderType: 'company', hourlyRateCents: 6500 },
+    customer: { name: 'Janssens BV', teamleaderId: 'tl-cust-1', teamleaderType: 'company', hourlyRateCents: null },
+    employeeRates: [],
     lines: [baseLine],
     ...overrides,
   };
 }
 
 describe('TeamleaderInvoiceService', () => {
-  it('maakt een conceptfactuur aan en zet de batch op SUBMITTED_TO_TEAMLEADER', async () => {
+  it('maakt een conceptfactuur aan en zet de batch op SUBMITTED_TO_TEAMLEADER — geprijsd met het standaardtarief van de medewerker', async () => {
     const { prisma, getState } = createFakePrisma(baseBatch(), validSettings);
     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
     const service = new TeamleaderInvoiceService(prisma, client);
@@ -110,10 +136,80 @@ describe('TeamleaderInvoiceService', () => {
     const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items;
     expect(lineItems).toHaveLength(1);
     expect(lineItems?.[0]?.quantity).toBeCloseTo(2.28, 2); // 2u17 → 2,28u
-    expect(lineItems?.[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
+    expect(lineItems?.[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' }); // Peters defaultHourlyRateCents (6500)
     expect(lineItems?.[0]?.tax_rate_id).toBe('tax-21');
     expect(lineItems?.[0]?.description).toContain('WB-2026-000123');
     expect(lineItems?.[0]?.description).toContain('Peter Janssens');
+  });
+
+  it('splitst één werkbon in aparte factuurregels per medewerker, elk met hun eigen tarief', async () => {
+    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500 };
+    const multiEmployeeLine = {
+      ...baseLine,
+      workOrder: {
+        ...baseLine.workOrder,
+        timeEntries: [
+          peterTimeEntry(),
+          {
+            timeEntry: {
+              startedAt: new Date('2026-08-20T08:15:00Z'),
+              endedAt: new Date('2026-08-20T16:30:00Z'), // 8u15 gewerkt
+              pausedSeconds: 30 * 60,
+              employee: wannes,
+            },
+          },
+        ],
+      },
+    };
+    const { prisma } = createFakePrisma(baseBatch({ lines: [multiEmployeeLine] }), validSettings);
+    const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+    const service = new TeamleaderInvoiceService(prisma, client);
+
+    await service.createDraftInvoice('batch-1');
+
+    const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+    const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+    expect(lineItems).toHaveLength(2);
+
+    const peterLine = lineItems.find((item) => (item.description as string).includes('Peter Janssens'));
+    const wannesLine = lineItems.find((item) => (item.description as string).includes('Wannes Peeters'));
+    expect(peterLine?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
+    expect(peterLine?.quantity).toBeCloseTo(2.28, 2);
+    expect(wannesLine?.unit_price).toEqual({ amount: 55, tax: 'excluding' });
+    expect(wannesLine?.quantity).toBeCloseTo(7.75, 2); // 8u15 - 0u30 pauze = 7u45
+  });
+
+  it('gebruikt de eenmalige batch-override wanneer de medewerker geen standaardtarief heeft', async () => {
+    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null };
+    const line = {
+      ...baseLine,
+      workOrder: {
+        ...baseLine.workOrder,
+        timeEntries: [
+          {
+            timeEntry: {
+              startedAt: new Date('2026-08-20T08:00:00Z'),
+              endedAt: new Date('2026-08-20T10:00:00Z'),
+              pausedSeconds: 0,
+              employee: wannes,
+            },
+          },
+        ],
+      },
+    };
+    const { prisma } = createFakePrisma(
+      baseBatch({ lines: [line], employeeRates: [{ employeeId: 'emp-wannes', hourlyRateCents: 4800 }] }),
+      validSettings,
+    );
+    const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+    const service = new TeamleaderInvoiceService(prisma, client);
+
+    await service.createDraftInvoice('batch-1');
+
+    const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+    const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+    expect(lineItems).toHaveLength(1);
+    expect(lineItems[0]?.unit_price).toEqual({ amount: 48, tax: 'excluding' }); // override, niet het (ontbrekende) standaardtarief
   });
 
   it('laat project_id weg wanneer de batch werkbonnen van verschillende projecten bevat', async () => {
@@ -131,12 +227,14 @@ describe('TeamleaderInvoiceService', () => {
     expect(payload.project_id).toBeUndefined();
   });
 
-  it('weigert wanneer de klant nog geen uurtarief heeft', async () => {
-    const { prisma } = createFakePrisma(baseBatch({ customer: { name: 'Janssens BV', teamleaderId: 'tl-cust-1', teamleaderType: 'company', hourlyRateCents: null } }), validSettings);
+  it('weigert wanneer een medewerker op de batch nog geen uurtarief heeft (noch standaard, noch een eenmalige override)', async () => {
+    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null };
+    const line = { ...baseLine, workOrder: { ...baseLine.workOrder, timeEntries: [peterTimeEntry(), { timeEntry: { ...peterTimeEntry().timeEntry, employee: zonderTarief } }] } };
+    const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
     const service = new TeamleaderInvoiceService(prisma, client);
 
-    await expect(service.createDraftInvoice('batch-1')).rejects.toMatchObject({ code: 'INVOICE_BATCH_HOURLY_RATE_NOT_SET' });
+    await expect(service.createDraftInvoice('batch-1')).rejects.toMatchObject({ code: 'INVOICE_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET' });
     expect(client.post).not.toHaveBeenCalled();
   });
 

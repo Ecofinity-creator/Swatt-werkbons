@@ -1,13 +1,18 @@
-import type { InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
+import type { InvoiceBatchEmployeeRateSummary, InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { customersApi, invoiceBatchesApi } from '../../api/client';
+import { invoiceBatchesApi } from '../../api/client';
 import { ApiRequestError } from '../../auth/AuthContext';
 
-/** "€ 65,00" — of "niet ingesteld" wanneer nog geen uurtarief gekozen is (zie Customer.hourlyRateCents). */
+/** "€ 65,00" — of "niet ingesteld" wanneer nog geen uurtarief gekozen is. */
 function formatEuroCents(cents: number | null): string {
   if (cents === null) return 'niet ingesteld';
   return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** "Maak conceptfactuur in Teamleader" mag pas als elke medewerker op deze batch een (standaard- of eenmalig) tarief heeft. */
+function allEmployeeRatesSet(batch: InvoiceBatchSummary): boolean {
+  return batch.employeeRates.every((rate) => rate.effectiveHourlyRateCents !== null);
 }
 
 function currentPeriodLabel(): string {
@@ -69,12 +74,19 @@ function groupByCustomerAndProject(workOrders: InvoiceableWorkOrderSummary[]): P
 /**
  * Backoffice-scherm "Facturatie" (sectie 17/29 — MVP1's "basis
  * facturatieoverzicht"). Sinds Phase 10b ook de "Maak conceptfactuur in
- * Teamleader"-knop op elke DRAFT-batch (zie claude/phase10-facturatie-onderzoek.md
- * — Steven koos "tarief per klant", vandaar het bewerkbare uurtarief hier per
- * batch). Werkbonnen selecteren en "voorbereiden voor facturatie" blijft de
- * eerste, lokale stap (InvoiceBatch/InvoiceBatchLine); de Teamleader-stap
- * hieronder is een losse, latere actie op een reeds voorbereide batch — zie
- * TeamleaderInvoiceService voor de volledige toelichting.
+ * Teamleader"-knop op elke DRAFT-batch. Werkbonnen selecteren en
+ * "voorbereiden voor facturatie" blijft de eerste, lokale stap
+ * (InvoiceBatch/InvoiceBatchLine); de Teamleader-stap hieronder is een losse,
+ * latere actie op een reeds voorbereide batch — zie TeamleaderInvoiceService
+ * voor de volledige toelichting.
+ *
+ * Facturatie: tarief per medewerker i.p.v. per klant (uitbreiding na Phase
+ * 10b). Elke batch toont hier per betrokken medewerker het uurtarief waarmee
+ * de conceptfactuur geprijsd wordt (standaardtarief uit "Medewerkers", of —
+ * ontbreekt dat nog — een eenmalige override die hier, vlak vóór het
+ * aanmaken van de factuur, ingevuld kan worden). "Maak conceptfactuur in
+ * Teamleader" blijft uitgeschakeld zolang niet elke medewerker een tarief
+ * heeft.
  */
 export function InvoicingPage() {
   const [periodLabel, setPeriodLabel] = useState(currentPeriodLabel());
@@ -88,8 +100,9 @@ export function InvoicingPage() {
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const [removingBatchId, setRemovingBatchId] = useState<string | null>(null);
 
-  // Phase 10b — sectie 17: uurtarief per klant bewerken, en "Maak conceptfactuur in Teamleader".
-  const [editingRateBatchId, setEditingRateBatchId] = useState<string | null>(null);
+  // Facturatie: tarief per medewerker bewerken (eenmalige override, zie
+  // InvoiceBatchEmployeeRateSummary), en "Maak conceptfactuur in Teamleader".
+  const [editingRate, setEditingRate] = useState<{ batchId: string; employeeId: string } | null>(null);
   const [rateInputValue, setRateInputValue] = useState('');
   const [isSavingRate, setIsSavingRate] = useState(false);
   const [rateError, setRateError] = useState<string | null>(null);
@@ -175,24 +188,26 @@ export function InvoicingPage() {
     }
   }
 
-  function handleStartEditRate(batch: InvoiceBatchSummary) {
-    setEditingRateBatchId(batch.id);
-    setRateInputValue(batch.customerHourlyRateCents !== null ? (batch.customerHourlyRateCents / 100).toFixed(2) : '');
+  function handleStartEditRate(batchId: string, rate: InvoiceBatchEmployeeRateSummary) {
+    setEditingRate({ batchId, employeeId: rate.employeeId });
+    setRateInputValue(rate.overrideHourlyRateCents !== null ? (rate.overrideHourlyRateCents / 100).toFixed(2) : '');
     setRateError(null);
   }
 
-  async function handleSaveRate(batch: InvoiceBatchSummary) {
+  async function handleSaveRate(batchId: string, employeeId: string) {
     const trimmed = rateInputValue.trim().replace(',', '.');
     const euros = trimmed === '' ? null : Number(trimmed);
     if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
-      setRateError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om het tarief te wissen.');
+      setRateError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om de override te wissen.');
       return;
     }
     setIsSavingRate(true);
     setRateError(null);
     try {
-      await customersApi.updateHourlyRate(batch.customerId, { hourlyRateCents: euros === null ? null : Math.round(euros * 100) });
-      setEditingRateBatchId(null);
+      await invoiceBatchesApi.setEmployeeRate(batchId, employeeId, {
+        hourlyRateCents: euros === null ? null : Math.round(euros * 100),
+      });
+      setEditingRate(null);
       await load(periodLabel);
     } catch (err) {
       setRateError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uurtarief is mislukt.');
@@ -370,7 +385,7 @@ export function InvoicingPage() {
                   <th className="px-4 py-3">Klant</th>
                   <th className="px-4 py-3">Werkbonnen</th>
                   <th className="px-4 py-3">Uren</th>
-                  <th className="px-4 py-3">Uurtarief</th>
+                  <th className="px-4 py-3">Tarieven (per medewerker)</th>
                   <th className="px-4 py-3">Voorbereid op</th>
                   <th className="px-4 py-3">Teamleader</th>
                   <th className="px-4 py-3" />
@@ -384,43 +399,59 @@ export function InvoicingPage() {
                       <td className="px-4 py-3 text-neutral-600">{batch.lines.map((line) => line.workOrderNumber).join(', ')}</td>
                       <td className="px-4 py-3 text-neutral-600">{formatHm(batch.totalInvoiceableSeconds)} u</td>
                       <td className="px-4 py-3 text-neutral-600">
-                        {editingRateBatchId === batch.id ? (
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              value={rateInputValue}
-                              onChange={(event) => setRateInputValue(event.target.value)}
-                              placeholder="65,00"
-                              className="w-20 rounded border border-neutral-300 px-2 py-1 text-sm outline-none focus:border-swatt-gold-dark"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => void handleSaveRate(batch)}
-                              disabled={isSavingRate}
-                              className="text-xs font-semibold text-swatt-gold-dark underline disabled:opacity-50"
-                            >
-                              {isSavingRate ? '...' : 'Opslaan'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setEditingRateBatchId(null)}
-                              disabled={isSavingRate}
-                              className="text-xs text-neutral-500 underline"
-                            >
-                              Annuleren
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleStartEditRate(batch)}
-                            className="underline decoration-dotted underline-offset-2"
-                          >
-                            {formatEuroCents(batch.customerHourlyRateCents)}
-                          </button>
-                        )}
-                        {editingRateBatchId === batch.id && rateError && <p className="mt-1 text-xs text-red-700">{rateError}</p>}
+                        <ul className="space-y-1">
+                          {batch.employeeRates.map((rate) => {
+                            const isEditing = editingRate?.batchId === batch.id && editingRate.employeeId === rate.employeeId;
+                            return (
+                              <li key={rate.employeeId}>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-medium text-neutral-700">{rate.displayName}:</span>
+                                  {isEditing ? (
+                                    <>
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={rateInputValue}
+                                        onChange={(event) => setRateInputValue(event.target.value)}
+                                        placeholder="65,00"
+                                        className="w-20 rounded border border-neutral-300 px-2 py-1 text-sm outline-none focus:border-swatt-gold-dark"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleSaveRate(batch.id, rate.employeeId)}
+                                        disabled={isSavingRate}
+                                        className="text-xs font-semibold text-swatt-gold-dark underline disabled:opacity-50"
+                                      >
+                                        {isSavingRate ? '...' : 'Opslaan'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingRate(null)}
+                                        disabled={isSavingRate}
+                                        className="text-xs text-neutral-500 underline"
+                                      >
+                                        Annuleren
+                                      </button>
+                                    </>
+                                  ) : rate.defaultHourlyRateCents !== null ? (
+                                    <span>{formatEuroCents(rate.defaultHourlyRateCents)} (standaard)</span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartEditRate(batch.id, rate)}
+                                      className="underline decoration-dotted underline-offset-2"
+                                    >
+                                      {rate.overrideHourlyRateCents !== null
+                                        ? `${formatEuroCents(rate.overrideHourlyRateCents)} (eenmalig)`
+                                        : 'nog niet ingesteld'}
+                                    </button>
+                                  )}
+                                </div>
+                                {isEditing && rateError && <p className="mt-1 text-xs text-red-700">{rateError}</p>}
+                              </li>
+                            );
+                          })}
+                        </ul>
                       </td>
                       <td className="px-4 py-3 text-neutral-600">{formatDate(batch.createdAt)}</td>
                       <td className="px-4 py-3">
@@ -443,8 +474,15 @@ export function InvoicingPage() {
                           <button
                             type="button"
                             onClick={() => void handleCreateTeamleaderDraft(batch.id)}
-                            disabled={creatingDraftBatchId === batch.id || !batch.customerHourlyRateCents}
-                            title={!batch.customerHourlyRateCents ? 'Stel eerst een uurtarief in voor deze klant.' : undefined}
+                            disabled={creatingDraftBatchId === batch.id || !allEmployeeRatesSet(batch)}
+                            title={
+                              !allEmployeeRatesSet(batch)
+                                ? `Vul eerst een uurtarief in voor: ${batch.employeeRates
+                                    .filter((rate) => rate.effectiveHourlyRateCents === null)
+                                    .map((rate) => rate.displayName)
+                                    .join(', ')}.`
+                                : undefined
+                            }
                             className="mr-3 text-sm font-medium text-swatt-gold-dark underline disabled:cursor-not-allowed disabled:text-neutral-400 disabled:no-underline"
                           >
                             {creatingDraftBatchId === batch.id

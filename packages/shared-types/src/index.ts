@@ -111,6 +111,8 @@ export interface AdminUserSummary {
     id: string;
     displayName: string;
     phone: string | null;
+    /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), zie Employee.defaultHourlyRateCents. */
+    defaultHourlyRateCents: number | null;
   } | null;
   createdAt: string;
   /** Phase 9 — gekoppelde Teamleader-gebruiker (sectie 14), `null` = nog niet gekoppeld. */
@@ -140,6 +142,8 @@ export interface UpdateUserBody {
   isActive?: boolean;
   displayName?: string;
   phone?: string | null;
+  /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), `null` wist het weer. */
+  defaultHourlyRateCents?: number | null;
 }
 
 export interface UpdateUserResponseBody {
@@ -214,6 +218,8 @@ export interface TimeEntrySummary {
   /** Enkel gezet wanneer status = PAUSED — start van de huidige, nog lopende pauze. */
   currentPauseStartedAt: string | null;
   description: string | null;
+  /** Sectie 6: true wanneer aangemaakt via POST /time-entries/manual (vaste start-/eindtijd) i.p.v. de START/PAUZE/STOP-timerflow. Zuiver informatief. */
+  isManual: boolean;
 }
 
 /** Response van GET /time-entries/active — null wanneer de werknemer geen actieve (RUNNING/PAUSED) registratie heeft. */
@@ -232,6 +238,20 @@ export interface StartTimeEntryBody {
 
 /** Body van POST /time-entries/:id/stop — `description` is optioneel. */
 export interface StopTimeEntryBody {
+  description?: string;
+}
+
+/**
+ * Body van POST /time-entries/manual (sectie 6: "manueel tijd toevoegen
+ * indien toegestaan"). `startedAt`/`endedAt` zijn volledige ISO-tijdstippen
+ * (UTC) — de frontend zet een lokale datum + start-/einduur zelf om vóór
+ * verzending. `pausedMinutes` is optioneel (standaard 0).
+ */
+export interface CreateManualTimeEntryBody {
+  projectId: string;
+  startedAt: string;
+  endedAt: string;
+  pausedMinutes?: number;
   description?: string;
 }
 
@@ -639,13 +659,31 @@ export interface InvoiceBatchLineSummary {
   invoiceableSeconds: number;
 }
 
+/**
+ * Eén medewerker die op minstens één werkbon van deze InvoiceBatch voorkomt,
+ * met het tarief waarmee zijn/haar uren geprijsd worden op de conceptfactuur.
+ * `effectiveHourlyRateCents` is `overrideHourlyRateCents ?? defaultHourlyRateCents`
+ * — `null` betekent dat er voor deze medewerker nog geen tarief is (noch een
+ * standaardtarief in de instellingen, noch een eenmalige override op deze
+ * batch) en "Maak conceptfactuur in Teamleader" dus nog niet mogelijk is.
+ */
+export interface InvoiceBatchEmployeeRateSummary {
+  employeeId: string;
+  displayName: string;
+  defaultHourlyRateCents: number | null;
+  overrideHourlyRateCents: number | null;
+  effectiveHourlyRateCents: number | null;
+}
+
 /** Eén "voorbereiden voor facturatie"-groepering (InvoiceBatch). */
 export interface InvoiceBatchSummary {
   id: string;
   customerId: string;
   customerName: string;
-  /** Sinds Phase 10b — zie Customer.hourlyRateCents. `null` ⇒ "Maak conceptfactuur in Teamleader" is nog niet mogelijk voor deze batch. */
+  /** @deprecated Sinds de overstap naar tarief-per-medewerker niet meer gebruikt om de conceptfactuur te prijzen — zie `employeeRates`. Blijft bestaan als Customer-veld, puur informatief. */
   customerHourlyRateCents: number | null;
+  /** Medewerker(s) op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie InvoiceBatchEmployeeRateSummary. */
+  employeeRates: InvoiceBatchEmployeeRateSummary[];
   periodLabel: string;
   status: InvoiceBatchStatus;
   totalInvoiceableSeconds: number;
@@ -683,4 +721,13 @@ export interface CreateInvoiceBatchResponseBody {
 export interface CreateTeamleaderDraftInvoiceResponseBody {
   batch: InvoiceBatchSummary;
   syncResult: { success: boolean; message: string | null };
+}
+
+/** Body van POST /admin/invoice-batches/:id/employee-rates/:employeeId — `null` wist de override weer (valt dan terug op `Employee.defaultHourlyRateCents`, indien ingevuld). */
+export interface UpdateInvoiceBatchEmployeeRateBody {
+  hourlyRateCents: number | null;
+}
+
+export interface UpdateInvoiceBatchEmployeeRateResponseBody {
+  batch: InvoiceBatchSummary;
 }

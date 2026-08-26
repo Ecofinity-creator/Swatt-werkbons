@@ -29,6 +29,7 @@ interface FakeTimeEntry {
   pausedSeconds: number;
   currentPauseStartedAt: Date | null;
   description: string | null;
+  isManual: boolean;
 }
 
 function createFakePrisma(options: { projects?: FakeProject[]; assignments?: Array<[string, string]> } = {}) {
@@ -60,7 +61,16 @@ function createFakePrisma(options: { projects?: FakeProject[]; assignments?: Arr
       async ({
         data,
       }: {
-        data: { employeeId: string; projectId: string; status: 'RUNNING'; startedAt: Date };
+        data: {
+          employeeId: string;
+          projectId: string;
+          status: 'RUNNING' | 'STOPPED';
+          startedAt: Date;
+          endedAt?: Date | null;
+          pausedSeconds?: number;
+          description?: string | null;
+          isManual?: boolean;
+        };
       }) => {
         const id = `entry-${++idCounter}`;
         const entry: FakeTimeEntry = {
@@ -69,10 +79,11 @@ function createFakePrisma(options: { projects?: FakeProject[]; assignments?: Arr
           projectId: data.projectId,
           status: data.status,
           startedAt: data.startedAt,
-          endedAt: null,
-          pausedSeconds: 0,
+          endedAt: data.endedAt ?? null,
+          pausedSeconds: data.pausedSeconds ?? 0,
           currentPauseStartedAt: null,
-          description: null,
+          description: data.description ?? null,
+          isManual: data.isManual ?? false,
         };
         entries.set(id, entry);
         return toRecord(entry);
@@ -162,6 +173,81 @@ describe('TimeEntryService', () => {
     await expect(service.start('employee-1', 'project-1')).rejects.toMatchObject({
       code: 'PROJECT_NOT_ASSIGNED',
     });
+  });
+
+  it('createManual() maakt meteen een STOPPED registratie aan met de opgegeven periode en isManual=true', async () => {
+    const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+    const service = new TimeEntryService(prisma);
+
+    const entry = await service.createManual('employee-1', {
+      projectId: 'project-1',
+      startedAt: new Date('2026-08-22T08:00:00Z'),
+      endedAt: new Date('2026-08-22T12:00:00Z'),
+      pausedSeconds: 30 * 60,
+      description: 'Vergeten de timer te starten.',
+    });
+
+    expect(entry.status).toBe('STOPPED');
+    expect(entry.isManual).toBe(true);
+    expect(entry.startedAt).toEqual(new Date('2026-08-22T08:00:00Z'));
+    expect(entry.endedAt).toEqual(new Date('2026-08-22T12:00:00Z'));
+    expect(entry.pausedSeconds).toBe(30 * 60);
+    expect(entry.description).toBe('Vergeten de timer te starten.');
+  });
+
+  it('createManual() weigert met PROJECT_NOT_FOUND voor een onbestaand of gearchiveerd project', async () => {
+    const { prisma } = createFakePrisma({
+      projects: [{ ...PROJECT, id: 'project-archived', isArchivedInTl: true }],
+      assignments: [['project-archived', 'employee-1']],
+    });
+    const service = new TimeEntryService(prisma);
+    const input = {
+      projectId: 'project-archived',
+      startedAt: new Date('2026-08-22T08:00:00Z'),
+      endedAt: new Date('2026-08-22T12:00:00Z'),
+      pausedSeconds: 0,
+      description: null,
+    };
+
+    await expect(service.createManual('employee-1', { ...input, projectId: 'project-onbestaand' })).rejects.toMatchObject({
+      code: 'PROJECT_NOT_FOUND',
+    });
+    await expect(service.createManual('employee-1', input)).rejects.toMatchObject({ code: 'PROJECT_NOT_FOUND' });
+  });
+
+  it('createManual() weigert met PROJECT_NOT_ASSIGNED wanneer het project niet aan de werknemer gekoppeld is', async () => {
+    const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [] });
+    const service = new TimeEntryService(prisma);
+
+    await expect(
+      service.createManual('employee-1', {
+        projectId: 'project-1',
+        startedAt: new Date('2026-08-22T08:00:00Z'),
+        endedAt: new Date('2026-08-22T12:00:00Z'),
+        pausedSeconds: 0,
+        description: null,
+      }),
+    ).rejects.toMatchObject({ code: 'PROJECT_NOT_ASSIGNED' });
+  });
+
+  it('createManual() botst niet met business rule 1 — een actieve timer op een ander project blijft ongemoeid', async () => {
+    const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+    const service = new TimeEntryService(prisma);
+    const started = await service.start('employee-1', 'project-1');
+
+    const manual = await service.createManual('employee-1', {
+      projectId: 'project-1',
+      startedAt: new Date('2026-08-22T08:00:00Z'),
+      endedAt: new Date('2026-08-22T12:00:00Z'),
+      pausedSeconds: 0,
+      description: null,
+    });
+
+    expect(manual.status).toBe('STOPPED');
+    expect(manual.id).not.toBe(started.id);
+    const stillActive = await service.getActive('employee-1');
+    expect(stillActive?.id).toBe(started.id);
+    expect(stillActive?.status).toBe('RUNNING');
   });
 
   it('pause() zet een lopende registratie op PAUSED en registreert het pauzemoment', async () => {

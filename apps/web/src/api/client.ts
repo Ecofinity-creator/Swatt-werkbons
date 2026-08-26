@@ -5,6 +5,7 @@ import type {
   CompanySettingsResponseBody,
   CreateInvoiceBatchBody,
   CreateInvoiceBatchResponseBody,
+  CreateManualTimeEntryBody,
   CreateTeamleaderDraftInvoiceResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
@@ -31,6 +32,8 @@ import type {
   UpdateCompanySettingsBody,
   UpdateCustomerHourlyRateBody,
   UpdateCustomerHourlyRateResponseBody,
+  UpdateInvoiceBatchEmployeeRateBody,
+  UpdateInvoiceBatchEmployeeRateResponseBody,
   UpdateTeamleaderSettingsBody,
   UpdateUserBody,
   UpdateUserResponseBody,
@@ -247,6 +250,9 @@ export const timeEntriesApi = {
       method: 'POST',
       body: JSON.stringify(description ? { description } : {}),
     }),
+  /** Sectie 6 — "manueel tijd toevoegen indien toegestaan": vaste start-/eindtijd i.p.v. de timer. */
+  createManual: (body: CreateManualTimeEntryBody) =>
+    request<TimeEntryResponseBody>('/time-entries/manual', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 /**
@@ -313,6 +319,12 @@ export const invoiceBatchesApi = {
   /** Phase 10b — sectie 17: "Maak conceptfactuur in Teamleader". Geeft altijd de bijgewerkte batch terug, ook bij een mislukte Teamleader-aanroep (business rule 9). */
   createTeamleaderDraft: (id: string) =>
     request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),
+  /** Facturatie: eenmalige tariefoverride voor één medewerker op deze batch (zie InvoiceBatchService.setEmployeeRate). */
+  setEmployeeRate: (batchId: string, employeeId: string, body: UpdateInvoiceBatchEmployeeRateBody) =>
+    request<UpdateInvoiceBatchEmployeeRateResponseBody>(`/admin/invoice-batches/${batchId}/employee-rates/${employeeId}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 };
 
 /**

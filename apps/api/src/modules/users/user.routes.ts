@@ -115,7 +115,7 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
-      if (body.displayName !== undefined || body.phone !== undefined) {
+      if (body.displayName !== undefined || body.phone !== undefined || body.defaultHourlyRateCents !== undefined) {
         if (!existing.employee) {
           // Kan in de praktijk niet voorkomen (elke gebruiker krijgt bij aanmaak
           // een Employee-profiel), maar defensief afgehandeld i.p.v. te crashen.
@@ -126,6 +126,7 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
           data: {
             ...(body.displayName !== undefined ? { displayName: body.displayName } : {}),
             ...(body.phone !== undefined ? { phone: body.phone } : {}),
+            ...(body.defaultHourlyRateCents !== undefined ? { defaultHourlyRateCents: body.defaultHourlyRateCents } : {}),
           },
         });
       }
@@ -183,7 +184,7 @@ function toAdminUserSummary(user: {
   isActive: boolean;
   createdAt: Date;
   teamleaderUserId: string | null;
-  employee: { id: string; displayName: string; phone: string | null } | null;
+  employee: { id: string; displayName: string; phone: string | null; defaultHourlyRateCents: number | null } | null;
 }): AdminUserSummary {
   return {
     id: user.id,
@@ -191,7 +192,12 @@ function toAdminUserSummary(user: {
     role: user.role,
     isActive: user.isActive,
     employee: user.employee
-      ? { id: user.employee.id, displayName: user.employee.displayName, phone: user.employee.phone }
+      ? {
+          id: user.employee.id,
+          displayName: user.employee.displayName,
+          phone: user.employee.phone,
+          defaultHourlyRateCents: user.employee.defaultHourlyRateCents,
+        }
       : null,
     createdAt: user.createdAt.toISOString(),
     teamleaderUserId: user.teamleaderUserId,

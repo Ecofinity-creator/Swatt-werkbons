@@ -247,12 +247,26 @@ export const InvoiceBatchErrors = {
       'INVOICE_BATCH_ALREADY_SUBMITTED',
       'Voor deze facturatiebatch is al een conceptfactuur aangemaakt in Teamleader.',
     ),
-  /** Phase 10b — de klant van deze batch heeft nog geen uurtarief (Customer.hourlyRateCents). */
+  /** @deprecated Sinds de overstap naar tarief-per-medewerker niet meer gebruikt — zie employeeHourlyRateNotSet hieronder. Blijft bestaan zodat CustomerService/customer.routes.ts (nog steeds een geldig, apart uurtarief-veld op Customer) een passende fout kunnen gooien. */
   hourlyRateNotSet: (customerName: string) =>
     new ApiError(
       409,
       'INVOICE_BATCH_HOURLY_RATE_NOT_SET',
       `Er is nog geen uurtarief ingesteld voor ${customerName}. Vul dit eerst in bij deze facturatiebatch.`,
+    ),
+  /** Eén of meer medewerkers op deze batch hebben nog geen standaard- of eenmalig uurtarief (zie InvoiceBatchService.resolveEmployeeRates). */
+  employeeHourlyRateNotSet: (employeeNames: string[]) =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET',
+      `Er is nog geen uurtarief ingesteld voor ${employeeNames.join(', ')}. Vul dit in bij "Medewerkers", of eenmalig hier bij deze facturatiebatch.`,
+    ),
+  /** De opgegeven medewerker komt niet voor op een werkbon van deze batch — een tarief zou dus niets betekenen. */
+  employeeNotOnBatch: () =>
+    new ApiError(
+      404,
+      'INVOICE_BATCH_EMPLOYEE_NOT_ON_BATCH',
+      'Deze medewerker komt niet voor op een werkbon van deze facturatiebatch.',
     ),
 };
 

@@ -32,6 +32,11 @@ export function UserDetailPage() {
   const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
   const [isSavingTeamleaderLink, setIsSavingTeamleaderLink] = useState(false);
 
+  // Facturatie: standaard uurtarief per medewerker (zie Employee.defaultHourlyRateCents).
+  const [hourlyRateInputValue, setHourlyRateInputValue] = useState('');
+  const [isSavingHourlyRate, setIsSavingHourlyRate] = useState(false);
+  const [hourlyRateError, setHourlyRateError] = useState<string | null>(null);
+
   const loadUser = useCallback(async () => {
     if (!userId) return;
     try {
@@ -52,6 +57,14 @@ export function UserDetailPage() {
   useEffect(() => {
     void loadUser();
   }, [loadUser]);
+
+  useEffect(() => {
+    if (user?.employee) {
+      setHourlyRateInputValue(
+        user.employee.defaultHourlyRateCents !== null ? (user.employee.defaultHourlyRateCents / 100).toFixed(2) : '',
+      );
+    }
+  }, [user?.employee]);
 
   useEffect(() => {
     if (user?.employee) void loadAssignments(user.employee.id);
@@ -81,6 +94,29 @@ export function UserDetailPage() {
       setErrorMessage(err instanceof ApiRequestError ? err.message : 'Koppelen aan een Teamleader-gebruiker is mislukt.');
     } finally {
       setIsSavingTeamleaderLink(false);
+    }
+  }
+
+  /** Facturatie: standaard uurtarief van deze medewerker. Leeg opslaan wist het weer (dan kan het nog steeds eenmalig ingevuld worden bij het aanmaken van een factuur, zie InvoicingPage). */
+  async function saveHourlyRate() {
+    if (!userId) return;
+    const trimmed = hourlyRateInputValue.trim().replace(',', '.');
+    const euros = trimmed === '' ? null : Number(trimmed);
+    if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
+      setHourlyRateError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om het tarief te wissen.');
+      return;
+    }
+    setIsSavingHourlyRate(true);
+    setHourlyRateError(null);
+    try {
+      const response = await usersApi.update(userId, {
+        defaultHourlyRateCents: euros === null ? null : Math.round(euros * 100),
+      });
+      setUser(response.user);
+    } catch (err) {
+      setHourlyRateError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uurtarief is mislukt.');
+    } finally {
+      setIsSavingHourlyRate(false);
     }
   }
 
@@ -222,6 +258,39 @@ export function UserDetailPage() {
               </select>
             )}
           </section>
+
+          {user.employee && (
+            <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Facturatie</h2>
+              <p className="mb-4 text-sm text-neutral-500">
+                Standaard uurtarief van {user.employee.displayName} voor conceptfacturen in Teamleader (sectie 17). Nog
+                niet ingevuld? Dan kan een admin het tarief eenmalig invullen bij het aanmaken van de factuur zelf.
+              </p>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 text-sm text-neutral-600">
+                  €
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={hourlyRateInputValue}
+                    onChange={(e) => setHourlyRateInputValue(e.target.value)}
+                    placeholder="65,00"
+                    disabled={isSavingHourlyRate}
+                    className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void saveHourlyRate()}
+                  disabled={isSavingHourlyRate}
+                  className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {isSavingHourlyRate ? 'Bezig...' : 'Opslaan'}
+                </button>
+              </div>
+              {hourlyRateError && <p className="mt-2 text-xs text-red-700">{hourlyRateError}</p>}
+            </section>
+          )}
 
           {user.employee && (
             <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">

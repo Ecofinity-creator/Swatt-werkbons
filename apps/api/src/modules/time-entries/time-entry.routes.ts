@@ -7,7 +7,12 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuthErrors } from '../../errors';
 import type { TimeEntryRecord } from './time-entry.service';
 import { TimeEntryService } from './time-entry.service';
-import { startTimeEntryBodySchema, stopTimeEntryBodySchema, timeEntryIdParamsSchema } from './time-entry.schemas';
+import {
+  createManualTimeEntryBodySchema,
+  startTimeEntryBodySchema,
+  stopTimeEntryBodySchema,
+  timeEntryIdParamsSchema,
+} from './time-entry.schemas';
 
 export default async function timeEntryRoutes(app: FastifyInstance): Promise<void> {
   const service = new TimeEntryService(app.prisma);
@@ -22,6 +27,20 @@ export default async function timeEntryRoutes(app: FastifyInstance): Promise<voi
     const employeeId = requireEmployeeId(request);
     const body = startTimeEntryBodySchema.parse(request.body);
     const entry = await service.start(employeeId, body.projectId);
+    reply.code(201);
+    return { timeEntry: toSummary(entry) };
+  });
+
+  app.post('/time-entries/manual', { preHandler: [app.authenticate] }, async (request, reply): Promise<TimeEntryResponseBody> => {
+    const employeeId = requireEmployeeId(request);
+    const body = createManualTimeEntryBodySchema.parse(request.body);
+    const entry = await service.createManual(employeeId, {
+      projectId: body.projectId,
+      startedAt: new Date(body.startedAt),
+      endedAt: new Date(body.endedAt),
+      pausedSeconds: (body.pausedMinutes ?? 0) * 60,
+      description: body.description ?? null,
+    });
     reply.code(201);
     return { timeEntry: toSummary(entry) };
   });
@@ -69,5 +88,6 @@ function toSummary(entry: TimeEntryRecord): TimeEntrySummary {
     pausedSeconds: entry.pausedSeconds,
     currentPauseStartedAt: entry.currentPauseStartedAt ? entry.currentPauseStartedAt.toISOString() : null,
     description: entry.description,
+    isManual: entry.isManual,
   };
 }

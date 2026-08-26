@@ -20,6 +20,8 @@ export const updateUserBodySchema = z.object({
   phone: z.string().trim().min(1).nullable().optional(),
   /** Phase 9 — koppeling met een Teamleader-gebruiker (sectie 14/23), zie GET /admin/teamleader/users. `null` heft de koppeling op. */
   teamleaderUserId: z.string().trim().min(1).nullable().optional(),
+  /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), zie Employee.defaultHourlyRateCents. `null` wist het weer. */
+  defaultHourlyRateCents: z.number().int().positive().nullable().optional(),
 });
 
 export type UpdateUserBody = z.infer<typeof updateUserBodySchema>;

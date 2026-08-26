@@ -6,6 +6,8 @@ import type {
   InvoiceableWorkOrderSummary,
   ListInvoiceBatchesResponseBody,
   ListInvoiceableWorkOrdersResponseBody,
+  UpdateInvoiceBatchEmployeeRateBody,
+  UpdateInvoiceBatchEmployeeRateResponseBody,
 } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
 import { AuthErrors } from '../../errors';
@@ -14,9 +16,11 @@ import type { InvoiceBatchRecord, InvoiceableWorkOrderRecord } from './invoice-b
 import { InvoiceBatchService } from './invoice-batch.service';
 import {
   createInvoiceBatchBodySchema,
+  invoiceBatchEmployeeRateParamsSchema,
   invoiceBatchIdParamsSchema,
   listInvoiceBatchesQuerySchema,
   listInvoiceableWorkOrdersQuerySchema,
+  updateInvoiceBatchEmployeeRateBodySchema,
 } from './invoice-batch.schemas';
 
 /**
@@ -93,6 +97,21 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
       return { batch: toBatchSummary(batch), syncResult };
     },
   );
+
+  // Facturatie: tarief per medewerker i.p.v. per klant. Vult (of wist, bij
+  // `hourlyRateCents: null`) een eenmalige tariefoverride voor één medewerker
+  // op deze batch — enkel nodig zolang die medewerker geen standaardtarief
+  // heeft bij "Medewerkers" (zie InvoiceBatchService.setEmployeeRate).
+  app.post(
+    '/admin/invoice-batches/:id/employee-rates/:employeeId',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<UpdateInvoiceBatchEmployeeRateResponseBody> => {
+      const params = invoiceBatchEmployeeRateParamsSchema.parse(request.params);
+      const body: UpdateInvoiceBatchEmployeeRateBody = updateInvoiceBatchEmployeeRateBodySchema.parse(request.body);
+      const batch = await service.setEmployeeRate(params.id, params.employeeId, body.hourlyRateCents);
+      return { batch: toBatchSummary(batch) };
+    },
+  );
 }
 
 function toInvoiceableSummary(record: InvoiceableWorkOrderRecord): InvoiceableWorkOrderSummary {
@@ -113,6 +132,7 @@ function toBatchSummary(batch: InvoiceBatchRecord): InvoiceBatchSummary {
     customerId: batch.customerId,
     customerName: batch.customer.name,
     customerHourlyRateCents: batch.customer.hourlyRateCents,
+    employeeRates: batch.employeeRates,
     periodLabel: batch.periodLabel,
     status: batch.status,
     totalInvoiceableSeconds: batch.totalInvoiceableSeconds,

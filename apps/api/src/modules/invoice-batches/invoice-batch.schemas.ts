@@ -22,3 +22,13 @@ export const createInvoiceBatchBodySchema = z.object({
 export const invoiceBatchIdParamsSchema = z.object({
   id: z.string().uuid(),
 });
+
+export const invoiceBatchEmployeeRateParamsSchema = z.object({
+  id: z.string().uuid(),
+  employeeId: z.string().uuid(),
+});
+
+/** `null` wist de eenmalige override weer; anders een positief bedrag in eurocent (zie UpdateInvoiceBatchEmployeeRateBody). */
+export const updateInvoiceBatchEmployeeRateBodySchema = z.object({
+  hourlyRateCents: z.number().int().positive().nullable(),
+});

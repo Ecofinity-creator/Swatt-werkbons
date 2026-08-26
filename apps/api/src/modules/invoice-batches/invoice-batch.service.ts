@@ -1,10 +1,28 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { InvoiceBatchErrors } from '../../errors';
 
+/**
+ * `lines.workOrder.timeEntries` en `employeeRates` zijn hier nodig (i.p.v. in
+ * teamleader-invoice.service.ts' eigen, losse `WITH_DRAFT_DETAILS`) om
+ * `resolveEmployeeRates()` hieronder ook te kunnen tonen op de
+ * Facturatie-pagina — niet enkel op het moment van de effectieve
+ * Teamleader-aanroep. Zelfde bewuste duplicatie-patroon als
+ * `computeWorkedSeconds` verderop in dit bestand.
+ */
 const WITH_BATCH_DETAILS = {
   include: {
     customer: true,
-    lines: { include: { workOrder: { include: { project: true } } } },
+    lines: {
+      include: {
+        workOrder: {
+          include: {
+            project: true,
+            timeEntries: { include: { timeEntry: { include: { employee: true } } } },
+          },
+        },
+      },
+    },
+    employeeRates: true,
   },
 } as const;
 
@@ -13,6 +31,15 @@ export interface InvoiceBatchLineRecord {
   workOrderId: string;
   invoiceableSeconds: number;
   workOrder: { workOrderNumber: string; project: { name: string } };
+}
+
+/** Zie InvoiceBatchEmployeeRateSummary in shared-types voor de betekenis van elk veld. */
+export interface InvoiceBatchEmployeeRateRecord {
+  employeeId: string;
+  displayName: string;
+  defaultHourlyRateCents: number | null;
+  overrideHourlyRateCents: number | null;
+  effectiveHourlyRateCents: number | null;
 }
 
 export interface InvoiceBatchRecord {
@@ -25,10 +52,30 @@ export interface InvoiceBatchRecord {
   createdAt: Date;
   customer: { name: string; hourlyRateCents: number | null };
   lines: InvoiceBatchLineRecord[];
+  /** Medewerkers op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie resolveEmployeeRates() hieronder. */
+  employeeRates: InvoiceBatchEmployeeRateRecord[];
   /** Sinds Phase 10b — zie InvoiceBatch in schema.prisma. */
   teamleaderInvoiceId: string | null;
   teamleaderSyncError: string | null;
   teamleaderSubmittedAt: Date | null;
+}
+
+/**
+ * Handgeschreven vorm van de `WITH_BATCH_DETAILS`-query hierboven — zelfde
+ * reden als elders in deze codebase (stale gegenereerde Prisma-client in de
+ * sandbox). Enkel de velden die `resolveEmployeeRates()` nodig heeft.
+ */
+interface BatchWithEmployeeDataRow {
+  lines: Array<{
+    workOrder: {
+      timeEntries: Array<{
+        timeEntry: {
+          employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
+        };
+      }>;
+    };
+  }>;
+  employeeRates: Array<{ employeeId: string; hourlyRateCents: number }>;
 }
 
 export interface InvoiceableWorkOrderRecord {
@@ -139,18 +186,59 @@ export class InvoiceBatchService {
 
   /** Phase 10b — na een Teamleader-synchronisatiepoging heeft de route de bijgewerkte batch nodig om terug te geven (zie invoice-batch.routes.ts). */
   async getById(id: string): Promise<InvoiceBatchRecord | null> {
-    return this.prisma.invoiceBatch.findUnique({ where: { id }, ...WITH_BATCH_DETAILS });
+    const batch = (await this.prisma.invoiceBatch.findUnique({ where: { id }, ...WITH_BATCH_DETAILS })) as RawBatch | null;
+    return batch ? toBatchRecord(batch) : null;
   }
 
   async list(filters: { customerId?: string | undefined; periodLabel?: string | undefined } = {}): Promise<InvoiceBatchRecord[]> {
-    return this.prisma.invoiceBatch.findMany({
+    const batches = (await this.prisma.invoiceBatch.findMany({
       where: {
         ...(filters.customerId ? { customerId: filters.customerId } : {}),
         ...(filters.periodLabel ? { periodLabel: filters.periodLabel } : {}),
       },
       orderBy: { createdAt: 'desc' },
       ...WITH_BATCH_DETAILS,
-    });
+    })) as RawBatch[];
+    return batches.map(toBatchRecord);
+  }
+
+  /**
+   * Vult (of wist) het eenmalige tariefoverride van één medewerker op deze
+   * batch (zie InvoiceBatchEmployeeRate in schema.prisma) — enkel nodig
+   * zolang die medewerker geen `Employee.defaultHourlyRateCents` heeft.
+   * Enkel toegestaan op een DRAFT-batch, zelfde reden als `remove()`: eens
+   * `invoices.draft` is aangeroepen liggen de geprijsde regels al vast bij
+   * Teamleader.
+   */
+  async setEmployeeRate(batchId: string, employeeId: string, hourlyRateCents: number | null): Promise<InvoiceBatchRecord> {
+    const batch = (await this.prisma.invoiceBatch.findUnique({ where: { id: batchId }, ...WITH_BATCH_DETAILS })) as RawBatch | null;
+    if (!batch) {
+      throw InvoiceBatchErrors.notFound();
+    }
+    if (batch.status !== 'DRAFT') {
+      throw InvoiceBatchErrors.alreadySubmittedToTeamleader();
+    }
+    const knownEmployeeIds = new Set(resolveEmployeeRates(batch).map((rate) => rate.employeeId));
+    if (!knownEmployeeIds.has(employeeId)) {
+      throw InvoiceBatchErrors.employeeNotOnBatch();
+    }
+
+    if (hourlyRateCents === null) {
+      await this.prisma.invoiceBatchEmployeeRate.deleteMany({ where: { invoiceBatchId: batchId, employeeId } });
+    } else {
+      await this.prisma.invoiceBatchEmployeeRate.upsert({
+        where: { invoiceBatchId_employeeId: { invoiceBatchId: batchId, employeeId } },
+        create: { invoiceBatchId: batchId, employeeId, hourlyRateCents },
+        update: { hourlyRateCents },
+      });
+    }
+
+    const updated = await this.getById(batchId);
+    if (!updated) {
+      // Kan in de praktijk niet voorkomen — de batch bestond net hierboven nog.
+      throw InvoiceBatchErrors.notFound();
+    }
+    return updated;
   }
 
   /**
@@ -201,7 +289,7 @@ export class InvoiceBatchService {
     const totalInvoiceableSeconds = lines.reduce((sum, line) => sum + line.invoiceableSeconds, 0);
 
     try {
-      return await this.prisma.invoiceBatch.create({
+      const created = (await this.prisma.invoiceBatch.create({
         data: {
           customerId: input.customerId,
           periodLabel: input.periodLabel,
@@ -210,7 +298,8 @@ export class InvoiceBatchService {
           lines: { create: lines },
         },
         ...WITH_BATCH_DETAILS,
-      });
+      })) as RawBatch;
+      return toBatchRecord(created);
     } catch (err) {
       // Backstop tegen een race condition: twee gelijktijdige "voorbereiden
       // voor facturatie"-aanvragen die dezelfde werkbon proberen te batchen
@@ -251,4 +340,43 @@ function computeWorkedSeconds(entry: { startedAt: Date; endedAt: Date | null; pa
 /** "2026-08" — maandnotatie voor het periodLabel-filter, zie listInvoiceable() hierboven. */
 function periodLabelOf(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Zoals `InvoiceBatchRecord`, maar met de ruwe (nog niet-opgeloste) Prisma-vorm van `employeeRates` — de vorm die `WITH_BATCH_DETAILS` effectief teruggeeft. */
+type RawBatch = Omit<InvoiceBatchRecord, 'employeeRates'> & BatchWithEmployeeDataRow;
+
+function toBatchRecord(raw: RawBatch): InvoiceBatchRecord {
+  return { ...raw, employeeRates: resolveEmployeeRates(raw) };
+}
+
+/**
+ * Bepaalt, voor elke medewerker die op minstens één werkbon van deze batch
+ * voorkomt, het tarief waarmee zijn/haar uren geprijsd worden: de eenmalige
+ * override op déze batch (InvoiceBatchEmployeeRate) heeft voorrang op het
+ * standaardtarief uit de instellingen (Employee.defaultHourlyRateCents).
+ * `effectiveHourlyRateCents: null` betekent dat er voor die medewerker nog
+ * geen van beide is ingevuld.
+ */
+function resolveEmployeeRates(batch: BatchWithEmployeeDataRow): InvoiceBatchEmployeeRateRecord[] {
+  const overrideByEmployeeId = new Map(batch.employeeRates.map((rate) => [rate.employeeId, rate.hourlyRateCents]));
+  const employeeById = new Map<string, { displayName: string; defaultHourlyRateCents: number | null }>();
+  for (const line of batch.lines) {
+    for (const link of line.workOrder.timeEntries) {
+      const employee = link.timeEntry.employee;
+      employeeById.set(employee.id, { displayName: employee.displayName, defaultHourlyRateCents: employee.defaultHourlyRateCents });
+    }
+  }
+
+  return Array.from(employeeById.entries())
+    .map(([employeeId, info]) => {
+      const overrideHourlyRateCents = overrideByEmployeeId.get(employeeId) ?? null;
+      return {
+        employeeId,
+        displayName: info.displayName,
+        defaultHourlyRateCents: info.defaultHourlyRateCents,
+        overrideHourlyRateCents,
+        effectiveHourlyRateCents: overrideHourlyRateCents ?? info.defaultHourlyRateCents,
+      };
+    })
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
 }

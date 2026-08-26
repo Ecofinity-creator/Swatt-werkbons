@@ -245,6 +245,18 @@ model Employee {
   displayName String  @map("display_name")
   phone       String?
 
+  /// Facturatie: standaard uurtarief van deze medewerker (in eurocent), in te
+  /// stellen door een admin bij "Medewerkers" (zie user.routes.ts). Vervangt
+  /// sinds deze uitbreiding het per-klant-tarief (Customer.hourlyRateCents,
+  /// zie de toelichting daar) als bron voor factuurregels: een conceptfactuur
+  /// wordt geprijsd op basis van wélke medewerker de uren registreerde, niet
+  /// meer op basis van de klant. Null tot een admin dit invult — ontbreekt dit
+  /// nog voor een medewerker die op een factuurbatch voorkomt, dan kan de admin
+  /// het tarief eenmalig voor die factuur invullen op de Facturatie-pagina
+  /// (zie InvoiceBatchEmployeeRate hieronder) zonder de instellingenpagina te
+  /// hoeven verlaten.
+  defaultHourlyRateCents Int? @map("default_hourly_rate_cents")
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -262,6 +274,11 @@ model Employee {
 
   /// Foto's die deze werknemer aan een werkbon heeft toegevoegd (Phase 6 — zie WorkOrderPhoto hieronder).
   uploadedWorkOrderPhotos WorkOrderPhoto[]
+
+  /// Eenmalige tariefoverrides per factuurbatch, enkel gebruikt wanneer
+  /// `defaultHourlyRateCents` hierboven nog niet is ingevuld (zie
+  /// InvoiceBatchEmployeeRate hieronder).
+  invoiceBatchRateOverrides InvoiceBatchEmployeeRate[]
 
   @@map("employee")
 }
@@ -543,6 +560,15 @@ model TimeEntry {
   /// Vrij tekstveld "uitgevoerde werkzaamheden" (sectie 6/7) — optioneel, meestal
   /// pas ingevuld bij het stoppen van de timer.
   description String?
+
+  /// Sectie 6: "manueel tijd toevoegen indien toegestaan". `true` wanneer deze
+  /// registratie rechtstreeks als STOPPED is aangemaakt via
+  /// TimeEntryService.createManual() (vaste start-/eindtijd door de werknemer
+  /// ingegeven) in plaats van via de START/PAUZE/STOP-timerflow. Zuiver
+  /// informatief (badge in de UI, filter voor supervisors) — beïnvloedt geen
+  /// enkele business rule: een manuele registratie doorloopt daarna exact
+  /// dezelfde werkbon-/Teamleader-sync-flow als een gestopte timer.
+  isManual Boolean @default(false) @map("is_manual")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
@@ -896,6 +922,11 @@ model InvoiceBatch {
   createdByUser  User                @relation(fields: [createdByUserId], references: [id])
   lines          InvoiceBatchLine[]
 
+  /// Eenmalige tariefoverrides voor medewerkers zonder `Employee.defaultHourlyRateCents`
+  /// (zie InvoiceBatchEmployeeRate hieronder) — enkel gezet wanneer een admin dit
+  /// bewust voor déze factuur heeft ingevuld op de Facturatie-pagina.
+  employeeRates  InvoiceBatchEmployeeRate[]
+
   @@index([customerId])
   @@index([periodLabel])
   @@map("invoice_batch")
@@ -920,4 +951,27 @@ model InvoiceBatchLine {
 
   @@index([invoiceBatchId])
   @@map("invoice_batch_line")
+}
+
+/// Eénmalige uurtarief-override van één medewerker, voor één specifieke
+/// InvoiceBatch — enkel nodig zolang `Employee.defaultHourlyRateCents` nog
+/// niet is ingevuld voor die medewerker (zie de toelichting daar). Ingevuld
+/// door een admin op de Facturatie-pagina, vlak vóór "Maak conceptfactuur in
+/// Teamleader"; TeamleaderInvoiceService gebruikt deze waarde enkel als de
+/// medewerker zelf geen standaardtarief heeft. Verwijderen van de batch
+/// (cascade) ruimt deze overrides mee op — ze hebben buiten die ene batch
+/// geen betekenis.
+model InvoiceBatchEmployeeRate {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceBatchId  String   @map("invoice_batch_id") @db.Uuid
+  employeeId      String   @map("employee_id") @db.Uuid
+  hourlyRateCents Int      @map("hourly_rate_cents")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  invoiceBatch InvoiceBatch @relation(fields: [invoiceBatchId], references: [id], onDelete: Cascade)
+  employee     Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([invoiceBatchId, employeeId])
+  @@map("invoice_batch_employee_rate")
 }

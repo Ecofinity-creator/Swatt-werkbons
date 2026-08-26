@@ -21,6 +21,7 @@ const WITH_DRAFT_DETAILS = {
         },
       },
     },
+    employeeRates: true,
   },
 } as const;
 
@@ -31,7 +32,14 @@ interface DraftBatchLineRow {
     workOrderNumber: string;
     description: string | null;
     project: { id: string; name: string; teamleaderId: string };
-    timeEntries: Array<{ timeEntry: { employee: { displayName: string } } }>;
+    timeEntries: Array<{
+      timeEntry: {
+        startedAt: Date;
+        endedAt: Date | null;
+        pausedSeconds: number;
+        employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
+      };
+    }>;
   };
 }
 
@@ -41,6 +49,8 @@ interface DraftBatchRow {
   customerId: string;
   customer: { name: string; teamleaderId: string; teamleaderType: string; hourlyRateCents: number | null };
   lines: DraftBatchLineRow[];
+  /** Facturatie: eenmalige tariefoverrides per medewerker op déze batch (zie InvoiceBatchEmployeeRate in schema.prisma). */
+  employeeRates: Array<{ employeeId: string; hourlyRateCents: number }>;
 }
 
 interface TeamleaderConnectionInvoiceSettings {
@@ -77,6 +87,16 @@ interface TeamleaderConnectionInvoiceSettings {
  * (via TeamleaderApiError, zie teamleader-client.service.ts) — dat is precies
  * wat nodig is om dit snel bij te stellen op basis van de échte foutmelding,
  * zonder Render-logtoegang nodig te hebben.
+ *
+ * Facturatie: tarief per medewerker i.p.v. per klant (uitbreiding na Phase
+ * 10b). Elke werkbon in de batch wordt hier gesplitst in één factuurregel PER
+ * MEDEWERKER die er uren op registreerde — geprijsd met diens
+ * `Employee.defaultHourlyRateCents`, of (ontbreekt dat nog) de eenmalige
+ * override die een admin voor déze batch invulde (InvoiceBatchEmployeeRate,
+ * zie InvoiceBatchService.setEmployeeRate). `Customer.hourlyRateCents` wordt
+ * hier bewust niet meer gebruikt — dat veld/de bijhorende instelling op de
+ * Facturatie-pagina blijft wel bestaan (zie CustomerService), maar is sinds
+ * deze uitbreiding niet meer de bron voor de conceptfactuur.
  */
 export class TeamleaderInvoiceService {
   constructor(
@@ -96,8 +116,14 @@ export class TeamleaderInvoiceService {
     if (batch.status !== 'DRAFT') {
       throw InvoiceBatchErrors.alreadySubmittedToTeamleader();
     }
-    if (!batch.customer.hourlyRateCents) {
-      throw InvoiceBatchErrors.hourlyRateNotSet(batch.customer.name);
+
+    const rateByEmployeeId = resolveEmployeeRateCents(batch);
+    const missingRateNames = Array.from(rateByEmployeeId.values())
+      .filter((employee) => employee.rateCents === null)
+      .map((employee) => employee.displayName)
+      .sort();
+    if (missingRateNames.length > 0) {
+      throw InvoiceBatchErrors.employeeHourlyRateNotSet(missingRateNames);
     }
 
     const connection = (await this.prisma.teamleaderConnection.findUnique({
@@ -119,7 +145,7 @@ export class TeamleaderInvoiceService {
       throw TeamleaderErrors.invoiceSettingsNotConfigured();
     }
 
-    const lineItems = batch.lines.map((line) => buildLineItem(line, batch.customer.hourlyRateCents!, connection.invoiceTaxRateId!));
+    const lineItems = batch.lines.flatMap((line) => buildLineItems(line, rateByEmployeeId, connection.invoiceTaxRateId!));
 
     // `project_id` is optioneel bij invoices.draft — enkel meesturen wanneer
     // alle werkbonnen in deze batch bij hetzelfde Teamleader-project horen
@@ -165,21 +191,76 @@ export class TeamleaderInvoiceService {
   }
 }
 
-function buildLineItem(line: DraftBatchLineRow, hourlyRateCents: number, taxRateId: string) {
-  const hours = Math.round((line.invoiceableSeconds / 3600) * 100) / 100;
-  const employeeNames = Array.from(new Set(line.workOrder.timeEntries.map((entry) => entry.timeEntry.employee.displayName))).sort();
-  const description = `${line.workOrder.workOrderNumber} — ${line.workOrder.project.name}: ${line.workOrder.description ?? 'Werkzaamheden'} (${employeeNames.join(', ')})`;
+/**
+ * Bepaalt, voor elke medewerker die op minstens één werkbon van deze batch
+ * voorkomt, het tarief waarmee zijn/haar uren geprijsd worden: de eenmalige
+ * override op déze batch (InvoiceBatchEmployeeRate) heeft voorrang op het
+ * standaardtarief uit de instellingen (Employee.defaultHourlyRateCents).
+ * `rateCents: null` betekent dat er voor die medewerker nog geen van beide is
+ * ingevuld — `createDraftInvoice` weigert dan de Teamleader-aanroep (zie
+ * hierboven). Zelfde resolutielogica als InvoiceBatchService.resolveEmployeeRates
+ * (bewust lokaal gedupliceerd, zie de toelichting bovenaan dit bestand).
+ */
+function resolveEmployeeRateCents(batch: DraftBatchRow): Map<string, { displayName: string; rateCents: number | null }> {
+  const overrideByEmployeeId = new Map(batch.employeeRates.map((rate) => [rate.employeeId, rate.hourlyRateCents]));
+  const result = new Map<string, { displayName: string; rateCents: number | null }>();
+  for (const line of batch.lines) {
+    for (const entry of line.workOrder.timeEntries) {
+      const employee = entry.timeEntry.employee;
+      const overrideCents = overrideByEmployeeId.get(employee.id) ?? null;
+      result.set(employee.id, {
+        displayName: employee.displayName,
+        rateCents: overrideCents ?? employee.defaultHourlyRateCents,
+      });
+    }
+  }
+  return result;
+}
 
-  return {
-    quantity: hours,
-    description,
-    // `unit_price.tax` is een verplicht veld volgens de officiële Teamleader-
-    // API-specificatie (apiary.apib → InvoiceGroupedLinesWrite): het geeft aan
-    // dat `amount` een bedrag EXCLUSIEF btw is (de enige toegestane waarde is
-    // `excluding` — Teamleader berekent de btw zelf via `tax_rate_id`
-    // hieronder). Live geverifieerd op 26/08/2026: zonder dit veld gaf
-    // invoices.draft een 400 terug met "tax must be present" (meta.field: "tax").
-    unit_price: { amount: Math.round(hourlyRateCents) / 100, tax: 'excluding' as const },
-    tax_rate_id: taxRateId,
-  };
+/** Zelfde formule als invoice-batch.service.ts/work-order-pdf-document.ts/time-tracking-sync.service.ts — bewust lokaal gehouden, zie de toelichting daar. */
+function computeWorkedSeconds(entry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number }): number {
+  if (!entry.endedAt) return 0;
+  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
+  return Math.max(0, raw);
+}
+
+/**
+ * Eén werkbon levert voortaan één factuurregel PER MEDEWERKER op (i.p.v. één
+ * regel met een geblende totaal), zodat elke medewerker met zijn/haar eigen
+ * tarief geprijsd wordt. `rateByEmployeeId` bevat op dit punt gegarandeerd
+ * enkel geldige (niet-null) tarieven — `createDraftInvoice` heeft dat al
+ * vooraf gecontroleerd.
+ */
+function buildLineItems(
+  line: DraftBatchLineRow,
+  rateByEmployeeId: Map<string, { displayName: string; rateCents: number | null }>,
+  taxRateId: string,
+) {
+  const secondsByEmployeeId = new Map<string, number>();
+  for (const entry of line.workOrder.timeEntries) {
+    const employeeId = entry.timeEntry.employee.id;
+    const seconds = computeWorkedSeconds(entry.timeEntry);
+    secondsByEmployeeId.set(employeeId, (secondsByEmployeeId.get(employeeId) ?? 0) + seconds);
+  }
+
+  return Array.from(secondsByEmployeeId.entries())
+    .filter(([, seconds]) => seconds > 0)
+    .map(([employeeId, seconds]) => {
+      const employee = rateByEmployeeId.get(employeeId)!;
+      const hours = Math.round((seconds / 3600) * 100) / 100;
+      const description = `${line.workOrder.workOrderNumber} — ${line.workOrder.project.name}: ${line.workOrder.description ?? 'Werkzaamheden'} (${employee.displayName})`;
+
+      return {
+        quantity: hours,
+        description,
+        // `unit_price.tax` is een verplicht veld volgens de officiële Teamleader-
+        // API-specificatie (apiary.apib → InvoiceGroupedLinesWrite): het geeft aan
+        // dat `amount` een bedrag EXCLUSIEF btw is (de enige toegestane waarde is
+        // `excluding` — Teamleader berekent de btw zelf via `tax_rate_id`
+        // hieronder). Live geverifieerd op 26/08/2026: zonder dit veld gaf
+        // invoices.draft een 400 terug met "tax must be present" (meta.field: "tax").
+        unit_price: { amount: Math.round(employee.rateCents!) / 100, tax: 'excluding' as const },
+        tax_rate_id: taxRateId,
+      };
+    });
 }

@@ -13,10 +13,19 @@ export interface TimeEntryRecord {
   pausedSeconds: number;
   currentPauseStartedAt: Date | null;
   description: string | null;
+  isManual: boolean;
   project: {
     name: string;
     customer: { name: string };
   };
+}
+
+export interface CreateManualTimeEntryInput {
+  projectId: string;
+  startedAt: Date;
+  endedAt: Date;
+  pausedSeconds: number;
+  description: string | null;
 }
 
 export class TimeEntryService {
@@ -58,6 +67,46 @@ export class TimeEntryService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Sectie 6: "manueel tijd toevoegen indien toegestaan". Maakt een reeds
+   * STOPPED registratie aan met een door de werknemer opgegeven vaste
+   * start-/eindtijd (bv. vergeten de timer te starten) — in plaats van via de
+   * START/PAUZE/STOP-flow. Doorloopt dezelfde project-/koppelingscontroles
+   * als `start()`; business rule 1 ("één actieve timer") is hier niet van
+   * toepassing, want de registratie is meteen STOPPED en botst dus nooit met
+   * de partiële unieke index op RUNNING/PAUSED. Bereik (start < eind, niet in
+   * de toekomst) wordt al aan de routelaag afgedwongen (zie
+   * createManualTimeEntryBodySchema) — hier enkel nog de project-/
+   * koppelingscontrole, zoals bij `start()`.
+   */
+  async createManual(employeeId: string, input: CreateManualTimeEntryInput): Promise<TimeEntryRecord> {
+    const project = await this.prisma.project.findUnique({ where: { id: input.projectId } });
+    if (!project || project.isArchivedInTl) {
+      throw ProjectErrors.notFound();
+    }
+
+    const assignment = await this.prisma.projectAssignment.findUnique({
+      where: { projectId_employeeId: { projectId: input.projectId, employeeId } },
+    });
+    if (!assignment) {
+      throw ProjectErrors.notAssigned();
+    }
+
+    return this.prisma.timeEntry.create({
+      data: {
+        employeeId,
+        projectId: input.projectId,
+        status: 'STOPPED',
+        startedAt: input.startedAt,
+        endedAt: input.endedAt,
+        pausedSeconds: input.pausedSeconds,
+        description: input.description,
+        isManual: true,
+      },
+      ...WITH_PROJECT,
+    });
   }
 
   async pause(employeeId: string, timeEntryId: string): Promise<TimeEntryRecord> {

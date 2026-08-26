@@ -49,6 +49,18 @@ export function ProjectTimerPage() {
   const [isCreatingWorkOrder, setIsCreatingWorkOrder] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  // Sectie 6 — "manueel tijd toevoegen indien toegestaan": alternatief voor
+  // START/PAUZE/STOP wanneer een werknemer een vaste periode achteraf wil
+  // ingeven (bv. de timer vergeten te starten).
+  const [showManualForm, setShowManualForm] = useState(false);
+  const [manualDate, setManualDate] = useState(() => toDateInputValue(new Date()));
+  const [manualStartTime, setManualStartTime] = useState('');
+  const [manualEndTime, setManualEndTime] = useState('');
+  const [manualPauseMinutes, setManualPauseMinutes] = useState('0');
+  const [manualDescription, setManualDescription] = useState('');
+  const [manualErrorMessage, setManualErrorMessage] = useState<string | null>(null);
+  const [isSubmittingManual, setIsSubmittingManual] = useState(false);
+
   useEffect(() => {
     if (!projectId) return;
 
@@ -202,6 +214,71 @@ export function ProjectTimerPage() {
     }
   }
 
+  /**
+   * Sectie 6 — "manueel tijd toevoegen indien toegestaan". Bouwt lokale
+   * datum + start-/einduur om naar volledige ISO-tijdstippen (via `new
+   * Date(...)`, wat de tijdzone van het toestel gebruikt — dezelfde aanpak
+   * als een natief `<input type="time">`) en maakt daarna een meteen-STOPPED
+   * registratie aan die dezelfde werkbon-aanmaak-flow doorloopt als een
+   * gestopte timer (zie createWorkOrder hierboven) — zo blijft er precies één
+   * pad van "tijdsregistratie" naar "werkbon", ongeacht hoe de registratie
+   * tot stand kwam.
+   */
+  async function handleManualSubmit() {
+    if (!projectId) return;
+    setManualErrorMessage(null);
+
+    if (!manualStartTime || !manualEndTime) {
+      setManualErrorMessage('Vul zowel een begin- als einduur in.');
+      return;
+    }
+
+    const startedAt = new Date(`${manualDate}T${manualStartTime}:00`);
+    const endedAt = new Date(`${manualDate}T${manualEndTime}:00`);
+    if (Number.isNaN(startedAt.getTime()) || Number.isNaN(endedAt.getTime())) {
+      setManualErrorMessage('Ongeldige datum of tijd.');
+      return;
+    }
+    if (endedAt.getTime() <= startedAt.getTime()) {
+      setManualErrorMessage('Einduur moet na het beginuur liggen.');
+      return;
+    }
+
+    const pauseMinutesValue = Number.parseInt(manualPauseMinutes, 10);
+    const pausedMinutes = Number.isNaN(pauseMinutesValue) ? 0 : Math.max(0, pauseMinutesValue);
+
+    setIsSubmittingManual(true);
+    try {
+      const trimmedDescription = manualDescription.trim() || undefined;
+      const response = await timeEntriesApi.createManual({
+        projectId,
+        startedAt: startedAt.toISOString(),
+        endedAt: endedAt.toISOString(),
+        pausedMinutes,
+        description: trimmedDescription,
+      });
+      const createdEntry = response.timeEntry;
+      setShowManualForm(false);
+      setManualStartTime('');
+      setManualEndTime('');
+      setManualPauseMinutes('0');
+      setManualDescription('');
+      setStoppedSummary({
+        elapsedSeconds: computeElapsedSeconds(createdEntry, Date.now()),
+        description: createdEntry.description,
+        timeEntryId: createdEntry.id,
+        workOrderId: null,
+        workOrderNumber: null,
+        workOrderError: null,
+      });
+      await createWorkOrder(createdEntry.id, trimmedDescription ?? null);
+    } catch (err) {
+      setManualErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de tijdsregistratie niet opslaan.');
+    } finally {
+      setIsSubmittingManual(false);
+    }
+  }
+
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
       <header className="mb-8 flex items-center justify-between">
@@ -282,7 +359,107 @@ export function ProjectTimerPage() {
             {project.address && <p className="mt-1 text-sm text-neutral-400">{project.address}</p>}
           </div>
 
-          {activeEntry && activeEntry.projectId !== projectId ? (
+          {showManualForm ? (
+            <div className="flex flex-col gap-3 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+              <p className="text-sm font-semibold text-white">Tijd manueel ingeven</p>
+              {manualErrorMessage && (
+                <p role="alert" className="rounded-lg bg-red-950 px-3 py-2 text-sm text-red-300">
+                  {manualErrorMessage}
+                </p>
+              )}
+              <label htmlFor="manual-date" className="text-sm text-neutral-300">
+                Datum
+              </label>
+              <input
+                id="manual-date"
+                type="date"
+                value={manualDate}
+                onChange={(event) => setManualDate(event.target.value)}
+                max={toDateInputValue(new Date())}
+                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
+              />
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label htmlFor="manual-start" className="text-sm text-neutral-300">
+                    Van
+                  </label>
+                  <input
+                    id="manual-start"
+                    type="time"
+                    value={manualStartTime}
+                    onChange={(event) => setManualStartTime(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label htmlFor="manual-end" className="text-sm text-neutral-300">
+                    Tot
+                  </label>
+                  <input
+                    id="manual-end"
+                    type="time"
+                    value={manualEndTime}
+                    onChange={(event) => setManualEndTime(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
+                  />
+                </div>
+              </div>
+              <label htmlFor="manual-pause" className="text-sm text-neutral-300">
+                Pauze (minuten)
+              </label>
+              <input
+                id="manual-pause"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                value={manualPauseMinutes}
+                onChange={(event) => setManualPauseMinutes(event.target.value)}
+                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
+              />
+              <label htmlFor="manual-description" className="text-sm text-neutral-300">
+                Omschrijving (optioneel)
+              </label>
+              <textarea
+                id="manual-description"
+                rows={4}
+                value={manualDescription}
+                onChange={(event) => setManualDescription(event.target.value)}
+                placeholder="Uitgevoerde werkzaamheden..."
+                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
+              />
+              <button
+                type="button"
+                onClick={() => void handleManualSubmit()}
+                disabled={isSubmittingManual}
+                className="rounded-lg bg-swatt-gold px-4 py-4 text-lg font-bold text-swatt-black disabled:opacity-60"
+              >
+                {isSubmittingManual ? 'Bezig met opslaan...' : 'Tijd opslaan'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowManualForm(false);
+                  setManualErrorMessage(null);
+                }}
+                disabled={isSubmittingManual}
+                className="rounded-lg border border-neutral-700 px-4 py-3 text-sm font-semibold text-neutral-300 disabled:opacity-60"
+              >
+                Annuleren
+              </button>
+            </div>
+          ) : (
+            <>
+              {(!activeEntry || activeEntry.projectId !== projectId) && (
+                <button
+                  type="button"
+                  onClick={() => setShowManualForm(true)}
+                  className="mb-6 w-full rounded-lg border border-neutral-700 px-4 py-3 text-sm font-semibold text-neutral-300"
+                >
+                  Tijd manueel ingeven
+                </button>
+              )}
+
+              {activeEntry && activeEntry.projectId !== projectId ? (
             <div className="rounded-xl border border-amber-900 bg-amber-950 p-5 text-center">
               <p className="text-sm text-amber-200">
                 Je hebt al een actieve tijdsregistratie lopen op <strong>{activeEntry.projectName}</strong> bij{' '}
@@ -382,6 +559,8 @@ export function ProjectTimerPage() {
               {isSubmitting ? 'Bezig met starten...' : 'START WERK'}
             </button>
           )}
+            </>
+          )}
         </>
       )}
     </main>
@@ -417,4 +596,12 @@ function formatDuration(totalSeconds: number): string {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   return [hours, minutes, seconds].map((n) => String(n).padStart(2, '0')).join(':');
+}
+
+/** Lokale datum als "YYYY-MM-DD" voor een native `<input type="date">` — bewust NIET via `.toISOString()`, want dat zou naar UTC omzetten en rond middernacht de verkeerde dag kunnen tonen. */
+function toDateInputValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
