@@ -3,6 +3,9 @@ import { ProjectErrors, TimeEntryErrors } from '../../errors';
 
 const WITH_PROJECT = { include: { project: { include: { customer: true } } } } as const;
 
+/** Sectie 6 — "Tijd manueel ingeven": tolereert klein klokverschil tussen telefoon en server bij de "niet in de toekomst"-controle in createManual(). */
+const FUTURE_GRACE_MS = 5 * 60 * 1000;
+
 export interface TimeEntryRecord {
   id: string;
   employeeId: string;
@@ -76,12 +79,33 @@ export class TimeEntryService {
    * START/PAUZE/STOP-flow. Doorloopt dezelfde project-/koppelingscontroles
    * als `start()`; business rule 1 ("één actieve timer") is hier niet van
    * toepassing, want de registratie is meteen STOPPED en botst dus nooit met
-   * de partiële unieke index op RUNNING/PAUSED. Bereik (start < eind, niet in
-   * de toekomst) wordt al aan de routelaag afgedwongen (zie
-   * createManualTimeEntryBodySchema) — hier enkel nog de project-/
-   * koppelingscontrole, zoals bij `start()`.
+   * de partiële unieke index op RUNNING/PAUSED.
+   *
+   * Bereikcontroles (start < eind, niet in de toekomst, pauze niet langer dan
+   * de periode) staan bewust HIER en niet als zod `.refine()` in
+   * time-entry.schemas.ts: een ZodError wordt door de globale errorhandler
+   * (sectie 27) herleid tot de generieke "De ingevoerde gegevens zijn niet
+   * geldig" — via een ApiError hier komt de specifieke, mensentaal-
+   * foutmelding wél bij de werknemer terecht. `FUTURE_GRACE_MS` tolereert een
+   * klein klokverschil tussen telefoon en server (en het ronde uur waarop een
+   * werknemer typisch afrondt) zonder meteen als "in de toekomst" te gelden.
    */
   async createManual(employeeId: string, input: CreateManualTimeEntryInput): Promise<TimeEntryRecord> {
+    if (input.endedAt.getTime() <= input.startedAt.getTime()) {
+      throw TimeEntryErrors.manualEndBeforeStart();
+    }
+    const nowWithGrace = Date.now() + FUTURE_GRACE_MS;
+    if (input.startedAt.getTime() > nowWithGrace) {
+      throw TimeEntryErrors.manualStartInFuture();
+    }
+    if (input.endedAt.getTime() > nowWithGrace) {
+      throw TimeEntryErrors.manualEndInFuture();
+    }
+    const totalSeconds = (input.endedAt.getTime() - input.startedAt.getTime()) / 1000;
+    if (input.pausedSeconds >= totalSeconds) {
+      throw TimeEntryErrors.manualPauseTooLong();
+    }
+
     const project = await this.prisma.project.findUnique({ where: { id: input.projectId } });
     if (!project || project.isArchivedInTl) {
       throw ProjectErrors.notFound();

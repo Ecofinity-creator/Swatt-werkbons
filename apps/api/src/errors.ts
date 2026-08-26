@@ -147,6 +147,30 @@ export const TimeEntryErrors = {
     new ApiError(409, 'TIME_ENTRY_NOT_PAUSED', 'Deze tijdsregistratie staat niet gepauzeerd.'),
   alreadyStopped: () =>
     new ApiError(409, 'TIME_ENTRY_ALREADY_STOPPED', 'Deze tijdsregistratie is al gestopt.'),
+  /**
+   * Sectie 6 — "Tijd manueel ingeven". Deze drie business-controles stonden
+   * eerst als zod `.refine()` in time-entry.schemas.ts, maar elke ZodError
+   * wordt door de globale errorhandler (app.ts, sectie 27) bewust herleid
+   * tot de generieke "De ingevoerde gegevens zijn niet geldig" — een
+   * werknemer kreeg zo geen idee wélk veld het probleem was (bv. een
+   * eindtijd die maar enkele minuten in de toekomst ligt, iets wat in de
+   * praktijk makkelijk gebeurt door klokverschil tussen telefoon en server
+   * of door op een rond uur af te ronden). Verplaatst naar de service-laag
+   * zodat de specifieke, mensentaal-foutmelding wél bij de werknemer
+   * terechtkomt.
+   */
+  manualEndBeforeStart: () =>
+    new ApiError(422, 'TIME_ENTRY_MANUAL_END_BEFORE_START', 'De eindtijd moet na de starttijd liggen.'),
+  manualStartInFuture: () =>
+    new ApiError(422, 'TIME_ENTRY_MANUAL_START_IN_FUTURE', 'De starttijd kan niet in de toekomst liggen.'),
+  manualEndInFuture: () =>
+    new ApiError(422, 'TIME_ENTRY_MANUAL_END_IN_FUTURE', 'De eindtijd kan niet in de toekomst liggen.'),
+  manualPauseTooLong: () =>
+    new ApiError(
+      422,
+      'TIME_ENTRY_MANUAL_PAUSE_TOO_LONG',
+      'De pauze kan niet even lang of langer zijn dan de volledige periode.',
+    ),
 };
 
 /** Phase 5 — werkbonnen (basis). Zie modules/work-orders/work-order.service.ts. */

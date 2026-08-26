@@ -195,6 +195,78 @@ describe('TimeEntryService', () => {
     expect(entry.description).toBe('Vergeten de timer te starten.');
   });
 
+  it('createManual() weigert wanneer de eindtijd niet na de starttijd ligt', async () => {
+    const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+    const service = new TimeEntryService(prisma);
+
+    await expect(
+      service.createManual('employee-1', {
+        projectId: 'project-1',
+        startedAt: new Date('2026-08-22T12:00:00Z'),
+        endedAt: new Date('2026-08-22T08:00:00Z'),
+        pausedSeconds: 0,
+        description: null,
+      }),
+    ).rejects.toMatchObject({ code: 'TIME_ENTRY_MANUAL_END_BEFORE_START' });
+  });
+
+  it('createManual() weigert een start- of eindtijd in de toekomst', async () => {
+    const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+    const service = new TimeEntryService(prisma);
+    const farFuture = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await expect(
+      service.createManual('employee-1', {
+        projectId: 'project-1',
+        startedAt: farFuture,
+        endedAt: new Date(farFuture.getTime() + 60 * 60 * 1000),
+        pausedSeconds: 0,
+        description: null,
+      }),
+    ).rejects.toMatchObject({ code: 'TIME_ENTRY_MANUAL_START_IN_FUTURE' });
+
+    await expect(
+      service.createManual('employee-1', {
+        projectId: 'project-1',
+        startedAt: new Date(Date.now() - 60 * 60 * 1000),
+        endedAt: farFuture,
+        pausedSeconds: 0,
+        description: null,
+      }),
+    ).rejects.toMatchObject({ code: 'TIME_ENTRY_MANUAL_END_IN_FUTURE' });
+  });
+
+  it('createManual() tolereert een kort klokverschil (grace period) rond het huidige moment', async () => {
+    const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+    const service = new TimeEntryService(prisma);
+
+    // 3 minuten "in de toekomst" — binnen de grace period, mag dus niet weigeren.
+    const entry = await service.createManual('employee-1', {
+      projectId: 'project-1',
+      startedAt: new Date(Date.now() - 60 * 60 * 1000),
+      endedAt: new Date(Date.now() + 3 * 60 * 1000),
+      pausedSeconds: 0,
+      description: null,
+    });
+
+    expect(entry.status).toBe('STOPPED');
+  });
+
+  it('createManual() weigert een pauze die even lang of langer is dan de volledige periode', async () => {
+    const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+    const service = new TimeEntryService(prisma);
+
+    await expect(
+      service.createManual('employee-1', {
+        projectId: 'project-1',
+        startedAt: new Date('2026-08-22T08:00:00Z'),
+        endedAt: new Date('2026-08-22T12:00:00Z'),
+        pausedSeconds: 4 * 60 * 60, // exact even lang als de periode zelf
+        description: null,
+      }),
+    ).rejects.toMatchObject({ code: 'TIME_ENTRY_MANUAL_PAUSE_TOO_LONG' });
+  });
+
   it('createManual() weigert met PROJECT_NOT_FOUND voor een onbestaand of gearchiveerd project', async () => {
     const { prisma } = createFakePrisma({
       projects: [{ ...PROJECT, id: 'project-archived', isArchivedInTl: true }],
