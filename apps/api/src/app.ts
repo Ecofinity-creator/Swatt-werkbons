@@ -10,7 +10,10 @@ import authRoutes from './modules/auth/auth.routes';
 import seedRoutes from './modules/admin/seed.routes';
 import companySettingsRoutes from './modules/company-settings/company-settings.routes';
 import customerRoutes from './modules/customers/customer.routes';
+import hoursExportRoutes from './modules/hours-export/hours-export.routes';
 import invoiceBatchRoutes from './modules/invoice-batches/invoice-batch.routes';
+import payrollRoutes from './modules/payroll/payroll.routes';
+import weeklyApprovalRoutes from './modules/work-orders/weekly-approval.routes';
 import projectRoutes from './modules/projects/project.routes';
 import teamleaderPlugin from './modules/teamleader/teamleader.plugin';
 import teamleaderRoutes from './modules/teamleader/teamleader.routes';
@@ -133,6 +136,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(companySettingsRoutes);
   await app.register(customerRoutes);
   await app.register(invoiceBatchRoutes);
+  await app.register(payrollRoutes);
+  await app.register(weeklyApprovalRoutes);
+  await app.register(hoursExportRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 

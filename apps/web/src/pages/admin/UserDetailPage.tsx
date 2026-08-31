@@ -1,10 +1,10 @@
-import type { AdminUserSummary, ProjectSummary, TeamleaderUserOption, UserRole } from '@swatt/shared-types';
-import { USER_ROLES } from '@swatt/shared-types';
+import type { AdminUserSummary, EmploymentType, ProjectSummary, TeamleaderUserOption, UserRole } from '@swatt/shared-types';
+import { EMPLOYMENT_TYPES, USER_ROLES } from '@swatt/shared-types';
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { projectsApi, usersApi } from '../../api/client';
 import { ApiRequestError } from '../../auth/AuthContext';
-import { ROLE_LABELS } from '../../constants';
+import { EMPLOYMENT_TYPE_LABELS, ROLE_LABELS } from '../../constants';
 
 /**
  * Detail van één medewerker: rol/actief-status wijzigen, en — het stuk dat nu
@@ -18,6 +18,7 @@ import { ROLE_LABELS } from '../../constants';
  * triviale latere toevoeging zodra dat niet meer volstaat.
  */
 export function UserDetailPage() {
+  const navigate = useNavigate();
   const { userId } = useParams<{ userId: string }>();
   const [user, setUser] = useState<AdminUserSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -28,6 +29,11 @@ export function UserDetailPage() {
   const [projectSearch, setProjectSearch] = useState('');
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
 
+  // Opnieuw uitnodigen / volledig verwijderen — zie usersApi.resendInvite/remove.
+  const [isResendingInvite, setIsResendingInvite] = useState(false);
+  const [resendInviteMessage, setResendInviteMessage] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   // Phase 9 — koppeling met een Teamleader-gebruiker (sectie 14: `timeTracking.add`'s `user_id`).
   const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
   const [isSavingTeamleaderLink, setIsSavingTeamleaderLink] = useState(false);
@@ -36,6 +42,25 @@ export function UserDetailPage() {
   const [hourlyRateInputValue, setHourlyRateInputValue] = useState('');
   const [isSavingHourlyRate, setIsSavingHourlyRate] = useState(false);
   const [hourlyRateError, setHourlyRateError] = useState<string | null>(null);
+
+  // Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only.
+  const [overtimeRateInput, setOvertimeRateInput] = useState('150');
+  const [shiftWorkRateInput, setShiftWorkRateInput] = useState('120');
+  const [nightWorkRateInput, setNightWorkRateInput] = useState('150');
+  const [isSavingPremiumRates, setIsSavingPremiumRates] = useState(false);
+  const [premiumRatesError, setPremiumRatesError] = useState<string | null>(null);
+
+  // Phase 12, deel A — toeslaginstelling per koppeling (projectId → instelling).
+  const [assignmentPremiums, setAssignmentPremiums] = useState<Map<string, { overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }>>(
+    new Map(),
+  );
+  const [pendingPremiumsProjectId, setPendingPremiumsProjectId] = useState<string | null>(null);
+
+  // Werknemer vs. Onderaannemer (backlog-item 30/8) — bepaalt welk soort
+  // document deze persoon krijgt bij de maandelijkse uren-export (zie
+  // HoursExportPage.tsx).
+  const [isSavingEmploymentType, setIsSavingEmploymentType] = useState(false);
+  const [employmentTypeError, setEmploymentTypeError] = useState<string | null>(null);
 
   const loadUser = useCallback(async () => {
     if (!userId) return;
@@ -52,6 +77,7 @@ export function UserDetailPage() {
   const loadAssignments = useCallback(async (employeeId: string) => {
     const response = await projectsApi.assignments.list(employeeId);
     setAssignedProjectIds(new Set(response.projectIds));
+    setAssignmentPremiums(new Map(response.assignments.map((a) => [a.projectId, { overtimeApplies: a.overtimeApplies, premiumType: a.premiumType }])));
   }, []);
 
   useEffect(() => {
@@ -63,6 +89,9 @@ export function UserDetailPage() {
       setHourlyRateInputValue(
         user.employee.defaultHourlyRateCents !== null ? (user.employee.defaultHourlyRateCents / 100).toFixed(2) : '',
       );
+      setOvertimeRateInput(String(user.employee.overtimeRatePercent));
+      setShiftWorkRateInput(String(user.employee.shiftWorkRatePercent));
+      setNightWorkRateInput(String(user.employee.nightWorkRatePercent));
     }
   }, [user?.employee]);
 
@@ -120,6 +149,65 @@ export function UserDetailPage() {
     }
   }
 
+  /** Phase 12, deel A (sectie 1) — de drie toeslagpercentages van deze medewerker (admin-only, business rule 11). */
+  async function savePremiumRates() {
+    if (!userId) return;
+    const parsePercent = (value: string) => {
+      const n = Number(value.trim());
+      return Number.isInteger(n) && n >= 100 && n <= 500 ? n : null;
+    };
+    const overtimeRatePercent = parsePercent(overtimeRateInput);
+    const shiftWorkRatePercent = parsePercent(shiftWorkRateInput);
+    const nightWorkRatePercent = parsePercent(nightWorkRateInput);
+    if (overtimeRatePercent === null || shiftWorkRatePercent === null || nightWorkRatePercent === null) {
+      setPremiumRatesError('Vul voor elk percentage een geheel getal tussen 100 en 500 in.');
+      return;
+    }
+    setIsSavingPremiumRates(true);
+    setPremiumRatesError(null);
+    try {
+      const response = await usersApi.update(userId, { overtimeRatePercent, shiftWorkRatePercent, nightWorkRatePercent });
+      setUser(response.user);
+    } catch (err) {
+      setPremiumRatesError(err instanceof ApiRequestError ? err.message : 'Opslaan van de toeslagpercentages is mislukt.');
+    } finally {
+      setIsSavingPremiumRates(false);
+    }
+  }
+
+  /** Phase 12, deel A — toeslaginstelling van één koppeling (overuren van toepassing + ploegen-/nachtwerk). */
+  async function updateAssignmentPremiums(projectId: string, patch: Partial<{ overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }>) {
+    if (!user?.employee) return;
+    const employeeId = user.employee.id;
+    const current = assignmentPremiums.get(projectId) ?? { overtimeApplies: false, premiumType: 'NONE' as const };
+    const next = { ...current, ...patch };
+
+    setPendingPremiumsProjectId(projectId);
+    setAssignmentPremiums((prev) => new Map(prev).set(projectId, next));
+    try {
+      await projectsApi.assignments.updatePremiums(employeeId, projectId, next.overtimeApplies, next.premiumType);
+    } catch (err) {
+      setAssignmentPremiums((prev) => new Map(prev).set(projectId, current)); // terugzetten bij fout
+      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Opslaan van de toeslaginstelling is mislukt.');
+    } finally {
+      setPendingPremiumsProjectId(null);
+    }
+  }
+
+  async function updateEmploymentType(employmentType: EmploymentType) {
+    if (!userId) return;
+    setIsSavingEmploymentType(true);
+    setEmploymentTypeError(null);
+    try {
+      const response = await usersApi.update(userId, { employmentType });
+      setUser(response.user);
+    } catch (err) {
+      setEmploymentTypeError(err instanceof ApiRequestError ? err.message : 'Wijzigen van het type medewerker is mislukt.');
+    } finally {
+      setIsSavingEmploymentType(false);
+    }
+  }
+
   async function updateRole(role: UserRole) {
     if (!userId) return;
     setIsSavingUser(true);
@@ -146,6 +234,41 @@ export function UserDetailPage() {
     }
   }
 
+  /** Opnieuw uitnodigen — bv. wanneer de eerste uitnodigingsmail niet aankwam. */
+  async function handleResendInvite() {
+    if (!userId) return;
+    setIsResendingInvite(true);
+    setResendInviteMessage(null);
+    try {
+      const response = await usersApi.resendInvite(userId);
+      setResendInviteMessage(
+        response.inviteEmailSent
+          ? 'Uitnodigingsmail opnieuw verstuurd.'
+          : 'De uitnodiging kon niet verstuurd worden. Controleer de e-mailconfiguratie.',
+      );
+    } catch (err) {
+      setResendInviteMessage(err instanceof ApiRequestError ? err.message : 'Opnieuw uitnodigen is mislukt.');
+    } finally {
+      setIsResendingInvite(false);
+    }
+  }
+
+  /** Volledig verwijderen — enkel mogelijk zonder bestaande tijdregistraties/werkbonnen (zie user.routes.ts). */
+  async function handleDelete() {
+    if (!userId || !user) return;
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`${user.employee?.displayName ?? user.email} volledig verwijderen? Dit kan niet ongedaan gemaakt worden.`)) return;
+    setIsDeleting(true);
+    setErrorMessage(null);
+    try {
+      await usersApi.remove(userId);
+      navigate('/backoffice/medewerkers');
+    } catch (err) {
+      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Verwijderen is mislukt.');
+      setIsDeleting(false);
+    }
+  }
+
   async function toggleProject(project: ProjectSummary) {
     if (!user?.employee) return;
     const employeeId = user.employee.id;
@@ -163,6 +286,11 @@ export function UserDetailPage() {
     try {
       if (isAssigned) {
         await projectsApi.assignments.unassign(employeeId, project.id);
+        setAssignmentPremiums((prev) => {
+          const next = new Map(prev);
+          next.delete(project.id); // koppeling weg → toeslaginstelling heeft geen betekenis meer, DB-rij is cascade-verwijderd
+          return next;
+        });
       } else {
         await projectsApi.assignments.assign(employeeId, project.id);
       }
@@ -232,7 +360,28 @@ export function UserDetailPage() {
               >
                 {user.isActive ? 'Deactiveren' : 'Heractiveren'}
               </button>
+
+              {!user.hasSetPassword && (
+                <button
+                  type="button"
+                  disabled={isResendingInvite}
+                  onClick={() => void handleResendInvite()}
+                  className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-semibold text-neutral-700 disabled:opacity-50"
+                >
+                  {isResendingInvite ? 'Bezig...' : 'Opnieuw uitnodigen'}
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => void handleDelete()}
+                className="rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50"
+              >
+                {isDeleting ? 'Bezig...' : 'Volledig verwijderen'}
+              </button>
             </div>
+            {resendInviteMessage && <p className="mt-3 text-sm text-neutral-600">{resendInviteMessage}</p>}
           </section>
 
           <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
@@ -293,6 +442,95 @@ export function UserDetailPage() {
           )}
 
           {user.employee && (
+            <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Toeslagen</h2>
+              <p className="mb-4 text-sm text-neutral-500">
+                Percentages van het uurtarief hierboven. Enkel hier zichtbaar/instelbaar (nooit voor {user.employee.displayName} zelf of op de
+                werkbon).
+              </p>
+              <div className="flex flex-wrap items-end gap-4">
+                <label className="text-sm text-neutral-600">
+                  Overuren
+                  <div className="mt-1 flex items-center gap-1">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={overtimeRateInput}
+                      onChange={(e) => setOvertimeRateInput(e.target.value)}
+                      disabled={isSavingPremiumRates}
+                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+                    />
+                    <span>%</span>
+                  </div>
+                </label>
+                <label className="text-sm text-neutral-600">
+                  Ploegenwerk
+                  <div className="mt-1 flex items-center gap-1">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={shiftWorkRateInput}
+                      onChange={(e) => setShiftWorkRateInput(e.target.value)}
+                      disabled={isSavingPremiumRates}
+                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+                    />
+                    <span>%</span>
+                  </div>
+                </label>
+                <label className="text-sm text-neutral-600">
+                  Nachtwerk
+                  <div className="mt-1 flex items-center gap-1">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={nightWorkRateInput}
+                      onChange={(e) => setNightWorkRateInput(e.target.value)}
+                      disabled={isSavingPremiumRates}
+                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+                    />
+                    <span>%</span>
+                  </div>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void savePremiumRates()}
+                  disabled={isSavingPremiumRates}
+                  className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {isSavingPremiumRates ? 'Bezig...' : 'Opslaan'}
+                </button>
+              </div>
+              {premiumRatesError && <p className="mt-2 text-xs text-red-700">{premiumRatesError}</p>}
+            </section>
+          )}
+
+          {user.employee && (
+            <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Type medewerker</h2>
+              <p className="mb-4 text-sm text-neutral-500">
+                Bepaalt welk document {user.employee.displayName} krijgt bij de maandelijkse uren-export: een
+                werknemer komt in de gedeelde Excel-urenexport (loonverwerking); een onderaannemer krijgt een eigen
+                totalisatie-met-detail-document per periode, om zelf op te factureren.
+              </p>
+              <div className="flex items-center gap-4">
+                <select
+                  value={user.employee.employmentType}
+                  disabled={isSavingEmploymentType}
+                  onChange={(e) => void updateEmploymentType(e.target.value as EmploymentType)}
+                  className="rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+                >
+                  {EMPLOYMENT_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {EMPLOYMENT_TYPE_LABELS[type]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {employmentTypeError && <p className="mt-2 text-xs text-red-700">{employmentTypeError}</p>}
+            </section>
+          )}
+
+          {user.employee && (
             <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
               <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">
                 Gekoppelde projecten
@@ -317,25 +555,61 @@ export function UserDetailPage() {
               )}
 
               <ul className="divide-y divide-neutral-100">
-                {allProjects?.map((project) => (
-                  <li key={project.id} className="flex items-center gap-3 py-2">
-                    <input
-                      type="checkbox"
-                      id={`project-${project.id}`}
-                      checked={assignedProjectIds.has(project.id)}
-                      disabled={pendingProjectId === project.id}
-                      onChange={() => void toggleProject(project)}
-                      className="h-4 w-4 accent-swatt-gold"
-                    />
-                     <label htmlFor={`project-${project.id}`} className="flex-1 text-sm">
-                      <span className="font-medium">{project.customerName}</span>
-                      <span className="text-neutral-500"> — {project.name}</span>
-                      {project.projectNumber && (
-                        <span className="text-neutral-400"> (#{project.projectNumber})</span>
+                {allProjects?.map((project) => {
+                  const isAssigned = assignedProjectIds.has(project.id);
+                  const premiums = assignmentPremiums.get(project.id) ?? { overtimeApplies: false, premiumType: 'NONE' as const };
+                  const isPremiumsPending = pendingPremiumsProjectId === project.id;
+                  return (
+                    <li key={project.id} className="py-2">
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          id={`project-${project.id}`}
+                          checked={isAssigned}
+                          disabled={pendingProjectId === project.id}
+                          onChange={() => void toggleProject(project)}
+                          className="h-4 w-4 accent-swatt-gold"
+                        />
+                        <label htmlFor={`project-${project.id}`} className="flex-1 text-sm">
+                          <span className="font-medium">{project.customerName}</span>
+                          <span className="text-neutral-500"> — {project.name}</span>
+                          {project.projectNumber && (
+                            <span className="text-neutral-400"> (#{project.projectNumber})</span>
+                          )}
+                        </label>
+                      </div>
+
+                      {/* Phase 12, deel A (sectie 1): toeslaginstelling enkel tonen/bewerkbaar voor een aangevinkte koppeling. */}
+                      {isAssigned && (
+                        <div className="mt-2 ml-7 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-neutral-600">
+                          <label className="flex items-center gap-1.5">
+                            <input
+                              type="checkbox"
+                              checked={premiums.overtimeApplies}
+                              disabled={isPremiumsPending}
+                              onChange={(e) => void updateAssignmentPremiums(project.id, { overtimeApplies: e.target.checked })}
+                              className="h-3.5 w-3.5 accent-swatt-gold"
+                            />
+                            Overuren van toepassing
+                          </label>
+                          {(['NONE', 'SHIFT_WORK', 'NIGHT_WORK'] as const).map((option) => (
+                            <label key={option} className="flex items-center gap-1.5">
+                              <input
+                                type="radio"
+                                name={`premium-${project.id}`}
+                                checked={premiums.premiumType === option}
+                                disabled={isPremiumsPending}
+                                onChange={() => void updateAssignmentPremiums(project.id, { premiumType: option })}
+                                className="h-3.5 w-3.5 accent-swatt-gold"
+                              />
+                              {option === 'NONE' ? 'Geen toeslag' : option === 'SHIFT_WORK' ? 'Ploegenwerk' : 'Nachtwerk'}
+                            </label>
+                          ))}
+                        </div>
                       )}
-                    </label>
-                  </li>
-                ))}
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           )}

@@ -35,8 +35,8 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
   const service = new WorkOrderService(app.prisma);
   const storage: StorageService = new DatabaseStorageService(app.prisma);
   const photoService = new WorkOrderPhotoService(app.prisma, storage);
-  const signatureService = new WorkOrderSignatureService(app.prisma, storage);
   const companySettingsService = new CompanySettingsService(app.prisma);
+  const signatureService = new WorkOrderSignatureService(app.prisma, storage, companySettingsService);
   const pdfService = new WorkOrderPdfService(app.prisma, storage, service, companySettingsService);
 
   app.post('/work-orders', { preHandler: [app.authenticate] }, async (request, reply): Promise<WorkOrderResponseBody> => {
@@ -284,6 +284,7 @@ async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): P
     workOrderNumber: workOrder.workOrderNumber,
     projectId: workOrder.projectId,
     projectName: workOrder.project.name,
+    projectSigningMode: workOrder.project.signingMode,
     customerName: workOrder.project.customer.name,
     status: workOrder.status,
     description: workOrder.description,

@@ -184,7 +184,7 @@ function buildHeader({ View, Text, Image }: PdfKit, data: WorkOrderPdfData) {
       null,
       data.company.logo
         ? h(Image, { src: data.company.logo.data, style: styles.logoImage })
-        : h(View, { style: styles.logoBadge }, h(Text, { style: styles.logoText }, 'SWATT')),
+        : h(View, { style: styles.logoBadge }, h(Text, { style: styles.logoText }, 'UURIVO')),
       h(
         View,
         { style: styles.companyBlock },

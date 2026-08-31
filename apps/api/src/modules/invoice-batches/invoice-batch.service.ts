@@ -124,7 +124,7 @@ interface InvoiceableWorkOrderRow {
 interface CreateBatchWorkOrderRow {
   id: string;
   status: string;
-  project: { customerId: string };
+  project: { customerId: string; invoicingEnabled: boolean };
   timeEntries: Array<{ timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number } }>;
   invoiceBatchLine: { id: string } | null;
 }
@@ -154,7 +154,18 @@ export class InvoiceBatchService {
       where: {
         status: 'READY_FOR_INVOICING',
         invoiceBatchLine: null,
-        ...(filters.customerId ? { project: { customerId: filters.customerId } } : {}),
+        // Phase 12, deel C (sectie 3): een project met invoicingEnabled=false
+        // synct zijn uren/PDF gewoon naar Teamleader (nacalculatie), maar mag
+        // nooit in dit overzicht verschijnen — dus nooit selecteerbaar zijn
+        // voor een InvoiceBatch. Let op: `project` mag hier maar één keer als
+        // sleutel voorkomen in dit object-literal — daarom hier samengevoegd
+        // met filters.customerId i.p.v. een tweede `...(filters.customerId
+        // ? { project: {...} } : {})`-spread, die de vorige `project`-sleutel
+        // stilzwijgend zou overschrijven.
+        project: {
+          invoicingEnabled: true,
+          ...(filters.customerId ? { customerId: filters.customerId } : {}),
+        },
         ...(filters.projectId ? { projectId: filters.projectId } : {}),
         ...(filters.employeeId ? { timeEntries: { some: { timeEntry: { employeeId: filters.employeeId } } } } : {}),
       },
@@ -272,6 +283,13 @@ export class InvoiceBatchService {
     }
     for (const workOrder of workOrders) {
       if (workOrder.status !== 'READY_FOR_INVOICING') {
+        throw InvoiceBatchErrors.workOrderNotInvoiceable();
+      }
+      // Phase 12, deel C — backstop naast de listInvoiceable()-filter: een
+      // werkbon van een nacalculatie-project (invoicingEnabled=false) mag
+      // nooit in een batch belanden, ook niet via een rechtstreeks
+      // meegegeven work-order-ID die de UI-filter omzeilt.
+      if (!workOrder.project.invoicingEnabled) {
         throw InvoiceBatchErrors.workOrderNotInvoiceable();
       }
       if (workOrder.invoiceBatchLine) {

@@ -16,6 +16,10 @@ export interface CompanySettingsRecord {
   contactPhone: string | null;
   logoFileKey: string | null;
   workOrderLegalText: string;
+  /** Licentiebeperking (betaalplan) — `null` = geen limiet. Zie schema.prisma voor de volledige toelichting. */
+  maxEmployees: number | null;
+  /** Phase 12, deel D (sectie 5) — tarief per km (eurocent), admin-only. `null` = km-vergoeding niet actief. */
+  kmRateCents: number | null;
 }
 
 /** Patch voor `update()` — enkel de velden die de admin-instellingenpagina daadwerkelijk aanbiedt. */
@@ -26,6 +30,9 @@ export interface CompanySettingsUpdate {
   contactEmail: string | null;
   contactPhone: string | null;
   workOrderLegalText: string;
+  maxEmployees: number | null;
+  /** Phase 12, deel D (sectie 5) — `null` schakelt de km-vergoeding uit. */
+  kmRateCents: number | null;
   /**
    * `undefined` = logo ongemoeid laten (geen nieuwe upload, geen verwijdering);
    * `null` = logo verwijderen; een string = de nieuwe StorageService-key.
@@ -69,6 +76,8 @@ export class CompanySettingsService {
       contactEmail: patch.contactEmail,
       contactPhone: patch.contactPhone,
       workOrderLegalText: patch.workOrderLegalText,
+      maxEmployees: patch.maxEmployees,
+      kmRateCents: patch.kmRateCents,
       // Enkel meesturen wanneer expliciet gezet — `logoFileKey: undefined` zou
       // Prisma anders interpreteren als "dit veld niet wijzigen", wat hier
       // toevallig ook het gewenste gedrag is, maar dat willen we niet stilzwijgend

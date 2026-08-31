@@ -64,6 +64,8 @@ export default async function companySettingsRoutes(app: FastifyInstance): Promi
         contactEmail: body.contactEmail,
         contactPhone: body.contactPhone,
         workOrderLegalText: body.workOrderLegalText ?? current.workOrderLegalText,
+        maxEmployees: body.maxEmployees !== undefined ? body.maxEmployees : current.maxEmployees,
+        kmRateCents: body.kmRateCents !== undefined ? body.kmRateCents : current.kmRateCents,
         // `exactOptionalPropertyTypes` (zie CompanySettingsUpdate): enkel
         // meesturen wanneer effectief bepaald hierboven, anders zou een
         // letterlijke `logoFileKey: undefined` hier iets anders betekenen dan
@@ -97,5 +99,7 @@ async function toResponseBody(storage: StorageService, settings: Awaited<ReturnT
     contactPhone: settings.contactPhone,
     workOrderLegalText: settings.workOrderLegalText,
     logoDataUrl,
+    maxEmployees: settings.maxEmployees,
+    kmRateCents: settings.kmRateCents,
   };
 }

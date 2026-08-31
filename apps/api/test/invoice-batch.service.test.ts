@@ -18,7 +18,14 @@ interface FakeWorkOrder {
   workOrderNumber: string;
   status: string;
   projectId: string;
-  project: { id: string; customerId: string; name: string; projectNumber: string | null; customer: { id: string; name: string; hourlyRateCents: number | null } };
+  project: {
+    id: string;
+    customerId: string;
+    name: string;
+    projectNumber: string | null;
+    invoicingEnabled: boolean;
+    customer: { id: string; name: string; hourlyRateCents: number | null };
+  };
   signature: { signedAt: Date } | null;
   timeEntries: Array<{
     timeEntry: {
@@ -54,8 +61,9 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
           if (where.status && wo.status !== where.status) return false;
           if ('invoiceBatchLine' in where && where.invoiceBatchLine === null && batchedIds.has(wo.id)) return false;
           if (where.projectId && wo.projectId !== where.projectId) return false;
-          const projectFilter = where.project as { customerId?: string } | undefined;
+          const projectFilter = where.project as { customerId?: string; invoicingEnabled?: boolean } | undefined;
           if (projectFilter?.customerId && wo.project.customerId !== projectFilter.customerId) return false;
+          if (projectFilter?.invoicingEnabled !== undefined && wo.project.invoicingEnabled !== projectFilter.invoicingEnabled) return false;
           const timeEntriesFilter = where.timeEntries as { some?: { timeEntry?: { employeeId?: string } } } | undefined;
           const employeeId = timeEntriesFilter?.some?.timeEntry?.employeeId;
           if (employeeId && !wo.timeEntries.some((link) => link.timeEntry.employeeId === employeeId)) return false;
@@ -160,7 +168,7 @@ function workOrder(overrides: Partial<FakeWorkOrder> & { id: string }): FakeWork
     workOrderNumber: `WB-${overrides.id}`,
     status: 'READY_FOR_INVOICING',
     projectId: 'proj-1',
-    project: { id: 'proj-1', customerId: janssens.id, name: 'Onderhoud HVAC', projectNumber: 'PRO-1', customer: janssens },
+    project: { id: 'proj-1', customerId: janssens.id, name: 'Onderhoud HVAC', projectNumber: 'PRO-1', invoicingEnabled: true, customer: janssens },
     signature: { signedAt: new Date('2026-08-10T10:00:00Z') },
     timeEntries: [],
     ...overrides,
@@ -238,8 +246,26 @@ describe('InvoiceBatchService', () => {
     ).rejects.toMatchObject({ code: 'INVOICE_BATCH_WORK_ORDER_NOT_INVOICEABLE' });
   });
 
+  it('Phase 12, deel C: een werkbon van een nacalculatie-project (invoicingEnabled=false) verschijnt nooit bij listInvoiceable() en kan niet gebatcht worden', async () => {
+    const wo1 = workOrder({
+      id: 'wo1',
+      project: { id: 'proj-nacalc', customerId: janssens.id, name: 'Nacalculatie-project', projectNumber: 'PRO-9', invoicingEnabled: false, customer: janssens },
+      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
+    });
+    const { prisma } = createFakePrisma([wo1]);
+    const service = new InvoiceBatchService(prisma);
+
+    // Verschijnt niet in het overzicht, ook al staat de werkbon op READY_FOR_INVOICING...
+    expect(await service.listInvoiceable()).toHaveLength(0);
+
+    // ...en kan ook niet via een rechtstreeks meegegeven work-order-ID gebatcht worden (backstop, sectie 3).
+    await expect(
+      service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' }),
+    ).rejects.toMatchObject({ code: 'INVOICE_BATCH_WORK_ORDER_NOT_INVOICEABLE' });
+  });
+
   it('create() weigert wanneer een werkbon niet bij de opgegeven klant hoort', async () => {
-    const woOther = workOrder({ id: 'wo1', project: { id: 'proj-2', customerId: deSmet.id, name: 'Service', projectNumber: null, customer: deSmet } });
+    const woOther = workOrder({ id: 'wo1', project: { id: 'proj-2', customerId: deSmet.id, name: 'Service', projectNumber: null, invoicingEnabled: true, customer: deSmet } });
     const { prisma } = createFakePrisma([woOther]);
     const service = new InvoiceBatchService(prisma);
 

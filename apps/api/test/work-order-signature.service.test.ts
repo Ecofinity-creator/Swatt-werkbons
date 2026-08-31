@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
+import type { CompanySettingsService } from '../src/modules/company-settings/company-settings.service';
 import type { StorageService } from '../src/modules/storage/storage.service';
 import { WorkOrderSignatureService } from '../src/modules/work-orders/work-order-signature.service';
 
@@ -24,6 +25,8 @@ interface FakeWorkOrder {
   description: string | null;
   timeEntries: Array<{ timeEntryId: string; timeEntry: { employeeId: string } }>;
   photos: Array<{ id: string }>;
+  /** Phase 12, deel D — nodig voor kmAmountCents; default null (geen km-vergoeding) in de meeste tests. */
+  project: { kmDistanceOneWayMeters: number | null };
 }
 
 function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
@@ -33,10 +36,11 @@ function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
 
   const workOrder = {
     findUnique: vi.fn(async ({ where }: { where: { id: string } }) => workOrders.get(where.id) ?? null),
-    update: vi.fn(async ({ where, data }: { where: { id: string }; data: { status: string } }) => {
+    update: vi.fn(async ({ where, data }: { where: { id: string }; data: { status: string; kmAmountCents?: number | null } }) => {
       const existing = workOrders.get(where.id);
       if (existing) {
         existing.status = data.status;
+        Object.assign(existing, { kmAmountCents: data.kmAmountCents });
       }
       return existing ?? null;
     }),
@@ -81,6 +85,11 @@ function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
   };
 }
 
+/** Phase 12, deel D — default: km-vergoeding niet actief (geen tarief ingesteld). Override het tarief per test waar nodig. */
+function createFakeCompanySettingsService(kmRateCents: number | null = null): CompanySettingsService {
+  return { get: vi.fn(async () => ({ kmRateCents })) } as unknown as CompanySettingsService;
+}
+
 function createFakeStorage(): StorageService {
   const saved = new Map<string, { data: Buffer; mimeType: string }>();
   let keyCounter = 0;
@@ -115,6 +124,7 @@ function draftWorkOrder(overrides: Partial<FakeWorkOrder> = {}): FakeWorkOrder {
     description: 'Onderhoud uitgevoerd.',
     timeEntries: [{ timeEntryId: 'entry-1', timeEntry: { employeeId: EMPLOYEE.id } }],
     photos: [{ id: 'photo-1' }],
+    project: { kmDistanceOneWayMeters: null },
     ...overrides,
   };
 }
@@ -133,7 +143,7 @@ describe('WorkOrderSignatureService', () => {
   it('sign() maakt de handtekening aan en zet de werkbon op SIGNED', async () => {
     const { prisma, workOrders } = createFakePrisma({ workOrders: [draftWorkOrder()] });
     const storage = createFakeStorage();
-    const service = new WorkOrderSignatureService(prisma, storage);
+    const service = new WorkOrderSignatureService(prisma, storage, createFakeCompanySettingsService());
 
     const signature = await service.sign(EMPLOYEE.id, 'wo-1', signInput());
 
@@ -147,8 +157,8 @@ describe('WorkOrderSignatureService', () => {
   it('sign() berekent dezelfde contentHash voor eenzelfde werkbon-inhoud, ongeacht tijdstip', async () => {
     const { prisma: prismaA } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-a' })] });
     const { prisma: prismaB } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-b' })] });
-    const serviceA = new WorkOrderSignatureService(prismaA, createFakeStorage());
-    const serviceB = new WorkOrderSignatureService(prismaB, createFakeStorage());
+    const serviceA = new WorkOrderSignatureService(prismaA, createFakeStorage(), createFakeCompanySettingsService());
+    const serviceB = new WorkOrderSignatureService(prismaB, createFakeStorage(), createFakeCompanySettingsService());
 
     const sigA = await serviceA.sign(EMPLOYEE.id, 'wo-a', signInput());
     const sigB = await serviceB.sign(EMPLOYEE.id, 'wo-b', signInput());
@@ -158,7 +168,7 @@ describe('WorkOrderSignatureService', () => {
 
   it('sign() weigert met WORK_ORDER_NOT_FOUND voor een onbestaande werkbon', async () => {
     const { prisma } = createFakePrisma();
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
 
     await expect(service.sign(EMPLOYEE.id, 'onbestaand', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_NOT_FOUND',
@@ -167,7 +177,7 @@ describe('WorkOrderSignatureService', () => {
 
   it('sign() weigert met WORK_ORDER_NOT_FOUND voor een werknemer die geen deelnemer is (anti-enumeratie)', async () => {
     const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder()] });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
 
     await expect(service.sign(OTHER_EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_NOT_FOUND',
@@ -176,7 +186,7 @@ describe('WorkOrderSignatureService', () => {
 
   it('sign() weigert met WORK_ORDER_ALREADY_SIGNED zodra de werkbon al niet meer DRAFT is', async () => {
     const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder({ status: 'SIGNED' })] });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
 
     await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_ALREADY_SIGNED',
@@ -196,7 +206,7 @@ describe('WorkOrderSignatureService', () => {
         clientVersion: Prisma.prismaVersion.client,
       });
     });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
 
     await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_ALREADY_SIGNED',

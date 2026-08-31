@@ -20,6 +20,17 @@ export function roleAtLeast(role: UserRole, minimum: UserRole): boolean {
   return ROLE_HIERARCHY.indexOf(role) >= ROLE_HIERARCHY.indexOf(minimum);
 }
 
+/**
+ * Werknemer vs. Onderaannemer op de medewerkerskaart (backlog-item 30/8, zie
+ * claude/projectoverdracht-samenvatting_2.md sectie 3.3 en
+ * Employee.employmentType in schema.prisma). Bepaalt welk soort document
+ * deze persoon krijgt bij de maandelijkse uren-export — zie
+ * HoursExportEmployeeSummary hieronder.
+ */
+export const EMPLOYMENT_TYPES = ['EMPLOYEE', 'SUBCONTRACTOR'] as const;
+
+export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
+
 /** Publieke, veilige weergave van de ingelogde gebruiker (nooit een password hash e.d.). */
 export interface AuthenticatedUser {
   id: string;
@@ -113,10 +124,18 @@ export interface AdminUserSummary {
     phone: string | null;
     /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), zie Employee.defaultHourlyRateCents. */
     defaultHourlyRateCents: number | null;
+    /** Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only (business rule 11). */
+    overtimeRatePercent: number;
+    shiftWorkRatePercent: number;
+    nightWorkRatePercent: number;
+    /** Werknemer vs. Onderaannemer, zie EmploymentType. */
+    employmentType: EmploymentType;
   } | null;
   createdAt: string;
   /** Phase 9 — gekoppelde Teamleader-gebruiker (sectie 14), `null` = nog niet gekoppeld. */
   teamleaderUserId: string | null;
+  /** `false` zolang deze gebruiker nog geen wachtwoord heeft ingesteld (uitnodiging nog niet opgepikt) — nooit de hash zelf blootstellen, enkel dit boolean. */
+  hasSetPassword: boolean;
 }
 
 export interface ListUsersResponseBody {
@@ -136,6 +155,11 @@ export interface CreateUserResponseBody {
   inviteEmailSent: boolean;
 }
 
+/** Response van POST /admin/users/:id/resend-invite. */
+export interface ResendInviteResponseBody {
+  inviteEmailSent: boolean;
+}
+
 /** Body van POST /admin/users/:id/update — alle velden optioneel (partial update). */
 export interface UpdateUserBody {
   role?: UserRole;
@@ -144,6 +168,12 @@ export interface UpdateUserBody {
   phone?: string | null;
   /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), `null` wist het weer. */
   defaultHourlyRateCents?: number | null;
+  /** Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only. */
+  overtimeRatePercent?: number;
+  shiftWorkRatePercent?: number;
+  nightWorkRatePercent?: number;
+  /** Werknemer vs. Onderaannemer, zie EmploymentType. */
+  employmentType?: EmploymentType;
 }
 
 export interface UpdateUserResponseBody {
@@ -161,15 +191,107 @@ export interface ProjectSummary {
   status: string | null;
   customerName: string;
   isArchivedInTl: boolean;
+  /** Phase 12, deel C — false = enkel nacalculatie (sync naar Teamleader blijft lopen, verschijnt nooit in het Facturatie-overzicht). */
+  invoicingEnabled: boolean;
+  /** Phase 12, deel A (sectie 1) — "Overuren boven 8u/dag" (DAILY) of "Overuren boven [x]u/week" (WEEKLY). */
+  overtimeThresholdType: 'DAILY' | 'WEEKLY';
+  overtimeWeeklyThresholdHours: number | null;
+  /** Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" (default) of "Ondertekening per week". */
+  signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+  /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter tussen het Swatt-adres en dit project, `null` zolang nog niet berekend. */
+  kmDistanceOneWayMeters: number | null;
 }
 
 export interface ListProjectsResponseBody {
   projects: ProjectSummary[];
 }
 
+/** Body/response van POST /admin/projects/:id/invoicing-enabled (Phase 12, deel C — ADMIN-only). */
+export interface UpdateProjectInvoicingEnabledBody {
+  invoicingEnabled: boolean;
+}
+
+export interface UpdateProjectInvoicingEnabledResponseBody {
+  invoicingEnabled: boolean;
+}
+
+/** Body/response van POST /admin/projects/:id/overtime-settings (Phase 12, deel A — ADMIN-only). */
+export interface UpdateProjectOvertimeSettingsBody {
+  overtimeThresholdType: 'DAILY' | 'WEEKLY';
+  /** Verplicht wanneer overtimeThresholdType='WEEKLY', genegeerd bij 'DAILY'. */
+  overtimeWeeklyThresholdHours?: number | null;
+}
+
+export interface UpdateProjectOvertimeSettingsResponseBody {
+  overtimeThresholdType: 'DAILY' | 'WEEKLY';
+  overtimeWeeklyThresholdHours: number | null;
+}
+
+/** Body/response van POST /admin/projects/:id/signing-mode (Phase 12, deel B — ADMIN-only). */
+export interface UpdateProjectSigningModeBody {
+  signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+}
+
+export interface UpdateProjectSigningModeResponseBody {
+  signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+}
+
+/** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */
+export interface PendingWeekResponseBody {
+  weekStartDate: string;
+  weekEndDate: string;
+  /** Werkbonnen van DEZE medewerker die deze week nog wachten op weekondertekening. */
+  workOrderIds: string[];
+}
+
+/** Body van POST /weekly-approvals/:projectId/sign — zelfde velden als het bestaande /work-orders/:id/sign, nu voor de hele lopende week. */
+export interface SignWeekBody {
+  signerName: string;
+  signerFunction?: string;
+  confirmed: true;
+  signatureDataBase64: string;
+  mimeType: 'image/png';
+}
+
+export interface WeeklyApprovalSummary {
+  id: string;
+  projectId: string;
+  weekStartDate: string;
+  weekEndDate: string;
+  status: 'OPEN' | 'SIGNED' | 'REOPENED';
+  signerName: string | null;
+  signerFunction: string | null;
+  confirmedAt: string | null;
+  workOrderIds: string[];
+}
+
+export interface SignWeekResponseBody {
+  weeklyApproval: WeeklyApprovalSummary;
+}
+
+/** Phase 12, deel A — de toeslaginstelling van één koppeling medewerker↔project (sectie 4/23). */
+export interface ProjectAssignmentPremiumsSummary {
+  projectId: string;
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+}
+
+/** Body/response van POST /admin/employees/:employeeId/project-assignments/premiums (Phase 12, deel A — SUPERVISOR+, zelfde rechten als de koppeling zelf). */
+export interface UpdateProjectAssignmentPremiumsBody {
+  projectId: string;
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+}
+
+export interface UpdateProjectAssignmentPremiumsResponseBody {
+  assignment: ProjectAssignmentPremiumsSummary;
+}
+
 /** Response van GET /admin/employees/:employeeId/project-assignments. */
 export interface ListProjectAssignmentsResponseBody {
   projectIds: string[];
+  /** Phase 12, deel A — toeslaginstelling per koppeling, additief naast projectIds (die blijft bestaan voor de bestaande checklist-UI). */
+  assignments: ProjectAssignmentPremiumsSummary[];
 }
 
 /** Body van POST .../project-assignments en .../project-assignments/remove. */
@@ -417,6 +539,8 @@ export interface WorkOrderSummary {
   workOrderNumber: string;
   projectId: string;
   projectName: string;
+  /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
+  projectSigningMode: 'PER_WORK_ORDER' | 'WEEKLY';
   customerName: string;
   status: WorkOrderStatus;
   description: string | null;
@@ -592,7 +716,7 @@ export type RetryWorkOrderSyncResponseBody = WorkOrderResponseBody;
  * Bedrijfsgegevens voor de werkbon-PDF-header (secties 7/12 — "Configureerbaar
  * door administrator"), zie CompanySettingsService. `logoDataUrl` is `null`
  * zolang er geen logo geüpload is (de PDF valt dan terug op een gestileerd
- * "SWATT"-tekstlogo, zie work-order-pdf-document.ts).
+ * "UURIVO"-tekstlogo, zie work-order-pdf-document.ts).
  */
 export interface CompanySettingsResponseBody {
   companyName: string;
@@ -602,6 +726,10 @@ export interface CompanySettingsResponseBody {
   contactPhone: string | null;
   workOrderLegalText: string;
   logoDataUrl: string | null;
+  /** Licentiebeperking (betaalplan) — `null` = geen limiet. */
+  maxEmployees: number | null;
+  /** Phase 12, deel D (sectie 5) — tarief per km (eurocent). `null` = km-vergoeding niet actief. */
+  kmRateCents: number | null;
 }
 
 /**
@@ -621,6 +749,10 @@ export interface UpdateCompanySettingsBody {
   logoMimeType?: 'image/png' | 'image/jpeg';
   logoDataBase64?: string;
   removeLogo?: boolean;
+  /** Licentiebeperking (betaalplan) — `null` wist de limiet weer. */
+  maxEmployees?: number | null;
+  /** Phase 12, deel D (sectie 5) — tarief per km in eurocent. `null` schakelt de km-vergoeding uit. */
+  kmRateCents?: number | null;
 }
 
 // ============================================================
@@ -730,4 +862,85 @@ export interface UpdateInvoiceBatchEmployeeRateBody {
 
 export interface UpdateInvoiceBatchEmployeeRateResponseBody {
   batch: InvoiceBatchSummary;
+}
+
+/**
+ * Phase 12, deel E — "Personeelsuitbetaling". Eén rij per medewerker voor een
+ * gekozen periode; `totalAmountCents` is `null` zolang de medewerker geen
+ * `Employee.defaultHourlyRateCents` heeft (zie UserDetailPage.tsx) — dan is
+ * het uren-overzicht wel al bruikbaar, maar kan er nog geen batch van
+ * gemaakt worden.
+ */
+export interface PayableEmployeeSummary {
+  employeeId: string;
+  displayName: string;
+  normalHours: number;
+  overtimeHours: number;
+  shiftHours: number;
+  nightHours: number;
+  totalAmountCents: number | null;
+}
+
+export interface ListPayableSummaryResponseBody {
+  employees: PayableEmployeeSummary[];
+}
+
+export interface PayrollBatchLineSummary {
+  id: string;
+  timeEntryId: string;
+  projectName: string;
+  normalHours: number;
+  overtimeHours: number;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+  amountCents: number;
+}
+
+export interface PayrollBatchSummary {
+  id: string;
+  employeeId: string;
+  employeeDisplayName: string;
+  periodLabel: string;
+  status: 'DRAFT' | 'CLOSED';
+  totalAmountCents: number;
+  createdAt: string;
+  closedAt: string | null;
+  lines: PayrollBatchLineSummary[];
+}
+
+export interface ListPayrollBatchesResponseBody {
+  batches: PayrollBatchSummary[];
+}
+
+/** Body van POST /admin/payroll/batches — de admin-actie "Afsluiten voor deze medewerker". */
+export interface CreatePayrollBatchBody {
+  employeeId: string;
+  /** bv. "2026-08" — vrije tekst, zelfde conventie als InvoiceBatch.periodLabel. */
+  periodLabel: string;
+}
+
+export interface CreatePayrollBatchResponseBody {
+  batch: PayrollBatchSummary;
+}
+
+/**
+ * Werknemer vs. Onderaannemer — maandelijkse uren-export (backlog-item 30/8).
+ * Zie HoursExportService: dezelfde onderliggende urendata als het
+ * facturatie-/loonoverzicht, maar twee verschillende exportvormen naargelang
+ * `employmentType`:
+ * - EMPLOYEE: opgenomen in de gedeelde Excel-export (GET /admin/hours-export/employees/excel).
+ * - SUBCONTRACTOR: eigen totalisatie-met-detail-PDF (GET /admin/hours-export/subcontractors/:employeeId/pdf).
+ */
+export interface HoursExportEmployeeSummary {
+  employeeId: string;
+  displayName: string;
+  employmentType: EmploymentType;
+  /** Som van alle gewerkte seconden binnen de opgevraagde periode (enkel gestopte tijdregistraties op een ondertekende werkbon — zie HoursExportService). */
+  totalSeconds: number;
+  workOrderCount: number;
+}
+
+export interface HoursExportOverviewResponseBody {
+  /** bv. "2026-08" — zelfde notatie als InvoiceBatch.periodLabel. */
+  periodLabel: string;
+  employees: HoursExportEmployeeSummary[];
 }

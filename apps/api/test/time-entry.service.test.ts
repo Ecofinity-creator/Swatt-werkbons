@@ -32,10 +32,25 @@ interface FakeTimeEntry {
   isManual: boolean;
 }
 
-function createFakePrisma(options: { projects?: FakeProject[]; assignments?: Array<[string, string]> } = {}) {
+interface FakeWorkOrder {
+  id: string;
+  status: string;
+}
+
+function createFakePrisma(
+  options: {
+    projects?: FakeProject[];
+    assignments?: Array<[string, string]>;
+    workOrders?: FakeWorkOrder[];
+    /** [timeEntryId, workOrderId] — koppeling zoals WorkOrderTimeEntry die legt. */
+    workOrderLinks?: Array<[string, string]>;
+  } = {},
+) {
   const projects = new Map((options.projects ?? []).map((p) => [p.id, p]));
   const assignments = new Set((options.assignments ?? []).map(([projectId, employeeId]) => `${projectId}:${employeeId}`));
   const entries = new Map<string, FakeTimeEntry>();
+  const workOrders = new Map((options.workOrders ?? []).map((wo) => [wo.id, wo]));
+  const workOrderLinks = new Map((options.workOrderLinks ?? []).map(([timeEntryId, workOrderId]) => [timeEntryId, workOrderId]));
   let idCounter = 0;
 
   function toRecord(entry: FakeTimeEntry) {
@@ -53,9 +68,18 @@ function createFakePrisma(options: { projects?: FakeProject[]; assignments?: Arr
       );
       return found ? toRecord(found) : null;
     }),
-    findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
+    findUnique: vi.fn(async ({ where, include }: { where: { id: string }; include?: { workOrderLink?: unknown } }) => {
       const found = entries.get(where.id);
-      return found ? toRecord(found) : null;
+      if (!found) return null;
+      const record = toRecord(found);
+      if (include?.workOrderLink) {
+        const workOrderId = workOrderLinks.get(found.id);
+        return {
+          ...record,
+          workOrderLink: workOrderId ? { workOrder: workOrders.get(workOrderId) ?? null } : null,
+        };
+      }
+      return record;
     }),
     create: vi.fn(
       async ({
@@ -111,7 +135,25 @@ function createFakePrisma(options: { projects?: FakeProject[]; assignments?: Arr
     ),
   };
 
-  return { prisma: { timeEntry, project, projectAssignment } as unknown as PrismaClient };
+  const workOrderTimeEntry = {
+    create: vi.fn(async ({ data }: { data: { workOrderId: string; timeEntryId: string } }) => {
+      workOrderLinks.set(data.timeEntryId, data.workOrderId);
+      return { id: `link-${data.timeEntryId}`, ...data };
+    }),
+  };
+
+  const prisma = {
+    timeEntry,
+    project,
+    projectAssignment,
+    workOrderTimeEntry,
+    // Interactieve vorm zoals TimeEntryService.correct() gebruikt — voert de
+    // callback synchroon uit tegen dezelfde fake-tabellen (geen echte
+    // transactionele isolatie nodig voor deze unit-tests).
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
+  };
+
+  return { prisma: prisma as unknown as PrismaClient };
 }
 
 const PROJECT: FakeProject = { id: 'project-1', isArchivedInTl: false, name: 'Onderhoud warmtepomp', customerName: 'Janssens BV' };
@@ -465,5 +507,118 @@ describe('TimeEntryService', () => {
     const service = new TimeEntryService(prisma);
 
     await expect(service.start('employee-1', 'project-1')).rejects.toMatchObject({ code: 'P2003' });
+  });
+
+  describe('correct()', () => {
+    /**
+     * Sectie 4: dekt de kern van TimeEntryService.correct() — direct
+     * overschrijven zolang de gekoppelde werkbon niet SIGNED (of verder) is;
+     * business rule (bevestigd door Steven, aug 2026) daarna: geen enkele
+     * aanpassing meer mogelijk, punt uit — geen correctie-rij-uitzondering.
+     */
+    async function createStoppedEntry(prisma: PrismaClient, employeeId = 'employee-1') {
+      const service = new TimeEntryService(prisma);
+      const started = await service.start(employeeId, 'project-1');
+      return service.stop(employeeId, started.id, 'Oorspronkelijke omschrijving');
+    }
+
+    async function linkToWorkOrder(prisma: PrismaClient, timeEntryId: string, workOrderId: string) {
+      await (prisma as unknown as { workOrderTimeEntry: { create: (args: unknown) => Promise<unknown> } }).workOrderTimeEntry.create({
+        data: { workOrderId, timeEntryId },
+      });
+    }
+
+    it('overschrijft de registratie rechtstreeks wanneer ze aan geen enkele werkbon gekoppeld is', async () => {
+      const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+      const original = await createStoppedEntry(prisma);
+      const service = new TimeEntryService(prisma);
+
+      const corrected = await service.correct(original.id, {
+        startedAt: new Date('2026-08-23T08:00:00Z'),
+        endedAt: new Date('2026-08-23T10:00:00Z'),
+        pausedSeconds: 0,
+        description: 'Gecorrigeerde omschrijving',
+      });
+
+      expect(corrected.id).toBe(original.id); // zelfde rij, geen nieuwe
+      expect(corrected.endedAt).toEqual(new Date('2026-08-23T10:00:00Z'));
+      expect(corrected.description).toBe('Gecorrigeerde omschrijving');
+    });
+
+    it('overschrijft de registratie nog rechtstreeks wanneer de werkbon DRAFT of READY_FOR_SIGNATURE is', async () => {
+      const { prisma } = createFakePrisma({
+        projects: [PROJECT],
+        assignments: [['project-1', 'employee-1']],
+        workOrders: [{ id: 'wo-1', status: 'READY_FOR_SIGNATURE' }],
+      });
+      const original = await createStoppedEntry(prisma);
+      await linkToWorkOrder(prisma, original.id, 'wo-1');
+      const service = new TimeEntryService(prisma);
+
+      const corrected = await service.correct(original.id, {
+        startedAt: original.startedAt,
+        endedAt: new Date('2026-08-23T11:00:00Z'),
+        pausedSeconds: 0,
+        description: null,
+      });
+
+      expect(corrected.id).toBe(original.id);
+    });
+
+    it.each(['SIGNED', 'SYNC_PENDING', 'SYNC_FAILED', 'READY_FOR_INVOICING', 'INVOICED'])(
+      'blokkeert de correctie volledig zodra de werkbon %s is — geen uitzondering, geen wijziging',
+      async (status) => {
+        const { prisma } = createFakePrisma({
+          projects: [PROJECT],
+          assignments: [['project-1', 'employee-1']],
+          workOrders: [{ id: 'wo-1', status }],
+        });
+        const original = await createStoppedEntry(prisma);
+        await linkToWorkOrder(prisma, original.id, 'wo-1');
+        const service = new TimeEntryService(prisma);
+
+        await expect(
+          service.correct(original.id, {
+            startedAt: new Date('2026-08-23T08:00:00Z'),
+            endedAt: new Date('2026-08-23T12:00:00Z'),
+            pausedSeconds: 0,
+            description: null,
+          }),
+        ).rejects.toMatchObject({ code: 'TIME_ENTRY_CORRECTION_BLOCKED_SIGNED' });
+
+        const untouched = await prisma.timeEntry.findUnique({ where: { id: original.id } });
+        expect((untouched as unknown as { endedAt: Date }).endedAt).toEqual(original.endedAt);
+      },
+    );
+
+    it('weigert met TIME_ENTRY_NOT_STOPPED_YET wanneer de registratie nog RUNNING is', async () => {
+      const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+      const service = new TimeEntryService(prisma);
+      const running = await service.start('employee-1', 'project-1');
+
+      await expect(
+        service.correct(running.id, {
+          startedAt: new Date('2026-08-23T08:00:00Z'),
+          endedAt: new Date('2026-08-23T09:00:00Z'),
+          pausedSeconds: 0,
+          description: null,
+        }),
+      ).rejects.toMatchObject({ code: 'TIME_ENTRY_NOT_STOPPED_YET' });
+    });
+
+    it('weigert met TIME_ENTRY_CORRECTION_END_BEFORE_START wanneer de eindtijd niet na de starttijd ligt', async () => {
+      const { prisma } = createFakePrisma({ projects: [PROJECT], assignments: [['project-1', 'employee-1']] });
+      const original = await createStoppedEntry(prisma);
+      const service = new TimeEntryService(prisma);
+
+      await expect(
+        service.correct(original.id, {
+          startedAt: new Date('2026-08-23T10:00:00Z'),
+          endedAt: new Date('2026-08-23T09:00:00Z'),
+          pausedSeconds: 0,
+          description: null,
+        }),
+      ).rejects.toMatchObject({ code: 'TIME_ENTRY_CORRECTION_END_BEFORE_START' });
+    });
   });
 });

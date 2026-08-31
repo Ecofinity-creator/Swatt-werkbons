@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { WorkOrderErrors } from '../../errors';
+import type { CompanySettingsService } from '../company-settings/company-settings.service';
+import { computeKmAmountCents } from '../distance/distance.service';
 import type { StorageService } from '../storage/storage.service';
 import type { WorkOrderSignatureRecord } from './work-order.service';
 
@@ -20,6 +22,8 @@ interface WorkOrderSnapshot {
   description: string | null;
   timeEntryIds: string[];
   photoIds: string[];
+  /** Phase 12, deel D — nodig om kmAmountCents te bevriezen op het moment van ondertekenen. */
+  projectKmDistanceOneWayMeters: number | null;
 }
 
 /**
@@ -34,11 +38,17 @@ interface WorkOrderSnapshot {
  * canonieke snapshot), GEEN volledige WorkOrderVersion-audittrail (sectie 11
  * van de brief) — het volledige heropenen/hertekenen van een ondertekende
  * werkbon is bewust een latere fase.
+ *
+ * Zie weekly-approval.service.ts (Phase 12, deel B) voor de weekondertekening
+ * — die herbruikt bewust dezelfde `WorkOrderSignature`-vorm en `contentHash`-
+ * formule, maar als eigen, onafhankelijke transactie (bundelt meerdere
+ * werkbonnen tegelijk), niet via deze klasse.
  */
 export class WorkOrderSignatureService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly storage: StorageService,
+    private readonly companySettingsService: CompanySettingsService,
   ) {}
 
   async sign(employeeId: string, workOrderId: string, input: SignWorkOrderInput): Promise<WorkOrderSignatureRecord> {
@@ -47,6 +57,12 @@ export class WorkOrderSignatureService {
     const signatureFileKey = await this.storage.save(input.image.data, input.image.mimeType);
     const signedAt = new Date();
     const contentHash = computeContentHash(snapshot);
+
+    // Phase 12, deel D (sectie 5) — bevriezen op het moment van ondertekenen,
+    // net als de andere bedragen: wijzigt het projectadres of het km-tarief
+    // later, dan blijft dit bedrag op deze al ondertekende werkbon ongewijzigd.
+    const companySettings = await this.companySettingsService.get();
+    const kmAmountCents = computeKmAmountCents(snapshot.projectKmDistanceOneWayMeters, companySettings.kmRateCents);
 
     try {
       const [signature] = await this.prisma.$transaction([
@@ -64,7 +80,7 @@ export class WorkOrderSignatureService {
         }),
         this.prisma.workOrder.update({
           where: { id: workOrderId },
-          data: { status: 'SIGNED' },
+          data: { status: 'SIGNED', kmAmountCents },
         }),
       ]);
       return signature;
@@ -93,6 +109,7 @@ export class WorkOrderSignatureService {
         description: true,
         timeEntries: { select: { timeEntryId: true, timeEntry: { select: { employeeId: true } } } },
         photos: { select: { id: true } },
+        project: { select: { kmDistanceOneWayMeters: true } },
       },
     });
     if (!workOrder) {
@@ -113,6 +130,7 @@ export class WorkOrderSignatureService {
       description: workOrder.description,
       timeEntryIds: workOrder.timeEntries.map((link: { timeEntryId: string }) => link.timeEntryId),
       photoIds: workOrder.photos.map((photo: { id: string }) => photo.id),
+      projectKmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
     };
   }
 }

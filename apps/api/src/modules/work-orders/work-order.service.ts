@@ -32,6 +32,7 @@ export interface WorkOrderPhotoRecord {
 
 export interface WorkOrderSignatureRecord {
   id: string;
+  workOrderId: string;
   signerName: string;
   signerFunction: string | null;
   signatureFileKey: string;
@@ -63,6 +64,8 @@ export interface WorkOrderRecord {
     name: string;
     projectNumber: string | null;
     address: string | null;
+    /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
+    signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
     customer: { name: string; address: string | null; vatNumber: string | null };
   };
   createdByEmployee: { displayName: string };

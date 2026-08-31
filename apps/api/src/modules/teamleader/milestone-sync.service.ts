@@ -137,7 +137,7 @@ export class MilestoneSyncService {
     // milestone, enkel een verzamelpunt voor werkbon-uren van dit project.
     const dueOn = new Date();
     dueOn.setFullYear(dueOn.getFullYear() + 1);
-    const milestoneName = 'Werkbon-uren (SWATT app)';
+    const milestoneName = 'Werkbon-uren (Uurivo)';
 
     let created: { data: { id: string } };
     try {

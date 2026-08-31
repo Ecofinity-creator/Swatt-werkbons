@@ -1,5 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { TeamleaderErrors } from '../../errors';
+import type { CompanySettingsService } from '../company-settings/company-settings.service';
+import type { DistanceService } from '../distance/distance.service';
 import { TEAMLEADER_CONNECTION_SINGLETON_ID } from './teamleader-auth.service';
 import { TeamleaderApiError, type TeamleaderClient } from './teamleader-client.service';
 
@@ -100,6 +102,15 @@ export class ProjectSyncService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly client: TeamleaderClient,
+    /**
+     * Phase 12, deel D (sectie 5) — beide bewust optioneel: zonder
+     * OPENROUTESERVICE_API_KEY (zie config/env.ts) blijft de projectsync
+     * zelf gewoon werken, enkel de km-afstandsberekening slaat over
+     * (Project.kmDistanceOneWayMeters blijft dan `null` i.p.v. de hele sync
+     * te laten falen — business rule 9).
+     */
+    private readonly distanceService: DistanceService | null = null,
+    private readonly companySettingsService: CompanySettingsService | null = null,
   ) {}
 
   async syncAll(): Promise<ProjectSyncResult> {
@@ -134,6 +145,19 @@ export class ProjectSyncService {
     // delen vaak dezelfde klant).
     const localCustomerCache = new Map<string, { id: string; address: string | null }>();
     const seenTeamleaderIds: string[] = [];
+
+    // Phase 12, deel D — vooraf ophalen welk adres elk project al had, om na
+    // de upsert te kunnen bepalen of het effectief gewijzigd is (en dus een
+    // nieuwe km-berekening verdient) zonder dat voor elk project een aparte
+    // extra round-trip nodig is.
+    const previousAddressByTeamleaderId = new Map(
+      (
+        await this.prisma.project.findMany({
+          where: { teamleaderId: { in: rowsWithCustomer.map((entry) => entry.row.id) } },
+          select: { teamleaderId: true, address: true },
+        })
+      ).map((project: { teamleaderId: string; address: string | null }) => [project.teamleaderId, project.address]),
+    );
 
     for (const { row, customer: ref } of rowsWithCustomer) {
       const cacheKey = `${ref.type}:${ref.id}`;
@@ -202,6 +226,16 @@ export class ProjectSyncService {
         },
       });
       seenTeamleaderIds.push(row.id);
+
+      // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
+      // gewijzigd is t.o.v. vóór deze upsert (of nog nooit berekend werd),
+      // conform sectie 28 ("vraag nooit continu alle gegevens opnieuw op").
+      // Bewust NA de upsert (project bestaat dan zeker) en in een eigen
+      // try/catch: een mislukte km-berekening (netwerk, niet-geocodeerbaar
+      // adres) mag de rest van de projectsync nooit blokkeren (business rule 9).
+      if (localCustomer.address !== null && localCustomer.address !== previousAddressByTeamleaderId.get(row.id)) {
+        await this.recomputeKmDistance(row.id, localCustomer.address);
+      }
     }
 
     // Business rule 8: een project dat niet meer in Teamleader voorkomt wordt
@@ -326,6 +360,35 @@ export class ProjectSyncService {
       return TeamleaderErrors.syncFailed(err.message);
     }
     return err instanceof Error ? TeamleaderErrors.syncFailed(err.message) : TeamleaderErrors.syncFailed('onbekende fout');
+  }
+
+  /**
+   * Phase 12, deel D (sectie 5) — herberekent `Project.kmDistanceOneWayMeters`
+   * tussen het Swatt-adres (CompanySettings.addressLine) en dit projectadres.
+   * Faalt bewust stil (loggen, niet gooien): een niet-geocodeerbaar adres of
+   * een tijdelijk onbereikbare OpenRouteService mag de rest van de
+   * projectsync nooit blokkeren (business rule 9) — een volgende sync
+   * (of een adreswijziging) probeert het gewoon opnieuw.
+   */
+  private async recomputeKmDistance(projectTeamleaderId: string, projectAddress: string): Promise<void> {
+    if (!this.distanceService || !this.companySettingsService) return;
+
+    try {
+      const settings = await this.companySettingsService.get();
+      if (!settings.addressLine) return; // Geen Swatt-adres ingesteld — niets om vanaf te berekenen.
+
+      const meters = await this.distanceService.getDrivingDistanceMetersOneWay(settings.addressLine, projectAddress);
+      await this.prisma.project.update({
+        where: { teamleaderId: projectTeamleaderId },
+        data: { kmDistanceOneWayMeters: meters },
+      });
+    } catch {
+      // Bewust geen `console.error`/rethrow hier — deze service heeft geen
+      // request-logger ter beschikking (geen Fastify-instantie), en een
+      // mislukte km-berekening is nooit kritiek genoeg om de sync-run zelf
+      // te laten falen. `Project.kmDistanceOneWayMeters` blijft dan gewoon
+      // op zijn vorige waarde (of `null`) staan tot een latere, geslaagde poging.
+    }
   }
 }
 

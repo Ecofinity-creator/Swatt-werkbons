@@ -38,6 +38,10 @@ export const updateCompanySettingsBodySchema = z
     logoMimeType: z.enum(['image/png', 'image/jpeg']).optional(),
     logoDataBase64: base64ImageSchema(3 * 1024 * 1024).optional(),
     removeLogo: z.boolean().optional(),
+    /** Licentiebeperking (betaalplan) — `null` wist de limiet weer. */
+    maxEmployees: z.number().int().positive().nullable().optional(),
+    /** Phase 12, deel D (sectie 5) — tarief per km in eurocent. `null` schakelt de km-vergoeding uit. */
+    kmRateCents: z.number().int().positive().nullable().optional(),
   })
   .refine((data) => !data.logoDataBase64 || !!data.logoMimeType, {
     message: 'logoMimeType is verplicht wanneer er een logo meegestuurd wordt.',

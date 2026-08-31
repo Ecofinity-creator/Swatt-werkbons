@@ -1,7 +1,7 @@
 {
-  "name": "Swatt Werkbonnen",
-  "short_name": "Swatt",
-  "description": "Tijdregistratie en digitale werkbonnen voor Swatt-technici, met synchronisatie naar Teamleader.",
+  "name": "Uurivo",
+  "short_name": "Uurivo",
+  "description": "Tijdregistratie en digitale werkbonnen, met synchronisatie naar Teamleader.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0a0a",

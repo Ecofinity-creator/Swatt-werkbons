@@ -9,6 +9,7 @@ import type {
   CreateTeamleaderDraftInvoiceResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
+  HoursExportOverviewResponseBody,
   ListInvoiceBatchesResponseBody,
   ListInvoiceableWorkOrdersResponseBody,
   ListProjectAssignmentsResponseBody,
@@ -22,9 +23,17 @@ import type {
   PrepareAuthorizeResponseBody,
   ProjectSyncResponseBody,
   CreateWorkOrderBody,
+  ResendInviteResponseBody,
   RetryWorkOrderSyncResponseBody,
   SelectProjectMilestoneResponseBody,
+  UpdateProjectAssignmentPremiumsResponseBody,
+  UpdateProjectInvoicingEnabledResponseBody,
+  UpdateProjectOvertimeSettingsResponseBody,
+  UpdateProjectSigningModeResponseBody,
   SignWorkOrderBody,
+  PendingWeekResponseBody,
+  SignWeekBody,
+  SignWeekResponseBody,
   TeamleaderInvoiceOptionsResponseBody,
   TeamleaderSettingsResponseBody,
   TeamleaderStatusResponseBody,
@@ -229,6 +238,11 @@ export const usersApi = {
     }),
   /** Phase 9 — live opvraging van Teamleader-gebruikers voor de koppelingsdropdown (zie teamleader-user.service.ts). */
   teamleaderUsers: () => request<ListTeamleaderUsersResponseBody>('/admin/teamleader/users', { method: 'GET' }),
+  /** Opnieuw uitnodigen — bv. wanneer de eerste uitnodigingsmail niet aankwam. */
+  resendInvite: (userId: string) =>
+    request<ResendInviteResponseBody>(`/admin/users/${userId}/resend-invite`, { method: 'POST' }),
+  /** Volledig verwijderen — enkel mogelijk zonder bestaande tijdregistraties/werkbonnen, zie user.routes.ts. */
+  remove: (userId: string) => request<void>(`/admin/users/${userId}/delete`, { method: 'POST' }),
 };
 
 /**
@@ -287,6 +301,22 @@ export const workOrdersApi = {
     request<RetryWorkOrderSyncResponseBody>(`/work-orders/${workOrderId}/sync/retry`, { method: 'POST' }),
 };
 
+/**
+ * Phase 12, deel B (sectie 2) — "werkbonnen per week laten tekenen door de
+ * klant". Enkel relevant op een project met `signingMode = 'WEEKLY'`
+ * (zie WorkOrderSummary.projectSigningMode).
+ */
+export const weeklyApprovalApi = {
+  /** Openstaande werkbonnen van de LOPENDE week op dit project waarbij de ingelogde medewerker betrokken is. */
+  pendingWeek: (projectId: string) =>
+    request<PendingWeekResponseBody>(`/work-orders/pending-week?projectId=${encodeURIComponent(projectId)}`, {
+      method: 'GET',
+    }),
+  /** Tekent in één keer alle openstaande werkbonnen van de lopende week op dit project (over alle medewerkers heen). */
+  signWeek: (projectId: string, body: SignWeekBody) =>
+    request<SignWeekResponseBody>(`/weekly-approvals/${projectId}/sign`, { method: 'POST', body: JSON.stringify(body) }),
+};
+
 /** Phase 9 — overzicht "Synchronisatiefouten" (sectie 4/13). */
 export const syncIssuesApi = {
   list: () => request<ListWorkOrderSyncIssuesResponseBody>('/admin/work-orders/sync-issues', { method: 'GET' }),
@@ -318,12 +348,26 @@ export const invoiceBatchesApi = {
   remove: (id: string) => request<void>(`/admin/invoice-batches/${id}/remove`, { method: 'POST' }),
   /** Phase 10b — sectie 17: "Maak conceptfactuur in Teamleader". Geeft altijd de bijgewerkte batch terug, ook bij een mislukte Teamleader-aanroep (business rule 9). */
   createTeamleaderDraft: (id: string) =>
-    request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),
-  /** Facturatie: eenmalige tariefoverride voor één medewerker op deze batch (zie InvoiceBatchService.setEmployeeRate). */
+    request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),  /** Facturatie: eenmalige tariefoverride voor één medewerker op deze batch (zie InvoiceBatchService.setEmployeeRate). */
   setEmployeeRate: (batchId: string, employeeId: string, body: UpdateInvoiceBatchEmployeeRateBody) =>
     request<UpdateInvoiceBatchEmployeeRateResponseBody>(`/admin/invoice-batches/${batchId}/employee-rates/${employeeId}`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+};
+
+/**
+ * Werknemer vs. Onderaannemer — maandelijkse uren-export (backlog-item 30/8).
+ * Enkel `overview` gaat via deze client (JSON) — het downloaden van de
+ * Excel-/PDF-bestanden zelf gaat NIET via `request()` (die parset altijd
+ * `response.json()`), maar via een gewone `<a download href="...">`-link
+ * (zie HoursExportPage.tsx), zelfde patroon als de werkbon-PDF-download in
+ * WorkOrderReviewPage.tsx.
+ */
+export const hoursExportApi = {
+  overview: (periodLabel: string) =>
+    request<HoursExportOverviewResponseBody>(`/admin/hours-export/overview?period=${encodeURIComponent(periodLabel)}`, {
+      method: 'GET',
     }),
 };
 
@@ -363,6 +407,12 @@ export const projectsApi = {
         method: 'POST',
         body: JSON.stringify({ projectId }),
       }),
+    /** Phase 12, deel A (sectie 1) — overuren/ploegenwerk/nachtwerk voor deze specifieke koppeling. SUPERVISOR+. */
+    updatePremiums: (employeeId: string, projectId: string, overtimeApplies: boolean, premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK') =>
+      request<UpdateProjectAssignmentPremiumsResponseBody>(`/admin/employees/${employeeId}/project-assignments/premiums`, {
+        method: 'POST',
+        body: JSON.stringify({ projectId, overtimeApplies, premiumType }),
+      }),
   },
   /**
    * Phase 9 — de "flexibele" milestone-strategie (zie MilestoneSyncService):
@@ -376,6 +426,30 @@ export const projectsApi = {
       request<SelectProjectMilestoneResponseBody>(`/admin/projects/${projectId}/milestones/select`, {
         method: 'POST',
         body: JSON.stringify({ milestoneId }),
+      }),
+  },
+  /** Phase 12, deel C (sectie 3) — facturatie uitschakelen per project (enkel nacalculatie). ADMIN-only. */
+  invoicing: {
+    update: (projectId: string, invoicingEnabled: boolean) =>
+      request<UpdateProjectInvoicingEnabledResponseBody>(`/admin/projects/${projectId}/invoicing-enabled`, {
+        method: 'POST',
+        body: JSON.stringify({ invoicingEnabled }),
+      }),
+  },
+  /** Phase 12, deel A (sectie 1) — "Overuren boven 8u/dag" of "Overuren boven [x]u/week". ADMIN-only. */
+  overtimeSettings: {
+    update: (projectId: string, overtimeThresholdType: 'DAILY' | 'WEEKLY', overtimeWeeklyThresholdHours: number | null) =>
+      request<UpdateProjectOvertimeSettingsResponseBody>(`/admin/projects/${projectId}/overtime-settings`, {
+        method: 'POST',
+        body: JSON.stringify({ overtimeThresholdType, overtimeWeeklyThresholdHours }),
+      }),
+  },
+  /** Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" of "Ondertekening per week". ADMIN-only. */
+  signingMode: {
+    update: (projectId: string, signingMode: 'PER_WORK_ORDER' | 'WEEKLY') =>
+      request<UpdateProjectSigningModeResponseBody>(`/admin/projects/${projectId}/signing-mode`, {
+        method: 'POST',
+        body: JSON.stringify({ signingMode }),
       }),
   },
 };

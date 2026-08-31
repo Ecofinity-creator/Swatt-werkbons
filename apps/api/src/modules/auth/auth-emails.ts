@@ -25,7 +25,7 @@ function emailShell(title: string, bodyHtml: string): string {
           <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;">
             <tr>
               <td style="background:#0a0a0a;padding:24px 32px;">
-                <span style="color:#f5c542;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;">SWATT</span>
+                <span style="color:#f5c542;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;">UURIVO</span>
               </td>
             </tr>
             <tr>
@@ -47,7 +47,7 @@ export function buildPasswordResetEmail(to: string, token: string): SendEmailPar
   const link = buildSetPasswordLink(token);
   return {
     to,
-    subject: 'Wachtwoord opnieuw instellen — SWATT',
+    subject: 'Wachtwoord opnieuw instellen — Uurivo',
     html: emailShell(
       'Wachtwoord opnieuw instellen',
       `<p style="margin:0 0 16px;color:#404040;font-size:14px;line-height:1.6;">Er werd een wachtwoordreset aangevraagd voor dit e-mailadres. Klik op de knop hieronder om een nieuw wachtwoord in te stellen. Deze link is 1 uur geldig.</p>
@@ -67,10 +67,10 @@ export function buildInviteEmail(to: string, token: string, displayName: string)
   const link = buildSetPasswordLink(token);
   return {
     to,
-    subject: 'Welkom bij SWATT — stel je wachtwoord in',
+    subject: 'Welkom bij Uurivo — stel je wachtwoord in',
     html: emailShell(
       `Welkom, ${displayName}`,
-      `<p style="margin:0 0 16px;color:#404040;font-size:14px;line-height:1.6;">Er werd een SWATT-account voor je aangemaakt. Klik op de knop hieronder om je wachtwoord in te stellen en in te loggen. Deze link is 1 uur geldig.</p>
+      `<p style="margin:0 0 16px;color:#404040;font-size:14px;line-height:1.6;">Er werd een Uurivo-account voor je aangemaakt. Klik op de knop hieronder om je wachtwoord in te stellen en in te loggen. Deze link is 1 uur geldig.</p>
        <p style="margin:0 0 24px;"><a href="${link}" style="display:inline-block;background:#f5c542;color:#0a0a0a;padding:12px 24px;border-radius:8px;font-weight:700;text-decoration:none;font-size:14px;">Wachtwoord instellen</a></p>
        <p style="margin:0;color:#a3a3a3;font-size:12px;">Verwachtte je deze e-mail niet? Neem dan contact op met je beheerder. Link verlopen? Vraag gewoon een nieuwe aan via "Wachtwoord vergeten" op het inlogscherm.</p>`,
     ),

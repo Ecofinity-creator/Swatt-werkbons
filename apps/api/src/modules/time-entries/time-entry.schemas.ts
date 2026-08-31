@@ -40,3 +40,18 @@ export const createManualTimeEntryBodySchema = z.object({
 });
 
 export type CreateManualTimeEntryBody = z.infer<typeof createManualTimeEntryBodySchema>;
+
+/**
+ * Sectie 4: SUPERVISOR+ corrigeert een STOPPED registratie —
+ * POST /time-entries/:id/correct. Enkel toegestaan zolang de gekoppelde
+ * werkbon nog DRAFT/READY_FOR_SIGNATURE is; TimeEntryService.correct()
+ * weigert daarna met TIME_ENTRY_CORRECTION_BLOCKED_SIGNED.
+ */
+export const correctTimeEntryBodySchema = z.object({
+  startedAt: z.string().datetime({ message: 'Ongeldig starttijdstip.' }),
+  endedAt: z.string().datetime({ message: 'Ongeldig eindtijdstip.' }),
+  pausedMinutes: z.number().int().min(0).max(24 * 60).optional().default(0),
+  description: z.string().trim().min(1).optional(),
+});
+
+export type CorrectTimeEntryBody = z.infer<typeof correctTimeEntryBodySchema>;

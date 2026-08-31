@@ -43,6 +43,8 @@ describe('CompanySettingsService', () => {
       contactEmail: 'sales@swatt.be',
       contactPhone: '051 15 17 77',
       workOrderLegalText: 'De klant bevestigt door ondertekening de hierboven vermelde uitgevoerde werkzaamheden.',
+      maxEmployees: null,
+      kmRateCents: null,
       // logoFileKey bewust weggelaten
     });
 
@@ -61,6 +63,8 @@ describe('CompanySettingsService', () => {
       contactEmail: null,
       contactPhone: null,
       workOrderLegalText: 'Tekst.',
+      maxEmployees: null,
+      kmRateCents: null,
       logoFileKey: 'storage-key-1',
     });
     expect(getRow()?.logoFileKey).toBe('storage-key-1');
@@ -72,6 +76,8 @@ describe('CompanySettingsService', () => {
       contactEmail: null,
       contactPhone: null,
       workOrderLegalText: 'Tekst.',
+      maxEmployees: null,
+      kmRateCents: null,
       logoFileKey: null,
     });
 

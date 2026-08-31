@@ -174,6 +174,70 @@ enum SyncLogStatus {
   @@map("sync_log_status")
 }
 
+/// Phase 12, deel A (sectie 1): ploegenwerk- en nachtwerktoeslag sluiten
+/// elkaar uit op een ProjectAssignment (radiovakjes in de UI) — overuren
+/// (ProjectAssignment.overtimeApplies) staat er onafhankelijk naast.
+enum PremiumType {
+  NONE
+  SHIFT_WORK
+  NIGHT_WORK
+
+  @@map("premium_type")
+}
+
+/// Phase 12, deel A — bepaalt op Project-niveau of de overurendrempel per dag
+/// (vast 8u) of per week (Project.overtimeWeeklyThresholdHours) geldt.
+enum OvertimeThresholdType {
+  DAILY
+  WEEKLY
+
+  @@map("overtime_threshold_type")
+}
+
+/// Phase 12, deel E — status van een personeelsuitbetaling-batch, zelfde
+/// vorm als InvoiceBatchStatus maar zonder Teamleader-synchronisatiestappen
+/// (uitbetaling gebeurt buiten deze app om, via de loonadministratie).
+enum PayrollBatchStatus {
+  DRAFT
+  CLOSED
+
+  @@map("payroll_batch_status")
+}
+
+/// Phase 12, deel B (sectie 2): "Werkbonnen per week laten tekenen door de
+/// klant" — instelbaar per project, niet systeembreed (sommige klanten
+/// tekenen liever nog per interventie).
+enum SigningMode {
+  PER_WORK_ORDER
+  WEEKLY
+
+  @@map("signing_mode")
+}
+
+enum WeeklyApprovalStatus {
+  OPEN
+  SIGNED
+  REOPENED
+
+  @@map("weekly_approval_status")
+}
+
+/// Werknemer vs. Onderaannemer op de medewerkerskaart (backlog-item 30/8,
+/// zie claude/projectoverdracht-samenvatting_2.md sectie 3.3). Bepaalt welk
+/// soort urenoverzicht deze persoon krijgt bij de maandelijkse export — zie
+/// het hours-export-modules (HoursExportService):
+/// - EMPLOYEE: opgenomen in de gedeelde Excel-urenexport (ruwe urenlijst,
+///   bedoeld voor eigen loonverwerking).
+/// - SUBCONTRACTOR: een apart totalisatie-met-detail-PDF-document per
+///   onderaannemer/periode, bedoeld om naar de onderaannemer te sturen zodat
+///   die er zelf op kan factureren — dus bewust GEEN ruwe urenlijst.
+enum EmploymentType {
+  EMPLOYEE
+  SUBCONTRACTOR
+
+  @@map("employment_type")
+}
+
 model User {
   id     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email  String   @unique @db.Citext
@@ -211,6 +275,12 @@ model User {
 
   /// Facturatiebatches die deze admin ooit "voorbereid voor facturatie" heeft (Phase 10).
   createdInvoiceBatches InvoiceBatch[]
+
+  /// Phase 12, deel E — personeelsuitbetalingsbatches die deze admin ooit heeft aangemaakt.
+  createdPayrollBatches PayrollBatch[]
+
+  /// Phase 12, deel B — weekgoedkeuringen die deze gebruiker ooit heeft aangevraagd (de uitvoerder die "Week aftekenen" koos).
+  requestedWeeklyApprovals WeeklyApproval[]
 
   @@index([role])
   @@map("user")
@@ -257,6 +327,20 @@ model Employee {
   /// hoeven verlaten.
   defaultHourlyRateCents Int? @map("default_hourly_rate_cents")
 
+  /// Phase 12, deel A (sectie 1): toeslagpercentages — enkel admin-zichtbaar
+  /// (Medewerkers-instellingen), nooit voor de medewerker zelf of op de
+  /// werkbon-PDF (business rule 11). Effectief van toepassing enkel wanneer de
+  /// bijhorende koppeling (ProjectAssignment) dit expliciet aanvinkt/kiest.
+  overtimeRatePercent  Int @default(150) @map("overtime_rate_percent")
+  shiftWorkRatePercent Int @default(120) @map("shift_work_rate_percent")
+  nightWorkRatePercent Int @default(150) @map("night_work_rate_percent")
+
+  /// Werknemer vs. Onderaannemer (zie EmploymentType hierboven) — bepaalt
+  /// welk soort document deze persoon krijgt bij de maandelijkse
+  /// uren-/loonexport. Default EMPLOYEE: bestaande medewerkers veranderen
+  /// niet van gedrag na deze migratie.
+  employmentType EmploymentType @default(EMPLOYEE) @map("employment_type")
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -279,6 +363,9 @@ model Employee {
   /// `defaultHourlyRateCents` hierboven nog niet is ingevuld (zie
   /// InvoiceBatchEmployeeRate hieronder).
   invoiceBatchRateOverrides InvoiceBatchEmployeeRate[]
+
+  /// Phase 12, deel E — personeelsuitbetalingen van deze medewerker.
+  payrollBatches PayrollBatch[]
 
   @@map("employee")
 }
@@ -436,6 +523,33 @@ model Project {
   /// Ruwe Teamleader-statuswaarde (legacy: active/on_hold/done/cancelled; projects-v2: open/closed) — puur informatief.
   status            String?
   isArchivedInTl    Boolean                  @default(false) @map("is_archived_in_tl")
+  /// Phase 12, deel C — sectie 3 van de projectbrief: wanneer false, blijft
+  /// tijdregistratie + PDF wél naar Teamleader synchroniseren (nacalculatie),
+  /// maar de werkbon stroomt nooit door naar het lokale Facturatie-overzicht
+  /// (zie InvoiceBatchService.listInvoiceable()). Instelbaar door ADMIN op het
+  /// backoffice-projectscherm.
+  invoicingEnabled  Boolean                  @default(true) @map("invoicing_enabled")
+  /// Phase 12, deel A (sectie 1): "Overuren boven 8u/dag" (DAILY, vaste
+  /// drempel) of "Overuren boven [x]u/week" (WEEKLY, drempel in
+  /// overtimeWeeklyThresholdHours — vrij instelbaar getal, bv. 39 of 40).
+  /// Enkel relevant voor koppelingen met overtimeApplies=true.
+  overtimeThresholdType        OvertimeThresholdType @default(DAILY) @map("overtime_threshold_type")
+  overtimeWeeklyThresholdHours Decimal?              @map("overtime_weekly_threshold_hours") @db.Decimal(4, 2)
+  /// Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" (default) of
+  /// "Ondertekening per week" (zie WeeklyApproval hieronder).
+  signingMode SigningMode @default(PER_WORK_ORDER) @map("signing_mode")
+
+  /// Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting (in meter) tussen
+  /// het Swatt-adres (CompanySettings.addressLine) en dit projectadres,
+  /// berekend via OpenRouteService (zie DistanceService). `null` zolang nog
+  /// niet berekend (bv. adres nog onbekend, of de km-vergoeding staat niet
+  /// aan / OPENROUTESERVICE_API_KEY ontbreekt) — ververst bij elke
+  /// projectsync waarbij het adres effectief wijzigt (ProjectSyncService),
+  /// niet bij elke sync opnieuw (business rule/sectie 28: geen onnodige
+  /// externe API-calls).
+  kmDistanceOneWayMeters Int? @map("km_distance_one_way_meters")
+
+  weeklyApprovals WeeklyApproval[]
 
   lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
@@ -521,6 +635,13 @@ model ProjectAssignment {
   assignedByUserId String  @map("assigned_by_user_id") @db.Uuid
   assignedAt      DateTime @default(now()) @map("assigned_at") @db.Timestamptz
 
+  /// Phase 12, deel A (sectie 1): overuren staat onafhankelijk naast
+  /// ploegenwerk/nachtwerk (die elkaar uitsluiten via premiumType). Erft door
+  /// naar alle tijdregistraties van deze medewerker op dit project — de
+  /// medewerker kiest of ziet hier zelf nooit iets van (business rule 11).
+  overtimeApplies Boolean     @default(false) @map("overtime_applies")
+  premiumType     PremiumType @default(NONE) @map("premium_type")
+
   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   employee       Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   assignedByUser User     @relation(fields: [assignedByUserId], references: [id])
@@ -598,6 +719,10 @@ model TimeEntry {
   /// gestopte tijdsregistratie hoort bij hoogstens één werkbon, zie
   /// WorkOrderTimeEntry.timeEntryId (unique) hieronder.
   workOrderLink WorkOrderTimeEntry?
+
+  /// Phase 12, deel E — gezet zodra deze registratie in een
+  /// personeelsuitbetaling is opgenomen (business rule 12).
+  payrollLine PayrollBatchLine?
 
   @@index([employeeId])
   @@index([projectId])
@@ -683,11 +808,75 @@ model WorkOrder {
   /// Ten hoogste één per werkbon, zie InvoiceBatchLine.workOrderId (unique).
   invoiceBatchLine InvoiceBatchLine?
 
+  /// Phase 12, deel B — gezet zodra deze werkbon via een weekgoedkeuring is
+  /// ondertekend (Project.signingMode = WEEKLY). `null` bij PER_WORK_ORDER-
+  /// projecten, en ook nog `null` voor een WEEKLY-werkbon die nog niet
+  /// ondertekend is (staat dan nog op status DRAFT, net als anders).
+  weeklyApprovalId String?         @map("weekly_approval_id") @db.Uuid
+  weeklyApproval   WeeklyApproval? @relation(fields: [weeklyApprovalId], references: [id])
+
+  /// Phase 12, deel D (sectie 5) — bevroren bij afronding (net als de andere
+  /// bedragen): kmDistanceOneWayMeters × 2 (heen-terug) × kmRateCents, op het
+  /// moment dat de werkbon getekend wordt. Blijft daarna ongewijzigd, ook als
+  /// het projectadres of het tarief later verandert (business rule 3-analoog
+  /// — een bevroren bedrag verandert niet met terugwerkende kracht). `null`
+  /// wanneer km-vergoeding niet actief was op het moment van ondertekenen
+  /// (geen tarief ingesteld, of afstand nog onbekend).
+  kmAmountCents Int? @map("km_amount_cents")
+
   @@index([projectId])
   @@index([status])
   @@index([pdfStatus])
   @@index([teamleaderUploadStatus])
+  @@index([weeklyApprovalId])
   @@map("work_order")
+}
+
+/**
+ * Phase 12, deel B (sectie 2 van de projectbrief): "werkbonnen per week laten
+ * tekenen door de klant". Eén rij per (project, kalenderweek) — de
+ * kalenderweek wordt bepaald op basis van `WorkOrder.createdAt` (er bestaat
+ * geen apart "werkdatum"-veld; een werkbon wordt aangemaakt op de dag zelf,
+ * zie WorkOrderService.create()).
+ *
+ * Bewust GEEN aparte weekoverzicht-PDF/Teamleader-upload-pijplijn (dat zou
+ * een volledig tweede document-template + upload-mechanisme betekenen naast
+ * het al bestaande per-werkbon-PDF-systeem, Phase 8/9) — bij het ondertekenen
+ * van de week krijgt élke onderliggende werkbon gewoon zijn eigen
+ * `WorkOrderSignature` (zelfde afbeelding/naam, individuele contentHash) en
+ * doorloopt zijn eigen bestaande PDF-generatie + Teamleader-upload
+ * ongewijzigd. Dit voldoet aan de functionele kern ("de klant tekent één
+ * keer voor de hele week") zonder de PDF/Teamleader-architectuur te
+ * verdubbelen — een gecombineerd weekoverzicht-PDF blijft een losstaande,
+ * additieve verbetering voor een latere fase.
+ */
+model WeeklyApproval {
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId     String               @map("project_id") @db.Uuid
+  weekStartDate DateTime             @map("week_start_date") @db.Date
+  weekEndDate   DateTime             @map("week_end_date") @db.Date
+  status        WeeklyApprovalStatus @default(OPEN)
+
+  signerName     String?   @map("signer_name")
+  signerFunction String?   @map("signer_function")
+  confirmedAt    DateTime? @map("confirmed_at") @db.Timestamptz
+  ipAddress      String?   @map("ip_address")
+
+  /// Wie de ondertekening heeft aangevraagd (sectie 10) — de uitvoerder die
+  /// op zijn laatste registratie van de week "Week aftekenen" koos.
+  requestedByUserId String? @map("requested_by_user_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  project         Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requestedByUser User?      @relation(fields: [requestedByUserId], references: [id])
+  workOrders      WorkOrder[]
+
+  /// Eén weekgoedkeuring per project per week — sign()/reopen() werken altijd
+  /// in-place op deze ene rij i.p.v. nieuwe rijen aan te maken, zodat deze
+  /// constraint nooit een hertekening in de weg zit.
+  @@unique([projectId, weekStartDate])
+  @@map("weekly_approval")
 }
 
 /// Eén rij per (werkbon, syncsoort) — durable state, onafhankelijk van de
@@ -862,12 +1051,26 @@ model CompanySettings {
 
   /// StorageService-key van een geüpload bedrijfslogo (zie StoredFile) —
   /// optioneel; zonder logo valt de PDF-header terug op een gestileerd
-  /// "SWATT"-tekstlogo (zwarte achtergrond, gouden tekst), zie
+  /// "UURIVO"-tekstlogo (zwarte achtergrond, gouden tekst), zie
   /// work-order-pdf-document.ts.
   logoFileKey String? @map("logo_file_key")
 
   /// Sectie 12: "Laat de exacte juridische formulering configureerbaar zijn."
   workOrderLegalText String @map("work_order_legal_text")
+
+  /// Licentiebeperking (los van de app zelf gevraagd door Steven, niet uit
+  /// de oorspronkelijke projectbrief): maximum aantal medewerkeraccounts dat
+  /// binnen déze deployment aangemaakt mag worden, afhankelijk van het
+  /// betaalplan van deze klant. `null` = geen limiet. Enkel afgedwongen bij
+  /// het aanmaken van een nieuwe gebruiker (user.routes.ts) — bestaande
+  /// medewerkers boven een later verlaagde limiet blijven gewoon werken,
+  /// enkel geen NIEUWE meer aanmaken totdat er weer ruimte is (deactiveren of
+  /// verwijderen telt mee, zie EmployeeService.countActive()).
+  maxEmployees Int? @map("max_employees")
+
+  /// Phase 12, deel D (sectie 5) — tarief per km (eurocent), admin-only
+  /// zichtbaar (business rule 11). `null` = km-vergoeding niet actief.
+  kmRateCents Int? @map("km_rate_cents")
 
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -974,4 +1177,66 @@ model InvoiceBatchEmployeeRate {
 
   @@unique([invoiceBatchId, employeeId])
   @@map("invoice_batch_employee_rate")
+}
+
+/**
+ * Phase 12, deel E (sectie "Personeelsuitbetaling"): maandoverzicht per
+ * medewerker met exact dezelfde rekenlogica als de klantfactuur
+ * (RateCalculationService, zie teamleader-invoice.service.ts) — maar bewust
+ * losgekoppeld van InvoiceBatch/Project.invoicingEnabled: een medewerker
+ * wordt uitbetaald voor ELKE gewerkte, ondertekende uur, ook op een
+ * nacalculatie-project (Phase 12, deel C) zonder klantfactuur.
+ */
+model PayrollBatch {
+  id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId  String             @map("employee_id") @db.Uuid
+  periodLabel String             @map("period_label")
+  status      PayrollBatchStatus @default(DRAFT)
+
+  /// Som van de lines op aanmaakmoment — puur weergavegemak (vermijdt een
+  /// join/aggregatie bij elke lijst-render), zelfde patroon als
+  /// InvoiceBatch.totalInvoiceableSeconds.
+  totalAmountCents Int @default(0) @map("total_amount_cents")
+
+  createdByUserId String   @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  closedAt        DateTime? @map("closed_at") @db.Timestamptz
+
+  employee      Employee           @relation(fields: [employeeId], references: [id])
+  createdByUser User               @relation(fields: [createdByUserId], references: [id])
+  lines         PayrollBatchLine[]
+
+  @@index([employeeId])
+  @@index([periodLabel])
+  @@map("payroll_batch")
+}
+
+/**
+ * Eén rij per bronregistratie (TimeEntry) — `timeEntryId` is uniek over de
+ * hele tabel, business rule 12: "elke tijdregistratie mag maar één keer aan
+ * de medewerker uitbetaald worden" (zelfde databank-afgedwongen patroon als
+ * InvoiceBatchLine.workOrderId voor business rule 7). Bewust normale/overuren
+ * gescheiden op één rij per bronregistratie i.p.v. één generieke
+ * "categorie"-kolom: een enkele tijdregistratie kan zelf al deels normaal en
+ * deels overuren zijn (bv. een dag van 9u30 met een 8u-drempel), en dit
+ * behoudt toch de "één rij per bron"-garantie die business rule 12 vereist.
+ */
+model PayrollBatchLine {
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payrollBatchId String      @map("payroll_batch_id") @db.Uuid
+  timeEntryId    String      @unique @map("time_entry_id") @db.Uuid
+  normalHours    Decimal     @map("normal_hours") @db.Decimal(6, 2)
+  overtimeHours  Decimal     @map("overtime_hours") @db.Decimal(6, 2)
+  /// Overgenomen van de ProjectAssignment op het moment van aanmaak — bevroren,
+  /// net als de uren/het bedrag (wijzigt de koppeling nadien, dan blijft deze
+  /// al uitbetaalde regel ongewijzigd).
+  premiumType PremiumType @map("premium_type")
+  amountCents Int         @map("amount_cents")
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz
+
+  payrollBatch PayrollBatch @relation(fields: [payrollBatchId], references: [id], onDelete: Cascade)
+  timeEntry    TimeEntry    @relation(fields: [timeEntryId], references: [id], onDelete: Restrict)
+
+  @@index([payrollBatchId])
+  @@map("payroll_batch_line")
 }

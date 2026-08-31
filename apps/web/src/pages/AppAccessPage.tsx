@@ -33,7 +33,7 @@ export function AppAccessPage() {
 
       <section className="flex flex-col items-center rounded-xl border border-neutral-800 bg-neutral-900 p-6 text-center">
         <p className="mb-4 text-sm text-neutral-300">
-          Scan deze code met de camera-app van je smartphone om SWATT te openen.
+          Scan deze code met de camera-app van je smartphone om Uurivo te openen.
         </p>
 
         <div className="rounded-lg bg-white p-3">

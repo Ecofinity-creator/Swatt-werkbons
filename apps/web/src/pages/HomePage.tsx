@@ -100,6 +100,15 @@ export function HomePage() {
 
       {user.role === 'ADMIN' && (
         <Link
+          to="/backoffice/uren-export"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Uren-export
+        </Link>
+      )}
+
+      {user.role === 'ADMIN' && (
+        <Link
           to="/instellingen/teamleader"
           className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
         >

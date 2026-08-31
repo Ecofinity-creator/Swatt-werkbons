@@ -6,6 +6,12 @@ import type {
   ProjectSummary,
   SelectProjectMilestoneBody,
   SelectProjectMilestoneResponseBody,
+  UpdateProjectAssignmentPremiumsBody,
+  UpdateProjectAssignmentPremiumsResponseBody,
+  UpdateProjectInvoicingEnabledBody,
+  UpdateProjectInvoicingEnabledResponseBody,
+  UpdateProjectOvertimeSettingsResponseBody,
+  UpdateProjectSigningModeResponseBody,
 } from '@swatt/shared-types';
 import { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
@@ -17,6 +23,10 @@ import {
   projectAssignmentBodySchema,
   projectIdParamsSchema,
   selectProjectMilestoneBodySchema,
+  updateProjectAssignmentPremiumsBodySchema,
+  updateProjectInvoicingEnabledBodySchema,
+  updateProjectOvertimeSettingsBodySchema,
+  updateProjectSigningModeBodySchema,
 } from './project.schemas';
 
 /**
@@ -107,9 +117,16 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
 
       const assignments = await app.prisma.projectAssignment.findMany({
         where: { employeeId: params.employeeId },
-        select: { projectId: true },
+        select: { projectId: true, overtimeApplies: true, premiumType: true },
       });
-      return { projectIds: assignments.map((assignment: { projectId: string }) => assignment.projectId) };
+      return {
+        projectIds: assignments.map((assignment: { projectId: string }) => assignment.projectId),
+        assignments: assignments.map((assignment: { projectId: string; overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }) => ({
+          projectId: assignment.projectId,
+          overtimeApplies: assignment.overtimeApplies,
+          premiumType: assignment.premiumType,
+        })),
+      };
     },
   );
 
@@ -193,6 +210,122 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
       return { selectedMilestoneId: body.milestoneId };
     },
   );
+
+  /**
+   * Phase 12, deel C (sectie 3): facturatie uitschakelen per project —
+   * "enkel nacalculatie". Bewust ADMIN-only (niet SUPERVISOR, in tegenstelling
+   * tot de milestone-routes hierboven): dit raakt rechtstreeks of een project
+   * ooit in het Facturatie-overzicht terechtkomt, en is dus een instelling met
+   * financiële impact, net als de overurendrempel in deel A.
+   *
+   * Zet enkel de vlag zelf — de Teamleader-synchronisatie (tijd + PDF) en de
+   * afgeleide WorkOrder.status-logica in sync-job.service.ts blijven
+   * ongewijzigd; die laatste checkt project.invoicingEnabled vlak vóór de
+   * overgang naar READY_FOR_INVOICING.
+   */
+  app.post(
+    '/admin/projects/:id/invoicing-enabled',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<UpdateProjectInvoicingEnabledResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const body: UpdateProjectInvoicingEnabledBody = updateProjectInvoicingEnabledBodySchema.parse(request.body);
+      await assertProjectExists(app, params.id);
+
+      const project = await app.prisma.project.update({
+        where: { id: params.id },
+        data: { invoicingEnabled: body.invoicingEnabled },
+      });
+      return { invoicingEnabled: project.invoicingEnabled };
+    },
+  );
+
+  /**
+   * Phase 12, deel A (sectie 1): overurendrempel per project — "Overuren
+   * boven 8u/dag" of "Overuren boven [x]u/week". Bewust ADMIN-only, net als
+   * de facturatie-instelling hierboven: dit is een instelling met directe
+   * financiële impact op zowel klantfactuur (TeamleaderInvoiceService) als
+   * personeelsuitbetaling (Phase 12, deel E, nog te bouwen).
+   */
+  app.post(
+    '/admin/projects/:id/overtime-settings',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<UpdateProjectOvertimeSettingsResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const body = updateProjectOvertimeSettingsBodySchema.parse(request.body);
+      await assertProjectExists(app, params.id);
+
+      const project = await app.prisma.project.update({
+        where: { id: params.id },
+        data: {
+          overtimeThresholdType: body.overtimeThresholdType,
+          // Bij DAILY bewust op null zetten (vaste 8u-drempel heeft geen
+          // opgeslagen getal nodig) — voorkomt een verouderd weekgetal dat na
+          // een latere terugschakeling naar WEEKLY stilzwijgend zou herleven.
+          overtimeWeeklyThresholdHours: body.overtimeThresholdType === 'WEEKLY' ? (body.overtimeWeeklyThresholdHours ?? null) : null,
+        },
+      });
+      return {
+        overtimeThresholdType: project.overtimeThresholdType,
+        overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours ? Number(project.overtimeWeeklyThresholdHours) : null,
+      };
+    },
+  );
+
+  /**
+   * Phase 12, deel A: de toeslaginstelling van één koppeling medewerker↔project
+   * (overtimeApplies + premiumType). Bewust SUPERVISOR+ — zelfde rechtenniveau
+   * als de koppeling zelf (POST .../project-assignments hierboven), niet
+   * ADMIN-only zoals de twee routes hierboven: dit raakt geen tarieven of
+   * percentages zelf (die blijven op Employee, enkel ADMIN-instelbaar via
+   * user.routes.ts), enkel *of* een toeslag van toepassing is op déze
+   * koppeling.
+   */
+  app.post(
+    '/admin/employees/:employeeId/project-assignments/premiums',
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+    async (request): Promise<UpdateProjectAssignmentPremiumsResponseBody> => {
+      const params = employeeIdParamsSchema.parse(request.params);
+      const body: UpdateProjectAssignmentPremiumsBody = updateProjectAssignmentPremiumsBodySchema.parse(request.body);
+      await assertEmployeeExists(app, params.employeeId);
+      await assertProjectExists(app, body.projectId);
+
+      const existing = await app.prisma.projectAssignment.findUnique({
+        where: { projectId_employeeId: { projectId: body.projectId, employeeId: params.employeeId } },
+      });
+      if (!existing) {
+        throw ProjectErrors.notFound();
+      }
+
+      const assignment = await app.prisma.projectAssignment.update({
+        where: { projectId_employeeId: { projectId: body.projectId, employeeId: params.employeeId } },
+        data: { overtimeApplies: body.overtimeApplies, premiumType: body.premiumType },
+      });
+      return {
+        assignment: { projectId: assignment.projectId, overtimeApplies: assignment.overtimeApplies, premiumType: assignment.premiumType },
+      };
+    },
+  );
+
+  /**
+   * Phase 12, deel B (sectie 2): "Ondertekening per werkbon" of "Ondertekening
+   * per week". ADMIN-only, zelfde niveau als de twee routes hierboven —
+   * verandert het werkbon-goedkeuringsproces voor het hele project.
+   */
+  app.post(
+    '/admin/projects/:id/signing-mode',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<UpdateProjectSigningModeResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const body = updateProjectSigningModeBodySchema.parse(request.body);
+      await assertProjectExists(app, params.id);
+
+      const project = await app.prisma.project.update({
+        where: { id: params.id },
+        data: { signingMode: body.signingMode },
+      });
+      return { signingMode: project.signingMode };
+    },
+  );
 }
 
 function toMilestoneSummary(milestone: {
@@ -239,6 +372,12 @@ function toProjectSummary(project: {
   address: string | null;
   status: string | null;
   isArchivedInTl: boolean;
+  invoicingEnabled: boolean;
+  overtimeThresholdType: 'DAILY' | 'WEEKLY';
+  overtimeWeeklyThresholdHours: unknown;
+  signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+  /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter, `null` zolang nog niet berekend. */
+  kmDistanceOneWayMeters: number | null;
   customer: { name: string };
 }): ProjectSummary {
   return {
@@ -251,5 +390,13 @@ function toProjectSummary(project: {
     status: project.status,
     customerName: project.customer.name,
     isArchivedInTl: project.isArchivedInTl,
+    invoicingEnabled: project.invoicingEnabled,
+    overtimeThresholdType: project.overtimeThresholdType,
+    // Prisma Decimal → number: dit veld is enkel een drempelgetal (bv. 39 of
+    // 40), geen geldbedrag, dus een gewone JS-number is hier veilig genoeg
+    // (in tegenstelling tot centbedragen elders, die altijd Int blijven).
+    overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours === null ? null : Number(project.overtimeWeeklyThresholdHours),
+    signingMode: project.signingMode,
+    kmDistanceOneWayMeters: project.kmDistanceOneWayMeters,
   };
 }

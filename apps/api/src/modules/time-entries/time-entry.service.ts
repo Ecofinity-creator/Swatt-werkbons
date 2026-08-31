@@ -31,6 +31,25 @@ export interface CreateManualTimeEntryInput {
   description: string | null;
 }
 
+export interface CorrectTimeEntryInput {
+  startedAt: Date;
+  endedAt: Date;
+  pausedSeconds: number;
+  description: string | null;
+}
+
+/**
+ * Statussen van de gekoppelde werkbon waarbij een tijdsregistratie nog vrij
+ * overschreven mag worden (sectie 4: "zolang werkbon niet definitief is").
+ * Business rule (bevestigd door Steven, aug 2026): "een werkbon mag na
+ * ondertekening/synchronisatie niet meer aangepast kunnen worden" — vanaf
+ * SIGNED bestaat er dus GEEN correctiepad meer, ook geen aparte "correctie-
+ * rij"-uitzondering. Dit is een aanscherping van business rule 3 (sectie 24):
+ * "een ondertekende werkbon is immutable" gold al voor de werkbon zelf, hier
+ * expliciet doorgetrokken naar de onderliggende tijdsregistraties.
+ */
+const WORK_ORDER_STATUSES_ALLOWING_DIRECT_EDIT = new Set(['DRAFT', 'READY_FOR_SIGNATURE']);
+
 export class TimeEntryService {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -182,6 +201,57 @@ export class TimeEntryService {
         pausedSeconds: entry.pausedSeconds + extraPausedSeconds,
         currentPauseStartedAt: null,
         ...(description !== null ? { description } : {}),
+      },
+      ...WITH_PROJECT,
+    });
+  }
+
+  /**
+   * Sectie 4: SUPERVISOR+ corrigeert een STOPPED registratie, maar enkel
+   * zolang de gekoppelde werkbon nog DRAFT/READY_FOR_SIGNATURE is (of nog aan
+   * geen enkele werkbon gekoppeld is) — "zolang werkbon niet definitief is".
+   *
+   * Business rule (bevestigd door Steven, aug 2026): "een werkbon mag na
+   * ondertekening/synchronisatie niet meer aangepast kunnen worden" — dit is
+   * een aanscherping van business rule 3 (sectie 24, "een ondertekende
+   * werkbon is immutable"), hier doorgetrokken naar de tijdsregistraties
+   * eronder. Vanaf SIGNED bestaat er dus bewust GEEN correctiepad meer, ook
+   * geen "nieuwe rij"-uitzondering — TIME_ENTRY_CORRECTION_BLOCKED_SIGNED,
+   * zonder uitzondering.
+   */
+  async correct(timeEntryId: string, input: CorrectTimeEntryInput): Promise<TimeEntryRecord> {
+    if (input.endedAt.getTime() <= input.startedAt.getTime()) {
+      throw TimeEntryErrors.correctionEndBeforeStart();
+    }
+    const totalSeconds = (input.endedAt.getTime() - input.startedAt.getTime()) / 1000;
+    if (input.pausedSeconds >= totalSeconds) {
+      throw TimeEntryErrors.correctionPauseTooLong();
+    }
+
+    const entry = await this.prisma.timeEntry.findUnique({
+      where: { id: timeEntryId },
+      include: { workOrderLink: { include: { workOrder: { select: { id: true, status: true } } } } },
+    });
+    if (!entry) {
+      throw TimeEntryErrors.notFound();
+    }
+    if (entry.status !== 'STOPPED') {
+      throw TimeEntryErrors.notStoppedYet();
+    }
+
+    const workOrder = entry.workOrderLink?.workOrder ?? null;
+    const canEditDirectly = !workOrder || WORK_ORDER_STATUSES_ALLOWING_DIRECT_EDIT.has(workOrder.status);
+    if (!canEditDirectly) {
+      throw TimeEntryErrors.correctionBlockedSigned();
+    }
+
+    return this.prisma.timeEntry.update({
+      where: { id: timeEntryId },
+      data: {
+        startedAt: input.startedAt,
+        endedAt: input.endedAt,
+        pausedSeconds: input.pausedSeconds,
+        ...(input.description !== null ? { description: input.description } : {}),
       },
       ...WITH_PROJECT,
     });

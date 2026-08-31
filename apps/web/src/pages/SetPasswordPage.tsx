@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { authApi } from '../api/client';
 import { ApiRequestError } from '../auth/AuthContext';
+import { Logo } from '../components/Logo';
 
 /**
  * Publieke pagina (geen RequireAuth) — bedient zowel de "nieuwe gebruiker
@@ -53,7 +54,7 @@ export function SetPasswordPage() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-swatt-black px-6">
       <div className="w-full max-w-sm">
-        <h1 className="mb-1 text-center text-3xl font-extrabold tracking-tight text-white">SWATT</h1>
+        <Logo size="lg" className="mx-auto mb-4" />
         <p className="mb-10 text-center text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">
           Wachtwoord instellen
         </p>

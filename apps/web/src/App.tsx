@@ -12,6 +12,7 @@ import { SetPasswordPage } from './pages/SetPasswordPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
 import { WorkOrderReviewPage } from './pages/WorkOrderReviewPage';
 import { CompanySettingsPage } from './pages/admin/CompanySettingsPage';
+import { HoursExportPage } from './pages/admin/HoursExportPage';
 import { InvoicingPage } from './pages/admin/InvoicingPage';
 import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
 import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
@@ -140,6 +141,14 @@ export function App() {
         element={
           <RequireAuth minimumRole="ADMIN">
             <InvoicingPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/uren-export"
+        element={
+          <RequireAuth minimumRole="ADMIN">
+            <HoursExportPage />
           </RequireAuth>
         }
       />

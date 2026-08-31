@@ -116,6 +116,23 @@ export const UserErrors = {
   emailAlreadyInUse: () =>
     new ApiError(409, 'EMAIL_ALREADY_IN_USE', 'Dit e-mailadres is al in gebruik door een andere gebruiker.'),
   notFound: () => new ApiError(404, 'USER_NOT_FOUND', 'Deze gebruiker bestaat niet (meer).'),
+  /** Opnieuw uitnodigen heeft geen zin (en geen betekenis) zodra iemand al zelf een wachtwoord heeft ingesteld. */
+  alreadyActivated: () =>
+    new ApiError(409, 'USER_ALREADY_ACTIVATED', 'Deze gebruiker heeft al een wachtwoord ingesteld — een nieuwe uitnodiging is niet nodig. Gebruik "Wachtwoord vergeten" op het inlogscherm indien nodig.'),
+  /** Licentiebeperking (betaalplan) — zie CompanySettings.maxEmployees. */
+  maxEmployeesReached: (max: number) =>
+    new ApiError(
+      403,
+      'USER_MAX_EMPLOYEES_REACHED',
+      `Het maximum aantal medewerkers voor dit abonnement (${max}) is bereikt. Deactiveer een bestaande medewerker of neem contact op om je abonnement uit te breiden.`,
+    ),
+  /** Verwijderen mag enkel als er nog geen tijdregistraties/werkbonnen aan deze medewerker hangen (business rule 8/9 — historiek mag nooit beschadigd worden). */
+  cannotDeleteWithHistory: () =>
+    new ApiError(
+      409,
+      'USER_CANNOT_DELETE_WITH_HISTORY',
+      'Deze medewerker heeft al tijdregistraties of werkbonnen en kan daarom niet volledig verwijderd worden. Gebruik "Deactiveren" in plaats daarvan.',
+    ),
 };
 
 export const ProjectErrors = {
@@ -170,6 +187,37 @@ export const TimeEntryErrors = {
       422,
       'TIME_ENTRY_MANUAL_PAUSE_TOO_LONG',
       'De pauze kan niet even lang of langer zijn dan de volledige periode.',
+    ),
+  /**
+   * Wettelijke arbeidstijdregistratie (vanaf 1/1/2027) + sectie 4: correctie
+   * kan enkel op een STOPPED registratie — een lopende/gepauzeerde timer
+   * corrigeer je via pause/resume/stop, niet via deze route.
+   */
+  notStoppedYet: () =>
+    new ApiError(
+      409,
+      'TIME_ENTRY_NOT_STOPPED_YET',
+      'Deze tijdsregistratie loopt nog. Stop ze eerst voor je ze kan corrigeren.',
+    ),
+  correctionEndBeforeStart: () =>
+    new ApiError(422, 'TIME_ENTRY_CORRECTION_END_BEFORE_START', 'De eindtijd moet na de starttijd liggen.'),
+  correctionPauseTooLong: () =>
+    new ApiError(
+      422,
+      'TIME_ENTRY_CORRECTION_PAUSE_TOO_LONG',
+      'De pauze kan niet even lang of langer zijn dan de volledige periode.',
+    ),
+  /**
+   * Business rule (bevestigd door Steven, aug 2026): een werkbon mag na
+   * ondertekening niet meer aangepast worden — géén uitzondering, ook niet
+   * via een aparte correctie-rij. Zie WORK_ORDER_STATUSES_ALLOWING_DIRECT_EDIT
+   * in TimeEntryService: alles voorbij DRAFT/READY_FOR_SIGNATURE blokkeert.
+   */
+  correctionBlockedSigned: () =>
+    new ApiError(
+      409,
+      'TIME_ENTRY_CORRECTION_BLOCKED_SIGNED',
+      'Deze werkbon is al ondertekend en kan niet meer aangepast worden.',
     ),
 };
 
@@ -294,6 +342,35 @@ export const InvoiceBatchErrors = {
     ),
 };
 
+/** Phase 12, deel E — personeelsuitbetaling (maandoverzicht per medewerker). */
+export const PayrollErrors = {
+  noTimeEntries: () =>
+    new ApiError(400, 'PAYROLL_BATCH_NO_TIME_ENTRIES', 'Er zijn geen openstaande, ondertekende uren gevonden voor deze medewerker in deze periode.'),
+  /** Business rule 12: elke tijdregistratie mag maar één keer uitbetaald worden. */
+  timeEntryAlreadyPaid: () =>
+    new ApiError(409, 'PAYROLL_BATCH_TIME_ENTRY_ALREADY_PAID', 'Eén of meer uren van deze medewerker zijn al in een andere personeelsuitbetaling opgenomen.'),
+  employeeHourlyRateNotSet: (displayName: string) =>
+    new ApiError(
+      409,
+      'PAYROLL_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET',
+      `Er is nog geen uurtarief ingesteld voor ${displayName}. Vul dit eerst in bij "Medewerkers".`,
+    ),
+  notFound: () => new ApiError(404, 'PAYROLL_BATCH_NOT_FOUND', 'Deze personeelsuitbetaling bestaat niet (meer).'),
+  cannotRemoveNonDraft: () =>
+    new ApiError(409, 'PAYROLL_BATCH_CANNOT_REMOVE', 'Deze personeelsuitbetaling is al afgesloten en kan niet meer verwijderd worden.'),
+};
+
+/** Phase 12, deel B — werkbonnen per week laten ondertekenen (sectie 2). */
+export const WeeklyApprovalErrors = {
+  noPendingWorkOrders: () =>
+    new ApiError(400, 'WEEKLY_APPROVAL_NO_PENDING_WORK_ORDERS', 'Er staan deze week nog geen werkbonnen klaar om te ondertekenen op dit project.'),
+  alreadySigned: () =>
+    new ApiError(409, 'WEEKLY_APPROVAL_ALREADY_SIGNED', 'Deze week is ondertussen al door iemand anders afgetekend.'),
+  notFound: () => new ApiError(404, 'WEEKLY_APPROVAL_NOT_FOUND', 'Deze weekgoedkeuring bestaat niet (meer).'),
+  notSigned: () =>
+    new ApiError(409, 'WEEKLY_APPROVAL_NOT_SIGNED', 'Deze week is nog niet ondertekend en kan daarom niet heropend worden.'),
+};
+
 export const EmailErrors = {
   notConfigured: () =>
     new ApiError(
@@ -304,4 +381,23 @@ export const EmailErrors = {
   /** Onverwacht antwoord van de e-maildienst zelf (niet-2xx). */
   sendFailed: (detail: string) =>
     new ApiError(502, 'EMAIL_SEND_FAILED', `Het versturen van de e-mail is mislukt: ${detail}`),
+};
+
+/** Werknemer vs. Onderaannemer — maandelijkse uren-export (zie hours-export.service.ts). */
+export const HoursExportErrors = {
+  invalidPeriod: () =>
+    new ApiError(
+      400,
+      'HOURS_EXPORT_INVALID_PERIOD',
+      'Ongeldige periode. Gebruik het formaat JJJJ-MM, bijvoorbeeld 2026-08.',
+    ),
+  employeeNotFound: () =>
+    new ApiError(404, 'HOURS_EXPORT_EMPLOYEE_NOT_FOUND', 'Deze medewerker bestaat niet (meer).'),
+  /** Excel-export is enkel voor EMPLOYEE, het PDF-totalisatiedocument enkel voor SUBCONTRACTOR — zie EmploymentType. */
+  wrongEmploymentType: (expectedLabel: string) =>
+    new ApiError(
+      409,
+      'HOURS_EXPORT_WRONG_EMPLOYMENT_TYPE',
+      `Deze export is enkel beschikbaar voor medewerkers van het type "${expectedLabel}".`,
+    ),
 };

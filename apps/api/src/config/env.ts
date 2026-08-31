@@ -60,8 +60,19 @@ const rawEnvSchema = z.object({
    * (zie superRefine).
    */
   RESEND_API_KEY: z.string().min(1).optional(),
-  /** Bv. "SWATT <noreply@ecofinity.eu>", of tijdelijk "onboarding@resend.dev" (Resend-sandbox, levert enkel af aan je eigen Resend-accountmail). */
+  /** Bv. "Uurivo <noreply@ecofinity.eu>", of tijdelijk "onboarding@resend.dev" (Resend-sandbox, levert enkel af aan je eigen Resend-accountmail). */
   EMAIL_FROM_ADDRESS: z.string().min(1).optional(),
+
+  /**
+   * Phase 12, deel D (sectie 5) — kilometervergoeding via de gratis
+   * OpenRouteService-API (geocoding + rijafstand), zie
+   * modules/distance/distance.service.ts. Bewust optioneel, zelfde filosofie
+   * als Teamleader/Resend hierboven: zonder deze key blijft de rest van de
+   * app werken, enkel de km-afstandsberekening bij een projectsync slaat
+   * over (Project.kmDistanceOneWayMeters blijft dan `null`) i.p.v. de hele
+   * sync te laten crashen.
+   */
+  OPENROUTESERVICE_API_KEY: z.string().min(1).optional(),
 
   /**
    * Phase 9 — Redis voor de BullMQ-achtergrondwerker (sectie 15). Bewust een
@@ -202,4 +213,17 @@ export function getEmailConfig(): EmailEnvConfig {
     throw new Error('getEmailConfig() aangeroepen terwijl e-mailverzending niet geconfigureerd is — roep eerst isEmailConfigured() op.');
   }
   return { apiKey: env.RESEND_API_KEY, fromAddress: env.EMAIL_FROM_ADDRESS };
+}
+
+/** Phase 12, deel D — true zodra OPENROUTESERVICE_API_KEY gezet is. */
+export function isDistanceServiceConfigured(): boolean {
+  return env.OPENROUTESERVICE_API_KEY !== undefined;
+}
+
+/** Werp altijd eerst `isDistanceServiceConfigured()` op — deze gooit als de configuratie ontbreekt. */
+export function getDistanceServiceApiKey(): string {
+  if (env.OPENROUTESERVICE_API_KEY === undefined) {
+    throw new Error('getDistanceServiceApiKey() aangeroepen terwijl OPENROUTESERVICE_API_KEY niet geconfigureerd is — roep eerst isDistanceServiceConfigured() op.');
+  }
+  return env.OPENROUTESERVICE_API_KEY;
 }

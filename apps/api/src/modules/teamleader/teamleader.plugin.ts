@@ -1,6 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
+import { getDistanceServiceApiKey, isDistanceServiceConfigured } from '../../config/env';
 import { SyncJobService } from '../sync/sync-job.service';
+import { CompanySettingsService } from '../company-settings/company-settings.service';
+import { OpenRouteServiceDistanceProvider } from '../distance/distance.service';
 import { FileSyncService } from './file-sync.service';
 import { MilestoneSyncService } from './milestone-sync.service';
 import { ProjectSyncService } from './project-sync.service';
@@ -47,7 +50,11 @@ export default fp(async function teamleaderPlugin(app: FastifyInstance) {
 
   app.decorate('teamleaderAuthService', teamleaderAuthService);
   app.decorate('teamleaderClient', teamleaderClient);
-  app.decorate('projectSyncService', new ProjectSyncService(app.prisma, teamleaderClient));
+  // Phase 12, deel D — beide optioneel (zie ProjectSyncService); zonder
+  // OPENROUTESERVICE_API_KEY blijft de projectsync zelf gewoon werken.
+  const distanceService = isDistanceServiceConfigured() ? new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey()) : null;
+  const companySettingsService = new CompanySettingsService(app.prisma);
+  app.decorate('projectSyncService', new ProjectSyncService(app.prisma, teamleaderClient, distanceService, companySettingsService));
   app.decorate('teamleaderUserService', new TeamleaderUserService(teamleaderClient));
   app.decorate('milestoneSyncService', milestoneSyncService);
   app.decorate('syncJobService', new SyncJobService(app.prisma, timeTrackingSyncService, fileSyncService));

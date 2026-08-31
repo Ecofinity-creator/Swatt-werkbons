@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { InvoiceBatchErrors, TeamleaderErrors } from '../../errors';
+import { computeRatePercent, splitEffectiveHours } from '../rates/rate-calculation.service';
 import { TEAMLEADER_CONNECTION_SINGLETON_ID } from './teamleader-auth.service';
 import { TeamleaderApiError, type TeamleaderClient } from './teamleader-client.service';
 import type { SyncResult } from './time-tracking-sync.service';
@@ -15,7 +16,7 @@ const WITH_DRAFT_DETAILS = {
       include: {
         workOrder: {
           include: {
-            project: true,
+            project: { include: { assignments: true } },
             timeEntries: { include: { timeEntry: { include: { employee: true } } } },
           },
         },
@@ -25,19 +26,42 @@ const WITH_DRAFT_DETAILS = {
   },
 } as const;
 
+/** Fase 12, deel A: enkel de velden van een ProjectAssignment die de rekenlogica nodig heeft. */
+interface ProjectAssignmentRow {
+  employeeId: string;
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+}
+
 /** Handgeschreven vorm van de query hierboven — zelfde reden als elders in deze codebase (stale gegenereerde Prisma-client in de sandbox, zie invoice-batch.service.ts). */
 interface DraftBatchLineRow {
   invoiceableSeconds: number;
   workOrder: {
     workOrderNumber: string;
     description: string | null;
-    project: { id: string; name: string; teamleaderId: string };
+    /** Phase 12, deel D (sectie 5) — bevroren km-vergoedingsbedrag, zie WorkOrderSignatureService/WeeklyApprovalService. */
+    kmAmountCents: number | null;
+    project: {
+      id: string;
+      name: string;
+      teamleaderId: string;
+      overtimeThresholdType: 'DAILY' | 'WEEKLY';
+      overtimeWeeklyThresholdHours: number | null;
+      assignments: ProjectAssignmentRow[];
+    };
     timeEntries: Array<{
       timeEntry: {
         startedAt: Date;
         endedAt: Date | null;
         pausedSeconds: number;
-        employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
+        employee: {
+          id: string;
+          displayName: string;
+          defaultHourlyRateCents: number | null;
+          overtimeRatePercent: number;
+          shiftWorkRatePercent: number;
+          nightWorkRatePercent: number;
+        };
       };
     }>;
   };
@@ -145,7 +169,7 @@ export class TeamleaderInvoiceService {
       throw TeamleaderErrors.invoiceSettingsNotConfigured();
     }
 
-    const lineItems = batch.lines.flatMap((line) => buildLineItems(line, rateByEmployeeId, connection.invoiceTaxRateId!));
+    const lineItems = buildLineItemsForBatch(batch, rateByEmployeeId, connection.invoiceTaxRateId!);
 
     // `project_id` is optioneel bij invoices.draft — enkel meesturen wanneer
     // alle werkbonnen in deze batch bij hetzelfde Teamleader-project horen
@@ -230,37 +254,162 @@ function computeWorkedSeconds(entry: { startedAt: Date; endedAt: Date | null; pa
  * tarief geprijsd wordt. `rateByEmployeeId` bevat op dit punt gegarandeerd
  * enkel geldige (niet-null) tarieven — `createDraftInvoice` heeft dat al
  * vooraf gecontroleerd.
+ *
+ * Phase 12, deel A: de overurendrempel (dag of week, sectie 1) geldt over de
+ * volledige batch heen — een WEEKLY-drempel van bv. 39u kan pas overschreden
+ * worden door de uren van meerdere werkbonnen/dagen samen op te tellen. Deze
+ * functie groepeert daarom alle tijdregistraties van de hele batch per
+ * (medewerker, project), bucket ze per dag of per week (naargelang
+ * Project.overtimeThresholdType), en splitst pas dán normaal/overuren.
+ * Ploegenwerk/nachtwerk (premiumType) geldt op alle uren van een koppeling,
+ * ongeacht de drempel — zie rate-calculation.service.ts.
  */
-function buildLineItems(
-  line: DraftBatchLineRow,
+function buildLineItemsForBatch(
+  batch: DraftBatchRow,
   rateByEmployeeId: Map<string, { displayName: string; rateCents: number | null }>,
   taxRateId: string,
 ) {
-  const secondsByEmployeeId = new Map<string, number>();
-  for (const entry of line.workOrder.timeEntries) {
-    const employeeId = entry.timeEntry.employee.id;
-    const seconds = computeWorkedSeconds(entry.timeEntry);
-    secondsByEmployeeId.set(employeeId, (secondsByEmployeeId.get(employeeId) ?? 0) + seconds);
+  interface Bucket {
+    employeeId: string;
+    displayName: string;
+    projectId: string;
+    projectName: string;
+    workOrderNumbers: Set<string>;
+    project: DraftBatchLineRow['workOrder']['project'];
+    employee: DraftBatchLineRow['workOrder']['timeEntries'][number]['timeEntry']['employee'];
+    /** periodKey (dag "YYYY-MM-DD" of ISO-week "YYYY-Wnn") → seconden in die periode. */
+    secondsByPeriod: Map<string, number>;
   }
 
-  return Array.from(secondsByEmployeeId.entries())
-    .filter(([, seconds]) => seconds > 0)
-    .map(([employeeId, seconds]) => {
-      const employee = rateByEmployeeId.get(employeeId)!;
-      const hours = Math.round((seconds / 3600) * 100) / 100;
-      const description = `${line.workOrder.workOrderNumber} — ${line.workOrder.project.name}: ${line.workOrder.description ?? 'Werkzaamheden'} (${employee.displayName})`;
+  const bucketsByEmployeeProject = new Map<string, Bucket>();
 
-      return {
-        quantity: hours,
-        description,
-        // `unit_price.tax` is een verplicht veld volgens de officiële Teamleader-
-        // API-specificatie (apiary.apib → InvoiceGroupedLinesWrite): het geeft aan
-        // dat `amount` een bedrag EXCLUSIEF btw is (de enige toegestane waarde is
-        // `excluding` — Teamleader berekent de btw zelf via `tax_rate_id`
-        // hieronder). Live geverifieerd op 26/08/2026: zonder dit veld gaf
-        // invoices.draft een 400 terug met "tax must be present" (meta.field: "tax").
-        unit_price: { amount: Math.round(employee.rateCents!) / 100, tax: 'excluding' as const },
-        tax_rate_id: taxRateId,
-      };
-    });
+  for (const line of batch.lines) {
+    const project = line.workOrder.project;
+    for (const entry of line.workOrder.timeEntries) {
+      const seconds = computeWorkedSeconds(entry.timeEntry);
+      if (seconds <= 0) continue;
+
+      const employee = entry.timeEntry.employee;
+      const key = `${employee.id}|${project.id}`;
+      const periodKey =
+        project.overtimeThresholdType === 'DAILY' ? dayKeyOf(entry.timeEntry.startedAt) : isoWeekKeyOf(entry.timeEntry.startedAt);
+
+      if (!bucketsByEmployeeProject.has(key)) {
+        bucketsByEmployeeProject.set(key, {
+          employeeId: employee.id,
+          displayName: employee.displayName,
+          projectId: project.id,
+          projectName: project.name,
+          workOrderNumbers: new Set(),
+          project,
+          employee,
+          secondsByPeriod: new Map(),
+        });
+      }
+      const bucket = bucketsByEmployeeProject.get(key)!;
+      bucket.workOrderNumbers.add(line.workOrder.workOrderNumber);
+      bucket.secondsByPeriod.set(periodKey, (bucket.secondsByPeriod.get(periodKey) ?? 0) + seconds);
+    }
+  }
+
+  return Array.from(bucketsByEmployeeProject.values()).flatMap((bucket) => {
+    const assignment: ProjectAssignmentRow = bucket.project.assignments.find((a) => a.employeeId === bucket.employeeId) ?? {
+      employeeId: bucket.employeeId,
+      overtimeApplies: false,
+      premiumType: 'NONE',
+    };
+
+    let normalHours = 0;
+    let overtimeHours = 0;
+    for (const seconds of bucket.secondsByPeriod.values()) {
+      const totalHours = seconds / 3600;
+      if (assignment.overtimeApplies) {
+        const split = splitEffectiveHours(totalHours, {
+          overtimeThresholdType: bucket.project.overtimeThresholdType,
+          overtimeWeeklyThresholdHours: bucket.project.overtimeWeeklyThresholdHours,
+        });
+        normalHours += split.normalHours;
+        overtimeHours += split.overtimeHours;
+      } else {
+        normalHours += totalHours;
+      }
+    }
+    normalHours = Math.round(normalHours * 100) / 100;
+    overtimeHours = Math.round(overtimeHours * 100) / 100;
+
+    const employeeRate = rateByEmployeeId.get(bucket.employeeId)!;
+    const { normalPercent, overtimePercent } = computeRatePercent(bucket.employee, assignment);
+    const workOrderRefs = Array.from(bucket.workOrderNumbers).sort().join(', ');
+
+    const items: Array<{ quantity: number; description: string; unit_price: { amount: number; tax: 'excluding' }; tax_rate_id: string }> = [];
+    if (normalHours > 0) {
+      items.push(
+        buildLineItem(normalHours, employeeRate.rateCents!, normalPercent, taxRateId, `${workOrderRefs} — ${bucket.projectName}: ${employeeRate.displayName}`),
+      );
+    }
+    if (overtimeHours > 0) {
+      items.push(
+        buildLineItem(
+          overtimeHours,
+          employeeRate.rateCents!,
+          overtimePercent,
+          taxRateId,
+          `${workOrderRefs} — ${bucket.projectName}: ${employeeRate.displayName} (overuren)`,
+        ),
+      );
+    }
+    return items;
+  }).concat(buildKmLineItems(batch, taxRateId));
+}
+
+/**
+ * Phase 12, deel D (sectie 5) — één aparte "Verplaatsingskosten"-regel per
+ * werkbon met een bevroren `kmAmountCents` (WorkOrderSignatureService/
+ * WeeklyApprovalService berekenden dit al op het moment van ondertekenen).
+ * Bewust NIET meegeteld in de uren-buckets hierboven: km is een vast bedrag
+ * per werkbon, geen toeslagpercentage op een uurtarief.
+ */
+function buildKmLineItems(batch: DraftBatchRow, taxRateId: string) {
+  return batch.lines
+    .filter((line) => line.workOrder.kmAmountCents !== null && line.workOrder.kmAmountCents > 0)
+    .map((line) => ({
+      quantity: 1,
+      description: `${line.workOrder.workOrderNumber} — ${line.workOrder.project.name}: verplaatsingskosten`,
+      unit_price: { amount: line.workOrder.kmAmountCents! / 100, tax: 'excluding' as const },
+      tax_rate_id: taxRateId,
+    }));
+}
+
+/** Bouwt één Teamleader-factuurregel op basis van uren × basistarief × toeslagpercentage. */
+function buildLineItem(hours: number, baseRateCents: number, ratePercent: number, taxRateId: string, description: string) {
+  const amount = Math.round(baseRateCents * (ratePercent / 100)) / 100;
+  return {
+    quantity: hours,
+    description,
+    // `unit_price.tax` is een verplicht veld volgens de officiële Teamleader-
+    // API-specificatie (apiary.apib → InvoiceGroupedLinesWrite): het geeft aan
+    // dat `amount` een bedrag EXCLUSIEF btw is (de enige toegestane waarde is
+    // `excluding` — Teamleader berekent de btw zelf via `tax_rate_id`
+    // hieronder). Live geverifieerd op 26/08/2026: zonder dit veld gaf
+    // invoices.draft een 400 terug met "tax must be present" (meta.field: "tax").
+    unit_price: { amount, tax: 'excluding' as const },
+    tax_rate_id: taxRateId,
+  };
+}
+
+function dayKeyOf(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/** ISO-8601-weeknummer (maandag als eerste dag) — "YYYY-Wnn", tijdzone-onafhankelijk genoeg voor weekbucketing van werkuren. */
+function isoWeekKeyOf(date: Date): string {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNumber = (d.getUTCDay() + 6) % 7; // maandag = 0
+  d.setUTCDate(d.getUTCDate() - dayNumber + 3); // donderdag van deze ISO-week
+  const isoYear = d.getUTCFullYear();
+  const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
+  const firstThursdayDayNumber = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstThursdayDayNumber + 3);
+  const weekNumber = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 24 * 60 * 60 * 1000));
+  return `${isoYear}-W${String(weekNumber).padStart(2, '0')}`;
 }

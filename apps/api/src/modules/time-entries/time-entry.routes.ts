@@ -1,13 +1,15 @@
-import type {
-  ActiveTimeEntryResponseBody,
-  TimeEntryResponseBody,
-  TimeEntrySummary,
+import {
+  roleAtLeast,
+  type ActiveTimeEntryResponseBody,
+  type TimeEntryResponseBody,
+  type TimeEntrySummary,
 } from '@swatt/shared-types';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuthErrors } from '../../errors';
 import type { TimeEntryRecord } from './time-entry.service';
 import { TimeEntryService } from './time-entry.service';
 import {
+  correctTimeEntryBodySchema,
   createManualTimeEntryBodySchema,
   startTimeEntryBodySchema,
   stopTimeEntryBodySchema,
@@ -64,6 +66,27 @@ export default async function timeEntryRoutes(app: FastifyInstance): Promise<voi
     const params = timeEntryIdParamsSchema.parse(request.params);
     const body = stopTimeEntryBodySchema.parse(request.body ?? {});
     const entry = await service.stop(employeeId, params.id, body.description ?? null);
+    return { timeEntry: toSummary(entry) };
+  });
+
+  /**
+   * Sectie 4. SUPERVISOR+, zelfde rechten als de rest van het werkbonnen-
+   * beheer (zie work-order.routes.ts). Enkel toegestaan zolang de gekoppelde
+   * werkbon nog DRAFT/READY_FOR_SIGNATURE is — zie TimeEntryService.correct().
+   */
+  app.post('/time-entries/:id/correct', { preHandler: [app.authenticate] }, async (request): Promise<TimeEntryResponseBody> => {
+    const user = request.currentUser;
+    if (!user || !roleAtLeast(user.role, 'SUPERVISOR')) {
+      throw AuthErrors.insufficientRole();
+    }
+    const params = timeEntryIdParamsSchema.parse(request.params);
+    const body = correctTimeEntryBodySchema.parse(request.body);
+    const entry = await service.correct(params.id, {
+      startedAt: new Date(body.startedAt),
+      endedAt: new Date(body.endedAt),
+      pausedSeconds: body.pausedMinutes * 60,
+      description: body.description ?? null,
+    });
     return { timeEntry: toSummary(entry) };
   });
 }

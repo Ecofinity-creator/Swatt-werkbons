@@ -1,33 +1,25 @@
 /**
- * Gestileerd "logo" — zwarte badge met gouden lettertype (Stevens verzoek:
- * "logo wat blitser maken, zwarte achtergrond, gouden tekst"). Geen apart
- * beeldbestand (nog geen aangeleverde huisstijl-asset), maar een lichtgewicht
- * CSS-only badge i.p.v. de eerdere kale, witte tekst — met een subtiele
- * gouden gloed. Dezelfde zwart/goud-behandeling wordt ook gebruikt als
- * fallback-logo in de werkbon-PDF wanneer er geen bedrijfslogo geconfigureerd
- * is (zie apps/api/.../work-order-pdf-document.ts) — consistente huisstijl
- * op beide plekken.
+ * Uurivo-logo. Vervangt de eerdere CSS-only "SWATT"-tekstbadge (die er stond
+ * bij gebrek aan een aangeleverde huisstijl-asset) door de echte, aangeleverde
+ * beeldmerken (aug 2026): de volledige lockup (icoon + wordmark) voor grote
+ * plekken zoals het loginscherm, en enkel het vierkante icoon voor compacte
+ * plekken zoals de header op HomePage.
  */
 export function Logo({ size = 'lg', className = '' }: { size?: 'lg' | 'md'; className?: string }) {
-  const isLarge = size === 'lg';
+  if (size === 'md') {
+    return (
+      <img
+        src="/icon-192.png"
+        alt="Uurivo"
+        className={['h-10 w-10 rounded-xl', className].filter(Boolean).join(' ')}
+      />
+    );
+  }
   return (
-    <div
-      className={[
-        'inline-flex items-center justify-center rounded-2xl border border-swatt-gold/30 bg-black shadow-[0_0_30px_-8px_rgba(240,185,11,0.55)]',
-        isLarge ? 'px-8 py-5' : 'px-4 py-2.5',
-        className,
-      ]
-        .filter(Boolean)
-        .join(' ')}
-    >
-      <span
-        className={[
-          'font-extrabold text-swatt-gold',
-          isLarge ? 'text-4xl tracking-[0.2em]' : 'text-xl tracking-[0.15em]',
-        ].join(' ')}
-      >
-        SWATT
-      </span>
-    </div>
+    <img
+      src="/logo-uurivo.png"
+      alt="Uurivo"
+      className={['h-auto w-64', className].filter(Boolean).join(' ')}
+    />
   );
 }

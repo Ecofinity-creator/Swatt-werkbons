@@ -24,7 +24,20 @@ interface FakeTimeEntry {
   startedAt: Date;
   endedAt: Date | null;
   pausedSeconds: number;
-  employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
+  employee: {
+    id: string;
+    displayName: string;
+    defaultHourlyRateCents: number | null;
+    overtimeRatePercent: number;
+    shiftWorkRatePercent: number;
+    nightWorkRatePercent: number;
+  };
+}
+
+interface FakeProjectAssignment {
+  employeeId: string;
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
 }
 
 interface FakeBatch {
@@ -40,7 +53,15 @@ interface FakeBatch {
     workOrder: {
       workOrderNumber: string;
       description: string | null;
-      project: { id: string; name: string; teamleaderId: string };
+      kmAmountCents: number | null;
+      project: {
+        id: string;
+        name: string;
+        teamleaderId: string;
+        overtimeThresholdType: 'DAILY' | 'WEEKLY';
+        overtimeWeeklyThresholdHours: number | null;
+        assignments: FakeProjectAssignment[];
+      };
       timeEntries: Array<{ timeEntry: FakeTimeEntry }>;
     };
   }>;
@@ -79,7 +100,7 @@ const validSettings: FakeConnectionSettings = {
   invoicePaymentTermDays: 0,
 }
 
-const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 };
+const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
 
 /** 2u17 gewerkt (08:00 → 10:17, geen pauze) — zelfde uren als het oorspronkelijke voorbeeld. */
 function peterTimeEntry(overrides: Partial<FakeTimeEntry['employee']> = {}) {
@@ -98,7 +119,8 @@ const baseLine = {
   workOrder: {
     workOrderNumber: 'WB-2026-000123',
     description: 'Onderhoud uitgevoerd.',
-    project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1' },
+    kmAmountCents: null as number | null,
+    project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, assignments: [] },
     timeEntries: [peterTimeEntry()],
   },
 };
@@ -143,7 +165,7 @@ describe('TeamleaderInvoiceService', () => {
   });
 
   it('splitst één werkbon in aparte factuurregels per medewerker, elk met hun eigen tarief', async () => {
-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500 };
+    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
     const multiEmployeeLine = {
       ...baseLine,
       workOrder: {
@@ -180,7 +202,7 @@ describe('TeamleaderInvoiceService', () => {
   });
 
   it('gebruikt de eenmalige batch-override wanneer de medewerker geen standaardtarief heeft', async () => {
-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null };
+    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
     const line = {
       ...baseLine,
       workOrder: {
@@ -215,7 +237,7 @@ describe('TeamleaderInvoiceService', () => {
   it('laat project_id weg wanneer de batch werkbonnen van verschillende projecten bevat', async () => {
     const otherProjectLine = {
       ...baseLine,
-      workOrder: { ...baseLine.workOrder, project: { id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2' } },
+      workOrder: { ...baseLine.workOrder, project: { id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, assignments: [] } },
     };
     const { prisma } = createFakePrisma(baseBatch({ lines: [baseLine, otherProjectLine] }), validSettings);
     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
@@ -228,7 +250,7 @@ describe('TeamleaderInvoiceService', () => {
   });
 
   it('weigert wanneer een medewerker op de batch nog geen uurtarief heeft (noch standaard, noch een eenmalige override)', async () => {
-    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null };
+    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
     const line = { ...baseLine, workOrder: { ...baseLine.workOrder, timeEntries: [peterTimeEntry(), { timeEntry: { ...peterTimeEntry().timeEntry, employee: zonderTarief } }] } };
     const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
@@ -236,6 +258,133 @@ describe('TeamleaderInvoiceService', () => {
 
     await expect(service.createDraftInvoice('batch-1')).rejects.toMatchObject({ code: 'INVOICE_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET' });
     expect(client.post).not.toHaveBeenCalled();
+  });
+
+  describe('Phase 12, deel A — overuren-/ploegen-/nachttoeslag', () => {
+    it('geen enkele toeslag van toepassing (geen ProjectAssignment): exact hetzelfde resultaat als vóór deel A', async () => {
+      const { prisma } = createFakePrisma(baseBatch(), validSettings); // baseLine.workOrder.project.assignments = []
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+      expect(lineItems).toHaveLength(1); // geen aparte overurenregel
+      expect(lineItems[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
+      expect(lineItems[0]?.quantity).toBeCloseTo(2.28, 2);
+    });
+
+    it('DAILY-drempel: één werkbon van 9u30 op een project met overtimeApplies=true levert twee regels op (8u normaal, 1u30 overuren)', async () => {
+      const line = {
+        ...baseLine,
+        workOrder: {
+          ...baseLine.workOrder,
+          project: {
+            ...baseLine.workOrder.project,
+            overtimeThresholdType: 'DAILY' as const,
+            assignments: [{ employeeId: peter.id, overtimeApplies: true, premiumType: 'NONE' as const }],
+          },
+          timeEntries: [
+            {
+              timeEntry: {
+                startedAt: new Date('2026-08-20T07:00:00Z'),
+                endedAt: new Date('2026-08-20T16:30:00Z'), // 9u30
+                pausedSeconds: 0,
+                employee: peter,
+              },
+            },
+          ],
+        },
+      };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+      expect(lineItems).toHaveLength(2);
+
+      const normal = lineItems.find((item) => !(item.description as string).includes('overuren'));
+      const overtime = lineItems.find((item) => (item.description as string).includes('overuren'));
+      expect(normal?.quantity).toBeCloseTo(8, 2);
+      expect(normal?.unit_price).toEqual({ amount: 65, tax: 'excluding' }); // 100% van 6500
+      expect(overtime?.quantity).toBeCloseTo(1.5, 2);
+      expect(overtime?.unit_price).toEqual({ amount: 97.5, tax: 'excluding' }); // 150% van 6500
+    });
+
+    it('WEEKLY-drempel over meerdere werkbonnen heen: acceptatiecriterium uit het ontwerp — 39u normaal + 3u overuren bij nachtwerk (200%)', async () => {
+      // Peter werkt 3 dagen van 14u (42u totaal) op een WEEKLY-project met drempel 39u, plus nachtwerktoeslag.
+      const assignments = [{ employeeId: peter.id, overtimeApplies: true, premiumType: 'NIGHT_WORK' as const }];
+      const project = {
+        ...baseLine.workOrder.project,
+        overtimeThresholdType: 'WEEKLY' as const,
+        overtimeWeeklyThresholdHours: 39,
+        assignments,
+      };
+      const dayEntry = (day: string) => ({
+        timeEntry: { startedAt: new Date(`2026-08-${day}T06:00:00Z`), endedAt: new Date(`2026-08-${day}T20:00:00Z`), pausedSeconds: 0, employee: peter },
+      });
+      const lines = [
+        { ...baseLine, workOrder: { ...baseLine.workOrder, workOrderNumber: 'WB-1', project, timeEntries: [dayEntry('17')] } }, // maandag
+        { ...baseLine, workOrder: { ...baseLine.workOrder, workOrderNumber: 'WB-2', project, timeEntries: [dayEntry('18')] } }, // dinsdag
+        { ...baseLine, workOrder: { ...baseLine.workOrder, workOrderNumber: 'WB-3', project, timeEntries: [dayEntry('19')] } }, // woensdag
+      ];
+      const { prisma } = createFakePrisma(baseBatch({ lines }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+      expect(lineItems).toHaveLength(2); // 3 werkbonnen, maar samengevoegd tot 1 normale + 1 overuren-regel (zelfde week, zelfde project/medewerker)
+
+      const normal = lineItems.find((item) => !(item.description as string).includes('overuren'));
+      const overtime = lineItems.find((item) => (item.description as string).includes('overuren'));
+      expect(normal?.quantity).toBeCloseTo(39, 2);
+      expect(normal?.unit_price).toEqual({ amount: 97.5, tax: 'excluding' }); // 150% (nachtwerk) van 6500
+      expect(overtime?.quantity).toBeCloseTo(3, 2);
+      expect(overtime?.unit_price).toEqual({ amount: 130, tax: 'excluding' }); // 200% (nachtwerk+overuren) van 6500
+      // Traceerbaarheid: alle drie werkbonnen van de week staan vermeld.
+      expect(normal?.description).toContain('WB-1');
+      expect(normal?.description).toContain('WB-2');
+      expect(normal?.description).toContain('WB-3');
+    });
+  });
+
+  describe('Phase 12, deel D — km-vergoeding', () => {
+    it('voegt een aparte "verplaatsingskosten"-regel toe wanneer kmAmountCents bevroren is op de werkbon', async () => {
+      const line = { ...baseLine, workOrder: { ...baseLine.workOrder, kmAmountCents: 868 } }; // 12,4km enkel @ €0,35/km, heen-terug (zie distance.service.test.ts)
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+      expect(lineItems).toHaveLength(2); // 1 uren-regel + 1 km-regel
+
+      const kmLine = lineItems.find((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'));
+      expect(kmLine?.quantity).toBe(1);
+      expect(kmLine?.unit_price).toEqual({ amount: 8.68, tax: 'excluding' });
+      expect(kmLine?.description).toContain(baseLine.workOrder.workOrderNumber);
+    });
+
+    it('voegt geen km-regel toe wanneer kmAmountCents null is (geen km-vergoeding actief)', async () => {
+      const { prisma } = createFakePrisma(baseBatch(), validSettings); // baseLine.workOrder.kmAmountCents = null
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+      expect(lineItems.some((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'))).toBe(false);
+    });
   });
 
   it('weigert wanneer de facturatie-instellingen nog niet (volledig) ingesteld zijn', async () => {

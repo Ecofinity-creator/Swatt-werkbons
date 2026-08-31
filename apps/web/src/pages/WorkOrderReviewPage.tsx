@@ -8,7 +8,7 @@ import {
 } from '@swatt/shared-types';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { workOrderPhotosApi, workOrdersApi } from '../api/client';
+import { weeklyApprovalApi, workOrderPhotosApi, workOrdersApi } from '../api/client';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
 import { SignatureCanvas, type SignatureCanvasHandle } from '../components/SignatureCanvas';
 import { compressImageFile } from '../lib/image';
@@ -52,6 +52,9 @@ export function WorkOrderReviewPage() {
   const [isRetryingSync, setIsRetryingSync] = useState(false);
   const [retrySyncError, setRetrySyncError] = useState<string | null>(null);
 
+  // Phase 12, deel B (sectie 2) — enkel relevant wanneer workOrder.projectSigningMode === 'WEEKLY'.
+  const [pendingWeekCount, setPendingWeekCount] = useState<number | null>(null);
+
   const load = useCallback(async () => {
     if (!workOrderId) return;
     try {
@@ -67,6 +70,21 @@ export function WorkOrderReviewPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Phase 12, deel B — zodra de werknemer de ondertekenstap bereikt op een
+  // WEEKLY-project, tonen we hoeveel werkbonnen deze week in totaal mee
+  // getekend zullen worden (niet enkel deze ene) — dit voorkomt de verrassing
+  // dat één handtekening plots meerdere werkbonnen tegelijk afsluit.
+  useEffect(() => {
+    if (step !== 'sign' || !workOrder || workOrder.projectSigningMode !== 'WEEKLY') {
+      setPendingWeekCount(null);
+      return;
+    }
+    weeklyApprovalApi
+      .pendingWeek(workOrder.projectId)
+      .then((response) => setPendingWeekCount(response.workOrderIds.length))
+      .catch(() => setPendingWeekCount(null));
+  }, [step, workOrder]);
 
   if (!workOrderId) {
     return null;
@@ -110,7 +128,7 @@ export function WorkOrderReviewPage() {
   }
 
   async function handleSign() {
-    if (!workOrderId) return;
+    if (!workOrderId || !workOrder) return;
     const trimmedName = signerName.trim();
     if (!trimmedName || !confirmed || signatureRef.current?.isEmpty()) {
       setSignError('Vul de naam van de klant in, bevestig de werkzaamheden en teken hieronder.');
@@ -125,14 +143,25 @@ export function WorkOrderReviewPage() {
     setIsSigning(true);
     try {
       const trimmedFunction = signerFunction.trim();
-      const response = await workOrdersApi.sign(workOrderId, {
+      const signBody = {
         signerName: trimmedName,
         ...(trimmedFunction ? { signerFunction: trimmedFunction } : {}),
-        confirmed: true,
-        mimeType: 'image/png',
+        confirmed: true as const,
+        mimeType: 'image/png' as const,
         signatureDataBase64: stripDataUrlPrefix(dataUrl),
-      });
-      setWorkOrder(response.workOrder);
+      };
+
+      if (workOrder.projectSigningMode === 'WEEKLY') {
+        // Sectie 2 — één handtekening tekent de hele lopende week op dit
+        // project in één keer (WeeklyApprovalService.signCurrentWeek()),
+        // niet enkel deze ene werkbon.
+        await weeklyApprovalApi.signWeek(workOrder.projectId, signBody);
+        const response = await workOrdersApi.get(workOrderId);
+        setWorkOrder(response.workOrder);
+      } else {
+        const response = await workOrdersApi.sign(workOrderId, signBody);
+        setWorkOrder(response.workOrder);
+      }
     } catch (err) {
       setSignError(err instanceof ApiRequestError ? err.message : 'Kon de handtekening niet opslaan.');
     } finally {
@@ -240,6 +269,7 @@ export function WorkOrderReviewPage() {
       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'sign' && (
         <SignStep
           workOrder={workOrder}
+          pendingWeekCount={pendingWeekCount}
           signerName={signerName}
           onSignerNameChange={setSignerName}
           signerFunction={signerFunction}
@@ -400,6 +430,7 @@ function PhotoInputButton({
 
 function SignStep({
   workOrder,
+  pendingWeekCount,
   signerName,
   onSignerNameChange,
   signerFunction,
@@ -415,6 +446,8 @@ function SignStep({
   onSign,
 }: {
   workOrder: WorkOrderSummary;
+  /** Phase 12, deel B — aantal werkbonnen dat samen met deze getekend wordt, enkel gezet bij projectSigningMode === 'WEEKLY'. */
+  pendingWeekCount: number | null;
   signerName: string;
   onSignerNameChange: (value: string) => void;
   signerFunction: string;
@@ -435,6 +468,13 @@ function SignStep({
     <div className="flex flex-col gap-6">
       <p className="text-lg font-semibold">Werkbon controleren</p>
       <WorkOrderSummaryCard workOrder={workOrder} />
+
+      {workOrder.projectSigningMode === 'WEEKLY' && pendingWeekCount !== null && pendingWeekCount > 1 && (
+        <p className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-3 text-sm text-swatt-gold">
+          Deze klant tekent per week. Deze handtekening bevestigt in één keer alle {pendingWeekCount} openstaande
+          werkbonnen van deze week op dit project, niet enkel deze ene.
+        </p>
+      )}
 
       {workOrder.photos.length > 0 && (
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
@@ -510,7 +550,11 @@ function SignStep({
         disabled={!canSubmit}
         className="rounded-xl bg-swatt-gold px-6 py-6 text-xl font-extrabold text-swatt-black disabled:opacity-60"
       >
-        {isSigning ? 'Bezig...' : 'Ondertekenen en goedkeuren'}
+        {isSigning
+          ? 'Bezig...'
+          : workOrder.projectSigningMode === 'WEEKLY'
+            ? 'Week ondertekenen en goedkeuren'
+            : 'Ondertekenen en goedkeuren'}
       </button>
       <button
         type="button"
