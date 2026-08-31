@@ -10,6 +10,10 @@ import type {
   CreateUserBody,
   CreateUserResponseBody,
   HoursExportOverviewResponseBody,
+  ListPayableSummaryResponseBody,
+  ListPayrollBatchesResponseBody,
+  CreatePayrollBatchBody,
+  CreatePayrollBatchResponseBody,
   ListInvoiceBatchesResponseBody,
   ListInvoiceableWorkOrdersResponseBody,
   ListProjectAssignmentsResponseBody,
@@ -369,6 +373,27 @@ export const hoursExportApi = {
     request<HoursExportOverviewResponseBody>(`/admin/hours-export/overview?period=${encodeURIComponent(periodLabel)}`, {
       method: 'GET',
     }),
+};
+
+/**
+ * Phase 12, deel E — "Personeelsuitbetaling" (maandoverzicht per medewerker).
+ * ADMIN-only, zelfde rechtenniveau als facturatie — zie payroll.routes.ts.
+ */
+export const payrollApi = {
+  listPayable: (periodLabel?: string) =>
+    request<ListPayableSummaryResponseBody>(`/admin/payroll/payable${periodLabel ? `?periodLabel=${encodeURIComponent(periodLabel)}` : ''}`, {
+      method: 'GET',
+    }),
+  list: (filters: { employeeId?: string; periodLabel?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.employeeId) params.set('employeeId', filters.employeeId);
+    if (filters.periodLabel) params.set('periodLabel', filters.periodLabel);
+    const query = params.toString();
+    return request<ListPayrollBatchesResponseBody>(`/admin/payroll/batches${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
+  createBatch: (body: CreatePayrollBatchBody) =>
+    request<CreatePayrollBatchResponseBody>('/admin/payroll/batches', { method: 'POST', body: JSON.stringify(body) }),
+  removeBatch: (id: string) => request<void>(`/admin/payroll/batches/${id}/remove`, { method: 'POST' }),
 };
 
 /**
