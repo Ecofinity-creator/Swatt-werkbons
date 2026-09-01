@@ -84,17 +84,24 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
       // (externe-dienst-storing mag nooit lokale data laten verloren gaan).
       // De admin ziet dat via `inviteEmailSent` en kan de gebruiker vragen
       // om zelf "Wachtwoord vergeten" te gebruiken zodra dat wel lukt.
+      // `inviteEmailError` geeft de technische reden mee (Resend-detail of
+      // "niet geconfigureerd") — voorheen enkel server-side gelogd, nooit
+      // zichtbaar voor de admin, waardoor een structureel misgeconfigureerde
+      // e-maildienst onopgemerkt kon blijven (zie EmailErrors.sendFailed()/
+      // notConfigured(), die de nuttige detail al in hun message hadden zitten).
       let inviteEmailSent = true;
+      let inviteEmailError: string | null = null;
       try {
         const token = await app.passwordResetService.createToken(user.id);
         await app.emailService.send(buildInviteEmail(body.email, token, body.displayName));
       } catch (err) {
         inviteEmailSent = false;
+        inviteEmailError = err instanceof Error ? err.message : 'Onbekende fout bij het versturen.';
         request.log.error({ err }, 'Versturen van uitnodigingsmail mislukt');
       }
 
       reply.code(201);
-      return { user: toAdminUserSummary(user), inviteEmailSent };
+      return { user: toAdminUserSummary(user), inviteEmailSent, inviteEmailError };
     },
   );
 
@@ -209,14 +216,16 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
       }
 
       let inviteEmailSent = true;
+      let inviteEmailError: string | null = null;
       try {
         const token = await app.passwordResetService.createToken(user.id);
         await app.emailService.send(buildInviteEmail(user.email, token, user.employee?.displayName ?? user.email));
       } catch (err) {
         inviteEmailSent = false;
+        inviteEmailError = err instanceof Error ? err.message : 'Onbekende fout bij het versturen.';
         request.log.error({ err }, 'Opnieuw versturen van uitnodigingsmail mislukt');
       }
-      return { inviteEmailSent };
+      return { inviteEmailSent, inviteEmailError };
     },
   );
 

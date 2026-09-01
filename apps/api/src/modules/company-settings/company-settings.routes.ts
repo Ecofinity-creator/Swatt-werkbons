@@ -1,4 +1,4 @@
-import type { CompanySettingsResponseBody } from '@swatt/shared-types';
+import type { CompanySettingsResponseBody, PublicBrandingResponseBody } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
 import { requireRole } from '../rbac/rbac.middleware';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
@@ -32,8 +32,7 @@ export default async function companySettingsRoutes(app: FastifyInstance): Promi
   app.post(
     '/admin/company-settings',
     { preHandler: [app.authenticate, requireRole('ADMIN')], bodyLimit: UPDATE_BODY_LIMIT },
-    async (request): Promise<CompanySettingsResponseBody> => {
-      const body = updateCompanySettingsBodySchema.parse(request.body);
+    async (request): Promise<CompanySettingsResponseBody> => {      const body = updateCompanySettingsBodySchema.parse(request.body);
       const current = await service.get();
 
       // Logo-key bepalen vóór de update: nieuwe upload → opslaan en oude
@@ -76,6 +75,27 @@ export default async function companySettingsRoutes(app: FastifyInstance): Promi
       return toResponseBody(storage, updated);
     },
   );
+
+  /**
+   * Publieke, niet-geauthenticeerde route voor het loginscherm (sectie 21/33
+   * — "app moet gepersonaliseerd aanvoelen"): geeft enkel bedrijfsnaam +
+   * logo terug, nooit de rest van de instellingen (btw-nummer,
+   * contactgegevens, km-tarief, max-medewerkers e.d. blijven ADMIN-only,
+   * business rule 11-analoog — een niet-ingelogde bezoeker mag dit niet zien).
+   */
+  app.get('/public/branding', async (): Promise<PublicBrandingResponseBody> => {
+    const settings = await service.get();
+    let logoDataUrl: string | null = null;
+    if (settings.logoFileKey) {
+      try {
+        const logo = await storage.read(settings.logoFileKey);
+        logoDataUrl = `data:${logo.mimeType};base64,${logo.data.toString('base64')}`;
+      } catch {
+        logoDataUrl = null;
+      }
+    }
+    return { companyName: settings.companyName, logoDataUrl };
+  });
 }
 
 async function toResponseBody(storage: StorageService, settings: Awaited<ReturnType<CompanySettingsService['get']>>): Promise<CompanySettingsResponseBody> {

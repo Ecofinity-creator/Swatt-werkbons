@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { publicBrandingApi } from '../api/client';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
 import { Logo } from '../components/Logo';
 
@@ -12,6 +13,18 @@ export function LoginPage() {
   const [rememberMe, setRememberMe] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Sectie 21/33 — "app moet gepersonaliseerd aanvoelen": klantlogo (Bedrijfsgegevens)
+  // i.p.v. de eerder generieke "Technical Support Team"-tekst. Publieke,
+  // niet-geauthenticeerde route (zie company-settings.routes.ts); `null` zolang
+  // de klant nog geen eigen logo geüpload heeft, dan tonen we gewoon niets extra.
+  const [branding, setBranding] = useState<{ companyName: string; logoDataUrl: string | null } | null>(null);
+
+  useEffect(() => {
+    publicBrandingApi
+      .get()
+      .then(setBranding)
+      .catch(() => setBranding(null)); // niet kritiek — het loginscherm werkt ook zonder klantlogo
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -33,11 +46,21 @@ export function LoginPage() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-swatt-black px-6">
       <div className="w-full max-w-sm">
-        <div className="mb-10 flex flex-col items-center gap-3">
-          <Logo size="lg" />
-          <p className="text-center text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">
-            Technical Support Team
-          </p>
+        <div className="mb-10 flex flex-col items-center gap-4">
+          {/* Optie 4 uit het ontwerpgesprek: het Uurivo-logo (donkere tekst/pictogram op
+              transparante achtergrond) versmelt anders met de zwarte pagina-achtergrond —
+              een lichte kaart met een gouden accentrand (bestaande swatt-gold-kleur) lost dat
+              op en past bij de rest van de huisstijl (knoppen, "Onthou mij", enz.). */}
+          <div className="rounded-2xl border-2 border-swatt-gold bg-neutral-50 px-8 py-6">
+            <Logo size="lg" />
+          </div>
+          {branding?.logoDataUrl && (
+            <img
+              src={branding.logoDataUrl}
+              alt={branding.companyName}
+              className="h-10 w-auto object-contain"
+            />
+          )}
         </div>
 
         <form onSubmit={handleSubmit} method="post" className="flex flex-col gap-4">

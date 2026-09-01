@@ -244,7 +244,7 @@ export function UserDetailPage() {
       setResendInviteMessage(
         response.inviteEmailSent
           ? 'Uitnodigingsmail opnieuw verstuurd.'
-          : 'De uitnodiging kon niet verstuurd worden. Controleer de e-mailconfiguratie.',
+          : `De uitnodiging kon niet verstuurd worden${response.inviteEmailError ? `: ${response.inviteEmailError}` : '.'}`,
       );
     } catch (err) {
       setResendInviteMessage(err instanceof ApiRequestError ? err.message : 'Opnieuw uitnodigen is mislukt.');

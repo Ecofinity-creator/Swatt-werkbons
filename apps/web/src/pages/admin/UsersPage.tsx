@@ -55,7 +55,9 @@ export function UsersPage() {
       });
       if (!response.inviteEmailSent) {
         setInviteWarning(
-          `Gebruiker ${form.displayName} is aangemaakt, maar de uitnodigingsmail kon niet worden verstuurd. Laat deze persoon "Wachtwoord vergeten" gebruiken op het inlogscherm zodra dit opgelost is.`,
+          `Gebruiker ${form.displayName} is aangemaakt, maar de uitnodigingsmail kon niet worden verstuurd${
+            response.inviteEmailError ? ` (${response.inviteEmailError})` : ''
+          }. Laat deze persoon "Wachtwoord vergeten" gebruiken op het inlogscherm zodra dit opgelost is.`,
         );
       }
       setForm(emptyForm);

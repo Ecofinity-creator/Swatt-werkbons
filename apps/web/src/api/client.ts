@@ -3,6 +3,7 @@ import type {
   AddWorkOrderPhotoBody,
   ApiErrorBody,
   CompanySettingsResponseBody,
+  PublicBrandingResponseBody,
   CreateInvoiceBatchBody,
   CreateInvoiceBatchResponseBody,
   CreateManualTimeEntryBody,
@@ -219,6 +220,11 @@ export const companySettingsApi = {
   get: () => request<CompanySettingsResponseBody>('/admin/company-settings', { method: 'GET' }),
   update: (body: UpdateCompanySettingsBody) =>
     request<CompanySettingsResponseBody>('/admin/company-settings', { method: 'POST', body: JSON.stringify(body) }),
+};
+
+/** Publiek, niet-geauthenticeerd — enkel bedrijfsnaam + logo, voor het loginscherm. */
+export const publicBrandingApi = {
+  get: () => request<PublicBrandingResponseBody>('/public/branding', { method: 'GET' }),
 };
 
 /**

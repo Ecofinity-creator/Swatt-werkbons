@@ -153,11 +153,15 @@ export interface CreateUserBody {
 export interface CreateUserResponseBody {
   user: AdminUserSummary;
   inviteEmailSent: boolean;
+  /** Technische foutmelding (van Resend of "niet geconfigureerd") wanneer `inviteEmailSent` false is — anders `null`. Enkel zichtbaar voor de admin die de gebruiker aanmaakt. */
+  inviteEmailError: string | null;
 }
 
 /** Response van POST /admin/users/:id/resend-invite. */
 export interface ResendInviteResponseBody {
   inviteEmailSent: boolean;
+  /** Technische foutmelding wanneer `inviteEmailSent` false is — anders `null`. */
+  inviteEmailError: string | null;
 }
 
 /** Body van POST /admin/users/:id/update — alle velden optioneel (partial update). */
@@ -718,6 +722,16 @@ export type RetryWorkOrderSyncResponseBody = WorkOrderResponseBody;
  * zolang er geen logo geüpload is (de PDF valt dan terug op een gestileerd
  * "UURIVO"-tekstlogo, zie work-order-pdf-document.ts).
  */
+/**
+ * Publieke, niet-geauthenticeerde branding voor het loginscherm — enkel
+ * bedrijfsnaam + logo, nooit gevoelige instellingen (zie
+ * company-settings.routes.ts, /public/branding).
+ */
+export interface PublicBrandingResponseBody {
+  companyName: string;
+  logoDataUrl: string | null;
+}
+
 export interface CompanySettingsResponseBody {
   companyName: string;
   addressLine: string | null;
