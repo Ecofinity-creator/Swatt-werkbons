@@ -125,13 +125,28 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return undefined as T;
   }
 
-  const body = (await response.json()) as T | ApiErrorBody;
+  // Sectie 27 ("maak fouten begrijpelijk") — als de server een niet-JSON
+  // antwoord teruggeeft (bv. een ruwe 500-foutpagina van Render zelf, een
+  // proxy-timeout, of een onverwachte crash die de globale JSON-foutafhandeling
+  // omzeilt), gaf `response.json()` voorheen enkel een cryptische
+  // "Unexpected token"-SyntaxError die de aanroeper niet als ApiRequestError
+  // herkende — dan viel elke aanroeper stil terug op zijn generieke
+  // fallback-tekst ("Kon de handtekening niet opslaan.", enz.) zonder één
+  // bruikbare aanwijzing. Nu bevat die fallback minstens de HTTP-status, wat
+  // meteen een eerste diagnose mogelijk maakt zonder in de server-logs te
+  // moeten kijken (bv. 413 = payload te groot, 500 = serverfout, 504 = timeout).
+  let body: T | ApiErrorBody;
+  try {
+    body = (await response.json()) as T | ApiErrorBody;
+  } catch {
+    throw new ApiRequestError('NON_JSON_RESPONSE', `Onverwacht antwoord van de server (HTTP ${response.status}). Probeer het opnieuw.`);
+  }
 
   if (!response.ok) {
     const errorBody = body as ApiErrorBody;
     throw new ApiRequestError(
       errorBody.error?.code ?? 'UNKNOWN_ERROR',
-      errorBody.error?.message ?? 'Er ging iets mis. Probeer het later opnieuw.',
+      errorBody.error?.message ?? `Er ging iets mis (HTTP ${response.status}). Probeer het later opnieuw.`,
     );
   }
 

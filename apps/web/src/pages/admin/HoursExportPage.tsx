@@ -141,13 +141,22 @@ export function HoursExportPage() {
                     {formatHm(employee.totalSeconds)} u · {employee.workOrderCount} werkbon(nen)
                   </span>
                 </div>
-                <a
-                  href={`/admin/hours-export/subcontractors/${employee.employeeId}/pdf?period=${encodeURIComponent(periodLabel)}`}
-                  download
-                  className="rounded-lg border border-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-swatt-gold-dark"
-                >
-                  Download PDF
-                </a>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={`/admin/hours-export/subcontractors/${employee.employeeId}/excel?period=${encodeURIComponent(periodLabel)}`}
+                    download
+                    className="rounded-lg bg-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-white"
+                  >
+                    Download Excel
+                  </a>
+                  <a
+                    href={`/admin/hours-export/subcontractors/${employee.employeeId}/pdf?period=${encodeURIComponent(periodLabel)}`}
+                    download
+                    className="rounded-lg border border-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-swatt-gold-dark"
+                  >
+                    Download PDF
+                  </a>
+                </div>
               </li>
             ))}
           </ul>

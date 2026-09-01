@@ -51,7 +51,7 @@ export function LoginPage() {
               transparante achtergrond) versmelt anders met de zwarte pagina-achtergrond —
               een lichte kaart met een gouden accentrand (bestaande swatt-gold-kleur) lost dat
               op en past bij de rest van de huisstijl (knoppen, "Onthou mij", enz.). */}
-          <div className="rounded-2xl border-2 border-swatt-gold bg-neutral-50 px-8 py-6">
+          <div className="rounded-2xl border-2 border-swatt-gold bg-neutral-50 p-8">
             <Logo size="lg" />
           </div>
           {branding?.logoDataUrl && (

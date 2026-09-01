@@ -6,6 +6,7 @@ import { DatabaseStorageService, type StorageService } from '../storage/storage.
 import { buildEmployeeHoursWorkbook } from './employee-hours-workbook';
 import { hoursExportEmployeeParamsSchema, hoursExportPeriodQuerySchema } from './hours-export.schemas';
 import { HoursExportService } from './hours-export.service';
+import { buildSubcontractorHoursWorkbook } from './subcontractor-hours-workbook';
 import { renderSubcontractorStatementPdf } from './subcontractor-statement-document';
 
 /**
@@ -80,6 +81,24 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
         'Content-Disposition',
         `attachment; filename="urenoverzicht-${slugify(detail.displayName)}-${query.period}.pdf"`,
       );
+      return reply.send(buffer);
+    },
+  );
+
+  // Zelfde totalisatie-met-detail als hierboven, nu als Excel-bestand i.p.v.
+  // PDF — op uitdrukkelijke vraag naast de bestaande PDF-optie (die blijft
+  // gewoon bestaan), zie subcontractor-hours-workbook.ts.
+  app.get(
+    '/admin/hours-export/subcontractors/:employeeId/excel',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request, reply) => {
+      const params = hoursExportEmployeeParamsSchema.parse(request.params);
+      const query = hoursExportPeriodQuerySchema.parse(request.query);
+      const detail = await service.getSubcontractorDetail(params.employeeId, query.period);
+
+      const buffer = await buildSubcontractorHoursWorkbook(detail);
+      reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      reply.header('Content-Disposition', `attachment; filename="urenoverzicht-${slugify(detail.displayName)}-${query.period}.xlsx"`);
       return reply.send(buffer);
     },
   );
