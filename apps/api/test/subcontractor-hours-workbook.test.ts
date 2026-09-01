@@ -60,7 +60,14 @@ describe('buildSubcontractorHoursWorkbook()', () => {
     expect(buffer.length).toBeGreaterThan(0);
 
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer);
+    // Buffer-type-mismatch tussen mogelijk twee verschillende @types/node-
+    // versies in de dependency-boom (ExcelJS' eigen typedefinities vs. de
+    // root-@types/node) — een `unknown`-cast volstond niet (de twee
+    // `Buffer`-declaraties zijn structureel verschillend), dus hier bewust
+    // `any` om dat volledig te omzeilen; enkel in deze test, niet in
+    // productiecode.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await workbook.xlsx.load(buffer as any);
     const sheet = workbook.getWorksheet('Urenoverzicht');
     expect(sheet).toBeDefined();
 
