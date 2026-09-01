@@ -1,0 +1,277 @@
+From b77681f37b527bcceff9bfe481ca1ccb2e713954 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 31 Aug 2026 16:32:36 +0000
+Subject: [PATCH] Loginscherm-personalisatie + zichtbare foutmelding bij
+ mislukte uitnodigingsmail
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Uurivo-logo in een lichte kaart met gouden accentrand (was nauwelijks
+  zichtbaar op de zwarte achtergrond, donkere tekst/pictogram op
+  transparante achtergrond).
+- 'Technical Support Team'-tekst vervangen door het klantlogo uit
+  Bedrijfsgegevens (nieuwe publieke route GET /public/branding, enkel
+  bedrijfsnaam + logo, geen gevoelige instellingen).
+- De technische foutmelding bij een mislukte uitnodigingsmail (Resend-detail
+  of 'niet geconfigureerd') was voorheen enkel server-side gelogd, nooit
+  zichtbaar voor de admin — nu getoond bij zowel het aanmaken van een
+  gebruiker als 'Opnieuw uitnodigen', zodat de echte oorzaak eindelijk
+  zichtbaar wordt.
+---
+ .../company-settings.routes.ts                | 26 ++++++++++++--
+ apps/api/src/modules/users/user.routes.ts     | 13 +++++--
+ apps/web/src/api/client.ts                    |  6 ++++
+ apps/web/src/pages/LoginPage.tsx              | 35 +++++++++++++++----
+ apps/web/src/pages/admin/UserDetailPage.tsx   |  2 +-
+ apps/web/src/pages/admin/UsersPage.tsx        |  4 ++-
+ packages/shared-types/src/index.ts            | 14 ++++++++
+ 7 files changed, 87 insertions(+), 13 deletions(-)
+
+diff --git a/apps/api/src/modules/company-settings/company-settings.routes.ts b/apps/api/src/modules/company-settings/company-settings.routes.ts
+index 1781e89..bdeff40 100644
+--- a/apps/api/src/modules/company-settings/company-settings.routes.ts
++++ b/apps/api/src/modules/company-settings/company-settings.routes.ts
+@@ -1,4 +1,4 @@
+-import type { CompanySettingsResponseBody } from '@swatt/shared-types';
++import type { CompanySettingsResponseBody, PublicBrandingResponseBody } from '@swatt/shared-types';
+ import type { FastifyInstance } from 'fastify';
+ import { requireRole } from '../rbac/rbac.middleware';
+ import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+@@ -32,8 +32,7 @@ export default async function companySettingsRoutes(app: FastifyInstance): Promi
+   app.post(
+     '/admin/company-settings',
+     { preHandler: [app.authenticate, requireRole('ADMIN')], bodyLimit: UPDATE_BODY_LIMIT },
+-    async (request): Promise<CompanySettingsResponseBody> => {
+-      const body = updateCompanySettingsBodySchema.parse(request.body);
++    async (request): Promise<CompanySettingsResponseBody> => {      const body = updateCompanySettingsBodySchema.parse(request.body);
+       const current = await service.get();
+ 
+       // Logo-key bepalen vóór de update: nieuwe upload → opslaan en oude
+@@ -76,6 +75,27 @@ export default async function companySettingsRoutes(app: FastifyInstance): Promi
+       return toResponseBody(storage, updated);
+     },
+   );
++
++  /**
++   * Publieke, niet-geauthenticeerde route voor het loginscherm (sectie 21/33
++   * — "app moet gepersonaliseerd aanvoelen"): geeft enkel bedrijfsnaam +
++   * logo terug, nooit de rest van de instellingen (btw-nummer,
++   * contactgegevens, km-tarief, max-medewerkers e.d. blijven ADMIN-only,
++   * business rule 11-analoog — een niet-ingelogde bezoeker mag dit niet zien).
++   */
++  app.get('/public/branding', async (): Promise<PublicBrandingResponseBody> => {
++    const settings = await service.get();
++    let logoDataUrl: string | null = null;
++    if (settings.logoFileKey) {
++      try {
++        const logo = await storage.read(settings.logoFileKey);
++        logoDataUrl = `data:${logo.mimeType};base64,${logo.data.toString('base64')}`;
++      } catch {
++        logoDataUrl = null;
++      }
++    }
++    return { companyName: settings.companyName, logoDataUrl };
++  });
+ }
+ 
+ async function toResponseBody(storage: StorageService, settings: Awaited<ReturnType<CompanySettingsService['get']>>): Promise<CompanySettingsResponseBody> {
+diff --git a/apps/api/src/modules/users/user.routes.ts b/apps/api/src/modules/users/user.routes.ts
+index 10923cc..708f476 100644
+--- a/apps/api/src/modules/users/user.routes.ts
++++ b/apps/api/src/modules/users/user.routes.ts
+@@ -84,17 +84,24 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+       // (externe-dienst-storing mag nooit lokale data laten verloren gaan).
+       // De admin ziet dat via `inviteEmailSent` en kan de gebruiker vragen
+       // om zelf "Wachtwoord vergeten" te gebruiken zodra dat wel lukt.
++      // `inviteEmailError` geeft de technische reden mee (Resend-detail of
++      // "niet geconfigureerd") — voorheen enkel server-side gelogd, nooit
++      // zichtbaar voor de admin, waardoor een structureel misgeconfigureerde
++      // e-maildienst onopgemerkt kon blijven (zie EmailErrors.sendFailed()/
++      // notConfigured(), die de nuttige detail al in hun message hadden zitten).
+       let inviteEmailSent = true;
++      let inviteEmailError: string | null = null;
+       try {
+         const token = await app.passwordResetService.createToken(user.id);
+         await app.emailService.send(buildInviteEmail(body.email, token, body.displayName));
+       } catch (err) {
+         inviteEmailSent = false;
++        inviteEmailError = err instanceof Error ? err.message : 'Onbekende fout bij het versturen.';
+         request.log.error({ err }, 'Versturen van uitnodigingsmail mislukt');
+       }
+ 
+       reply.code(201);
+-      return { user: toAdminUserSummary(user), inviteEmailSent };
++      return { user: toAdminUserSummary(user), inviteEmailSent, inviteEmailError };
+     },
+   );
+ 
+@@ -209,14 +216,16 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+       }
+ 
+       let inviteEmailSent = true;
++      let inviteEmailError: string | null = null;
+       try {
+         const token = await app.passwordResetService.createToken(user.id);
+         await app.emailService.send(buildInviteEmail(user.email, token, user.employee?.displayName ?? user.email));
+       } catch (err) {
+         inviteEmailSent = false;
++        inviteEmailError = err instanceof Error ? err.message : 'Onbekende fout bij het versturen.';
+         request.log.error({ err }, 'Opnieuw versturen van uitnodigingsmail mislukt');
+       }
+-      return { inviteEmailSent };
++      return { inviteEmailSent, inviteEmailError };
+     },
+   );
+ 
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 24a21fa..c119a9f 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -3,6 +3,7 @@ import type {
+   AddWorkOrderPhotoBody,
+   ApiErrorBody,
+   CompanySettingsResponseBody,
++  PublicBrandingResponseBody,
+   CreateInvoiceBatchBody,
+   CreateInvoiceBatchResponseBody,
+   CreateManualTimeEntryBody,
+@@ -221,6 +222,11 @@ export const companySettingsApi = {
+     request<CompanySettingsResponseBody>('/admin/company-settings', { method: 'POST', body: JSON.stringify(body) }),
+ };
+ 
++/** Publiek, niet-geauthenticeerd — enkel bedrijfsnaam + logo, voor het loginscherm. */
++export const publicBrandingApi = {
++  get: () => request<PublicBrandingResponseBody>('/public/branding', { method: 'GET' }),
++};
++
+ /**
+  * Admin-only gebruikersbeheer. Bewust POST i.p.v. PATCH voor de update-call
+  * (`.../update`) — zie het commentaar bij ProjectAssignmentBody in
+diff --git a/apps/web/src/pages/LoginPage.tsx b/apps/web/src/pages/LoginPage.tsx
+index a386055..bf24a60 100644
+--- a/apps/web/src/pages/LoginPage.tsx
++++ b/apps/web/src/pages/LoginPage.tsx
+@@ -1,6 +1,7 @@
+-import { useState } from 'react';
++import { useEffect, useState } from 'react';
+ import type { FormEvent } from 'react';
+ import { Link, useNavigate } from 'react-router-dom';
++import { publicBrandingApi } from '../api/client';
+ import { ApiRequestError, useAuth } from '../auth/AuthContext';
+ import { Logo } from '../components/Logo';
+ 
+@@ -12,6 +13,18 @@ export function LoginPage() {
+   const [rememberMe, setRememberMe] = useState(false);
+   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+   const [isSubmitting, setIsSubmitting] = useState(false);
++  // Sectie 21/33 — "app moet gepersonaliseerd aanvoelen": klantlogo (Bedrijfsgegevens)
++  // i.p.v. de eerder generieke "Technical Support Team"-tekst. Publieke,
++  // niet-geauthenticeerde route (zie company-settings.routes.ts); `null` zolang
++  // de klant nog geen eigen logo geüpload heeft, dan tonen we gewoon niets extra.
++  const [branding, setBranding] = useState<{ companyName: string; logoDataUrl: string | null } | null>(null);
++
++  useEffect(() => {
++    publicBrandingApi
++      .get()
++      .then(setBranding)
++      .catch(() => setBranding(null)); // niet kritiek — het loginscherm werkt ook zonder klantlogo
++  }, []);
+ 
+   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+     event.preventDefault();
+@@ -33,11 +46,21 @@ export function LoginPage() {
+   return (
+     <main className="flex min-h-screen flex-col items-center justify-center bg-swatt-black px-6">
+       <div className="w-full max-w-sm">
+-        <div className="mb-10 flex flex-col items-center gap-3">
+-          <Logo size="lg" />
+-          <p className="text-center text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">
+-            Technical Support Team
+-          </p>
++        <div className="mb-10 flex flex-col items-center gap-4">
++          {/* Optie 4 uit het ontwerpgesprek: het Uurivo-logo (donkere tekst/pictogram op
++              transparante achtergrond) versmelt anders met de zwarte pagina-achtergrond —
++              een lichte kaart met een gouden accentrand (bestaande swatt-gold-kleur) lost dat
++              op en past bij de rest van de huisstijl (knoppen, "Onthou mij", enz.). */}
++          <div className="rounded-2xl border-2 border-swatt-gold bg-neutral-50 px-8 py-6">
++            <Logo size="lg" />
++          </div>
++          {branding?.logoDataUrl && (
++            <img
++              src={branding.logoDataUrl}
++              alt={branding.companyName}
++              className="h-10 w-auto object-contain"
++            />
++          )}
+         </div>
+ 
+         <form onSubmit={handleSubmit} method="post" className="flex flex-col gap-4">
+diff --git a/apps/web/src/pages/admin/UserDetailPage.tsx b/apps/web/src/pages/admin/UserDetailPage.tsx
+index 037d69d..edbd2d1 100644
+--- a/apps/web/src/pages/admin/UserDetailPage.tsx
++++ b/apps/web/src/pages/admin/UserDetailPage.tsx
+@@ -244,7 +244,7 @@ export function UserDetailPage() {
+       setResendInviteMessage(
+         response.inviteEmailSent
+           ? 'Uitnodigingsmail opnieuw verstuurd.'
+-          : 'De uitnodiging kon niet verstuurd worden. Controleer de e-mailconfiguratie.',
++          : `De uitnodiging kon niet verstuurd worden${response.inviteEmailError ? `: ${response.inviteEmailError}` : '.'}`,
+       );
+     } catch (err) {
+       setResendInviteMessage(err instanceof ApiRequestError ? err.message : 'Opnieuw uitnodigen is mislukt.');
+diff --git a/apps/web/src/pages/admin/UsersPage.tsx b/apps/web/src/pages/admin/UsersPage.tsx
+index b223332..571261c 100644
+--- a/apps/web/src/pages/admin/UsersPage.tsx
++++ b/apps/web/src/pages/admin/UsersPage.tsx
+@@ -55,7 +55,9 @@ export function UsersPage() {
+       });
+       if (!response.inviteEmailSent) {
+         setInviteWarning(
+-          `Gebruiker ${form.displayName} is aangemaakt, maar de uitnodigingsmail kon niet worden verstuurd. Laat deze persoon "Wachtwoord vergeten" gebruiken op het inlogscherm zodra dit opgelost is.`,
++          `Gebruiker ${form.displayName} is aangemaakt, maar de uitnodigingsmail kon niet worden verstuurd${
++            response.inviteEmailError ? ` (${response.inviteEmailError})` : ''
++          }. Laat deze persoon "Wachtwoord vergeten" gebruiken op het inlogscherm zodra dit opgelost is.`,
+         );
+       }
+       setForm(emptyForm);
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 6e0ea2f..110e376 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -153,11 +153,15 @@ export interface CreateUserBody {
+ export interface CreateUserResponseBody {
+   user: AdminUserSummary;
+   inviteEmailSent: boolean;
++  /** Technische foutmelding (van Resend of "niet geconfigureerd") wanneer `inviteEmailSent` false is — anders `null`. Enkel zichtbaar voor de admin die de gebruiker aanmaakt. */
++  inviteEmailError: string | null;
+ }
+ 
+ /** Response van POST /admin/users/:id/resend-invite. */
+ export interface ResendInviteResponseBody {
+   inviteEmailSent: boolean;
++  /** Technische foutmelding wanneer `inviteEmailSent` false is — anders `null`. */
++  inviteEmailError: string | null;
+ }
+ 
+ /** Body van POST /admin/users/:id/update — alle velden optioneel (partial update). */
+@@ -718,6 +722,16 @@ export type RetryWorkOrderSyncResponseBody = WorkOrderResponseBody;
+  * zolang er geen logo geüpload is (de PDF valt dan terug op een gestileerd
+  * "UURIVO"-tekstlogo, zie work-order-pdf-document.ts).
+  */
++/**
++ * Publieke, niet-geauthenticeerde branding voor het loginscherm — enkel
++ * bedrijfsnaam + logo, nooit gevoelige instellingen (zie
++ * company-settings.routes.ts, /public/branding).
++ */
++export interface PublicBrandingResponseBody {
++  companyName: string;
++  logoDataUrl: string | null;
++}
++
+ export interface CompanySettingsResponseBody {
+   companyName: string;
+   addressLine: string | null;
+-- 
+2.43.0
+

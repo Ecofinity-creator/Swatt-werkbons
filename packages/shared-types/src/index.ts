@@ -122,12 +122,10 @@ export interface AdminUserSummary {
     id: string;
     displayName: string;
     phone: string | null;
-    /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), zie Employee.defaultHourlyRateCents. */
+    /** Facturatie: standaard uurtarief van deze medewerker (in eurocent) — de VERKOOPPRIJS, gebruikt om de klant te factureren, zie Employee.defaultHourlyRateCents. */
     defaultHourlyRateCents: number | null;
-    /** Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only (business rule 11). */
-    overtimeRatePercent: number;
-    shiftWorkRatePercent: number;
-    nightWorkRatePercent: number;
+    /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (Phase 12, deel E), zie Employee.payrollRateCents. Los van defaultHourlyRateCents hierboven. */
+    payrollRateCents: number | null;
     /** Werknemer vs. Onderaannemer, zie EmploymentType. */
     employmentType: EmploymentType;
   } | null;
@@ -170,12 +168,10 @@ export interface UpdateUserBody {
   isActive?: boolean;
   displayName?: string;
   phone?: string | null;
-  /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), `null` wist het weer. */
+  /** Facturatie: standaard uurtarief van deze medewerker (in eurocent) — VERKOOPPRIJS, `null` wist het weer. */
   defaultHourlyRateCents?: number | null;
-  /** Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only. */
-  overtimeRatePercent?: number;
-  shiftWorkRatePercent?: number;
-  nightWorkRatePercent?: number;
+  /** Fase 12-herziening: KOSTPRIJS (uitbetaling), `null` wist het weer. Los van defaultHourlyRateCents hierboven. */
+  payrollRateCents?: number | null;
   /** Werknemer vs. Onderaannemer, zie EmploymentType. */
   employmentType?: EmploymentType;
 }
@@ -200,6 +196,12 @@ export interface ProjectSummary {
   /** Phase 12, deel A (sectie 1) — "Overuren boven 8u/dag" (DAILY) of "Overuren boven [x]u/week" (WEEKLY). */
   overtimeThresholdType: 'DAILY' | 'WEEKLY';
   overtimeWeeklyThresholdHours: number | null;
+  /** Fase 12-herziening: toeslagregeling zit uniform op Project — geldt voor iedereen die er werkt (geen aparte keuze meer per medewerker/koppeling). */
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+  overtimeRatePercent: number;
+  shiftWorkRatePercent: number;
+  nightWorkRatePercent: number;
   /** Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" (default) of "Ondertekening per week". */
   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter tussen het Swatt-adres en dit project, `null` zolang nog niet berekend. */
@@ -219,16 +221,31 @@ export interface UpdateProjectInvoicingEnabledResponseBody {
   invoicingEnabled: boolean;
 }
 
-/** Body/response van POST /admin/projects/:id/overtime-settings (Phase 12, deel A — ADMIN-only). */
+/**
+ * Body/response van POST /admin/projects/:id/overtime-settings (Fase
+ * 12-herziening — ADMIN-only). Bevat sinds de herziening de VOLLEDIGE
+ * toeslagregeling van het project (drempel + of overuren/ploegenwerk/
+ * nachtwerk van toepassing is + de percentages), niet meer enkel de drempel.
+ */
 export interface UpdateProjectOvertimeSettingsBody {
   overtimeThresholdType: 'DAILY' | 'WEEKLY';
   /** Verplicht wanneer overtimeThresholdType='WEEKLY', genegeerd bij 'DAILY'. */
   overtimeWeeklyThresholdHours?: number | null;
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+  overtimeRatePercent: number;
+  shiftWorkRatePercent: number;
+  nightWorkRatePercent: number;
 }
 
 export interface UpdateProjectOvertimeSettingsResponseBody {
   overtimeThresholdType: 'DAILY' | 'WEEKLY';
   overtimeWeeklyThresholdHours: number | null;
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+  overtimeRatePercent: number;
+  shiftWorkRatePercent: number;
+  nightWorkRatePercent: number;
 }
 
 /** Body/response van POST /admin/projects/:id/signing-mode (Phase 12, deel B — ADMIN-only). */
@@ -273,29 +290,9 @@ export interface SignWeekResponseBody {
   weeklyApproval: WeeklyApprovalSummary;
 }
 
-/** Phase 12, deel A — de toeslaginstelling van één koppeling medewerker↔project (sectie 4/23). */
-export interface ProjectAssignmentPremiumsSummary {
-  projectId: string;
-  overtimeApplies: boolean;
-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
-}
-
-/** Body/response van POST /admin/employees/:employeeId/project-assignments/premiums (Phase 12, deel A — SUPERVISOR+, zelfde rechten als de koppeling zelf). */
-export interface UpdateProjectAssignmentPremiumsBody {
-  projectId: string;
-  overtimeApplies: boolean;
-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
-}
-
-export interface UpdateProjectAssignmentPremiumsResponseBody {
-  assignment: ProjectAssignmentPremiumsSummary;
-}
-
 /** Response van GET /admin/employees/:employeeId/project-assignments. */
 export interface ListProjectAssignmentsResponseBody {
   projectIds: string[];
-  /** Phase 12, deel A — toeslaginstelling per koppeling, additief naast projectIds (die blijft bestaan voor de bestaande checklist-UI). */
-  assignments: ProjectAssignmentPremiumsSummary[];
 }
 
 /** Body van POST .../project-assignments en .../project-assignments/remove. */

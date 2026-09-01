@@ -28,16 +28,7 @@ interface FakeTimeEntry {
     id: string;
     displayName: string;
     defaultHourlyRateCents: number | null;
-    overtimeRatePercent: number;
-    shiftWorkRatePercent: number;
-    nightWorkRatePercent: number;
   };
-}
-
-interface FakeProjectAssignment {
-  employeeId: string;
-  overtimeApplies: boolean;
-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
 }
 
 interface FakeBatch {
@@ -60,7 +51,12 @@ interface FakeBatch {
         teamleaderId: string;
         overtimeThresholdType: 'DAILY' | 'WEEKLY';
         overtimeWeeklyThresholdHours: number | null;
-        assignments: FakeProjectAssignment[];
+        /** Fase 12-herziening: toeslagregeling zit nu uniform op Project, niet meer per ProjectAssignment/Employee. */
+        overtimeApplies: boolean;
+        premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+        overtimeRatePercent: number;
+        shiftWorkRatePercent: number;
+        nightWorkRatePercent: number;
       };
       timeEntries: Array<{ timeEntry: FakeTimeEntry }>;
     };
@@ -100,7 +96,16 @@ const validSettings: FakeConnectionSettings = {
   invoicePaymentTermDays: 0,
 }
 
-const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 };
+
+/** Fase 12-herziening: default toeslagregeling van een project — geen toeslag actief, standaardpercentages. */
+const NO_PREMIUM = {
+  overtimeApplies: false,
+  premiumType: 'NONE' as const,
+  overtimeRatePercent: 150,
+  shiftWorkRatePercent: 120,
+  nightWorkRatePercent: 150,
+};
 
 /** 2u17 gewerkt (08:00 → 10:17, geen pauze) — zelfde uren als het oorspronkelijke voorbeeld. */
 function peterTimeEntry(overrides: Partial<FakeTimeEntry['employee']> = {}) {
@@ -120,7 +125,7 @@ const baseLine = {
     workOrderNumber: 'WB-2026-000123',
     description: 'Onderhoud uitgevoerd.',
     kmAmountCents: null as number | null,
-    project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, assignments: [] },
+    project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, ...NO_PREMIUM },
     timeEntries: [peterTimeEntry()],
   },
 };
@@ -165,7 +170,7 @@ describe('TeamleaderInvoiceService', () => {
   });
 
   it('splitst één werkbon in aparte factuurregels per medewerker, elk met hun eigen tarief', async () => {
-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500 };
     const multiEmployeeLine = {
       ...baseLine,
       workOrder: {
@@ -202,7 +207,7 @@ describe('TeamleaderInvoiceService', () => {
   });
 
   it('gebruikt de eenmalige batch-override wanneer de medewerker geen standaardtarief heeft', async () => {
-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null };
     const line = {
       ...baseLine,
       workOrder: {
@@ -237,7 +242,7 @@ describe('TeamleaderInvoiceService', () => {
   it('laat project_id weg wanneer de batch werkbonnen van verschillende projecten bevat', async () => {
     const otherProjectLine = {
       ...baseLine,
-      workOrder: { ...baseLine.workOrder, project: { id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, assignments: [] } },
+      workOrder: { ...baseLine.workOrder, project: { id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, ...NO_PREMIUM } },
     };
     const { prisma } = createFakePrisma(baseBatch({ lines: [baseLine, otherProjectLine] }), validSettings);
     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
@@ -250,7 +255,7 @@ describe('TeamleaderInvoiceService', () => {
   });
 
   it('weigert wanneer een medewerker op de batch nog geen uurtarief heeft (noch standaard, noch een eenmalige override)', async () => {
-    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null };
     const line = { ...baseLine, workOrder: { ...baseLine.workOrder, timeEntries: [peterTimeEntry(), { timeEntry: { ...peterTimeEntry().timeEntry, employee: zonderTarief } }] } };
     const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
@@ -262,7 +267,7 @@ describe('TeamleaderInvoiceService', () => {
 
   describe('Phase 12, deel A — overuren-/ploegen-/nachttoeslag', () => {
     it('geen enkele toeslag van toepassing (geen ProjectAssignment): exact hetzelfde resultaat als vóór deel A', async () => {
-      const { prisma } = createFakePrisma(baseBatch(), validSettings); // baseLine.workOrder.project.assignments = []
+      const { prisma } = createFakePrisma(baseBatch(), validSettings); // baseLine.workOrder.project = NO_PREMIUM
       const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
       const service = new TeamleaderInvoiceService(prisma, client);
 
@@ -283,7 +288,8 @@ describe('TeamleaderInvoiceService', () => {
           project: {
             ...baseLine.workOrder.project,
             overtimeThresholdType: 'DAILY' as const,
-            assignments: [{ employeeId: peter.id, overtimeApplies: true, premiumType: 'NONE' as const }],
+            overtimeApplies: true,
+            premiumType: 'NONE' as const,
           },
           timeEntries: [
             {
@@ -317,12 +323,12 @@ describe('TeamleaderInvoiceService', () => {
 
     it('WEEKLY-drempel over meerdere werkbonnen heen: acceptatiecriterium uit het ontwerp — 39u normaal + 3u overuren bij nachtwerk (200%)', async () => {
       // Peter werkt 3 dagen van 14u (42u totaal) op een WEEKLY-project met drempel 39u, plus nachtwerktoeslag.
-      const assignments = [{ employeeId: peter.id, overtimeApplies: true, premiumType: 'NIGHT_WORK' as const }];
       const project = {
         ...baseLine.workOrder.project,
         overtimeThresholdType: 'WEEKLY' as const,
         overtimeWeeklyThresholdHours: 39,
-        assignments,
+        overtimeApplies: true,
+        premiumType: 'NIGHT_WORK' as const,
       };
       const dayEntry = (day: string) => ({
         timeEntry: { startedAt: new Date(`2026-08-${day}T06:00:00Z`), endedAt: new Date(`2026-08-${day}T20:00:00Z`), pausedSeconds: 0, employee: peter },

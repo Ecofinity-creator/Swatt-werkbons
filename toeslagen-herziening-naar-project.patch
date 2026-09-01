@@ -1,0 +1,1951 @@
+From ee0b839a6c7566878763522e23e604a4609e6ac6 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 1 Sep 2026 06:57:01 +0000
+Subject: [PATCH] Homescherm-logo + Fase 12-herziening: toeslagen naar Project,
+ apart kostprijs-/verkoopprijstarief per medewerker
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Homescherm (HomePage.tsx)
+- "Technical Support Team"-tekst verwijderd (was op LoginPage al gefixt,
+  maar dit scherm — het eerstvolgende na inloggen — was gemist), klantlogo
+  (Bedrijfsgegevens) toegevoegd naast het Uurivo-icoon.
+
+Fase 12-herziening (toeslagen)
+- Reden: "de medewerker/onderaannemer wordt uitbetaald volgens de afspraken
+  met de klant" — toeslagen (overuren/ploegenwerk/nachtwerk: drempel, of van
+  toepassing, percentages) verhuizen van Employee/ProjectAssignment naar
+  Project, en gelden voortaan UNIFORM voor iedereen die op dat project werkt
+  (geen aparte instelling per medewerker/koppeling meer).
+- Employee krijgt twee aparte, onafhankelijk instelbare uurtarieven:
+  defaultHourlyRateCents (verkoopprijs, facturatie aan de klant, ongewijzigd
+  van betekenis) en het nieuwe payrollRateCents (kostprijs, uitbetaling aan
+  medewerker/onderaannemer). Zelfde toeslagpercentage op beide, andere basis.
+- RateCalculationService: computeRatePercent(project) i.p.v.
+  computeRatePercent(employee, assignment) — vereenvoudigd, geen
+  ProjectAssignment-opzoek meer nodig.
+- TeamleaderInvoiceService: leest toeslagen rechtstreeks van het project.
+- PayrollService: gebruikt payrollRateCents (kostprijs) i.p.v.
+  defaultHourlyRateCents als basis voor uitbetaling.
+- user.routes.ts/schemas.ts: percentages weg, payrollRateCents erbij.
+- project.routes.ts/schemas.ts: overtime-settings-route bevat nu de
+  volledige toeslagregeling; verouderde
+  .../project-assignments/premiums-route verwijderd.
+- Frontend: UserDetailPage.tsx toont "Verkoopprijs"/"Kostprijs" naast elkaar,
+  geen Toeslagen-sectie of per-koppeling-vinkjes meer. ProjectMilestonesPage
+  se OvertimeSettingsPanel uitgebreid met vinkje + radiovakjes + percentages.
+
+Migratie 20260901090000_project_level_premiums is destructief voor de drie
+oude Employee-percentagevelden en de twee ProjectAssignment-velden (geen
+zinvolle 1-op-1-overzetting mogelijk naar "uniform per project" — admin moet
+de toeslagregeling per project opnieuw instellen na deze migratie, nieuwe
+velden starten op veilige defaults: geen toeslag actief, 150/120/150%).
+
+Verificatie: 21 migraties op verse Postgres 16, backend+frontend
+typecheck/lint schoon, 181 tests slagen (dezelfde 16 pre-existente
+mislukkingen als voordien — sandbox-Prisma-stub/Teamleader-env-beperkingen,
+geen regressies), frontend-productiebuild slaagt.
+---
+ .../migration.sql                             |  37 ++++
+ apps/api/prisma/schema.prisma                 |  45 ++--
+ .../src/modules/payroll/payroll.service.ts    |  74 +++----
+ .../src/modules/projects/project.routes.ts    |  87 +++-----
+ .../src/modules/projects/project.schemas.ts   |  29 ++-
+ .../modules/rates/rate-calculation.service.ts |  69 +++---
+ .../teamleader/teamleader-invoice.service.ts  |  29 +--
+ apps/api/src/modules/users/user.routes.ts     |  22 +-
+ apps/api/src/modules/users/user.schemas.ts    |   6 +-
+ apps/api/test/payroll.service.test.ts         |  63 +++---
+ .../api/test/rate-calculation.service.test.ts |  28 ++-
+ .../test/teamleader-invoice.service.test.ts   |  46 ++--
+ apps/web/src/api/client.ts                    |  12 +-
+ apps/web/src/pages/HomePage.tsx               |  23 +-
+ .../src/pages/admin/ProjectMilestonesPage.tsx | 188 ++++++++++++++--
+ apps/web/src/pages/admin/UserDetailPage.tsx   | 203 +++++-------------
+ packages/shared-types/src/index.ts            |  59 +++--
+ 17 files changed, 548 insertions(+), 472 deletions(-)
+ create mode 100644 apps/api/prisma/migrations/20260901090000_project_level_premiums/migration.sql
+
+diff --git a/apps/api/prisma/migrations/20260901090000_project_level_premiums/migration.sql b/apps/api/prisma/migrations/20260901090000_project_level_premiums/migration.sql
+new file mode 100644
+index 0000000..5760243
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260901090000_project_level_premiums/migration.sql
+@@ -0,0 +1,37 @@
++-- Fase 12-herziening: toeslagen (overuren/ploegenwerk/nachtwerk) verhuizen
++-- van Employee/ProjectAssignment naar Project, en gelden voortaan UNIFORM
++-- voor iedereen die op dat project werkt (in plaats van per medewerker/
++-- koppeling instelbaar). Reden: "de medewerker/onderaannemer wordt
++-- uitbetaald volgens de afspraken met de klant" — dat is een project-
++-- afspraak, geen persoonlijke instelling.
++--
++-- Deze migratie is voor deze drie kolommen bewust destructief (DROP COLUMN):
++-- er bestaat geen zinvolle automatische 1-op-1-overzetting van "per
++-- medewerker/koppeling" naar "uniform per project" wanneer meerdere
++-- medewerkers op hetzelfde project potentieel verschillende percentages
++-- hadden staan. Na deze migratie moet een admin de toeslagregeling per
++-- project opnieuw instellen (nieuwe velden starten op de veilige defaults:
++-- geen toeslag actief, 150/120/150%).
++--
++-- Daarnaast: Employee krijgt een nieuw, apart tarief voor uitbetaling
++-- (payroll_rate_cents = kostprijs) naast het bestaande
++-- default_hourly_rate_cents (dat voortaan uitsluitend de verkoopprijs/
++-- facturatie-aan-klant is — ongewijzigd van betekenis, enkel de naam ernaast
++-- verduidelijkt wat het nu exclusief betekent).
++
++ALTER TABLE "employee"
++    DROP COLUMN "overtime_rate_percent",
++    DROP COLUMN "shift_work_rate_percent",
++    DROP COLUMN "night_work_rate_percent",
++    ADD COLUMN "payroll_rate_cents" INTEGER;
++
++ALTER TABLE "project_assignment"
++    DROP COLUMN "overtime_applies",
++    DROP COLUMN "premium_type";
++
++ALTER TABLE "project"
++    ADD COLUMN "overtime_applies" BOOLEAN NOT NULL DEFAULT false,
++    ADD COLUMN "premium_type" "premium_type" NOT NULL DEFAULT 'NONE',
++    ADD COLUMN "overtime_rate_percent" INTEGER NOT NULL DEFAULT 150,
++    ADD COLUMN "shift_work_rate_percent" INTEGER NOT NULL DEFAULT 120,
++    ADD COLUMN "night_work_rate_percent" INTEGER NOT NULL DEFAULT 150;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 1dbf401..2d3b371 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -327,13 +327,17 @@ model Employee {
+   /// hoeven verlaten.
+   defaultHourlyRateCents Int? @map("default_hourly_rate_cents")
+ 
+-  /// Phase 12, deel A (sectie 1): toeslagpercentages — enkel admin-zichtbaar
+-  /// (Medewerkers-instellingen), nooit voor de medewerker zelf of op de
+-  /// werkbon-PDF (business rule 11). Effectief van toepassing enkel wanneer de
+-  /// bijhorende koppeling (ProjectAssignment) dit expliciet aanvinkt/kiest.
+-  overtimeRatePercent  Int @default(150) @map("overtime_rate_percent")
+-  shiftWorkRatePercent Int @default(120) @map("shift_work_rate_percent")
+-  nightWorkRatePercent Int @default(150) @map("night_work_rate_percent")
++  /// Fase 12-herziening (op vraag na de eerste versie van deel A/E):
++  /// `defaultHourlyRateCents` hierboven is de VERKOOPPRIJS (facturatie aan de
++  /// klant, ongewijzigd qua betekenis/gebruik). Dit hier is de KOSTPRIJS —
++  /// wat effectief aan de medewerker/onderaannemer uitbetaald wordt
++  /// (PayrollService). Dit zijn bewust twee aparte bedragen (Swatts marge zit
++  /// in het verschil); de toeslagpercentages (nu op Project, zie
++  /// Project.overtimeRatePercent e.a.) worden wél identiek op beide tarieven
++  /// toegepast, enkel de basis verschilt. `null` tot een admin dit invult —
++  /// PayrollService kan dan nog geen personeelsuitbetaling voor deze
++  /// medewerker afsluiten (zelfde "nog geen tarief"-patroon als hierboven).
++  payrollRateCents Int? @map("payroll_rate_cents")
+ 
+   /// Werknemer vs. Onderaannemer (zie EmploymentType hierboven) — bepaalt
+   /// welk soort document deze persoon krijgt bij de maandelijkse
+@@ -529,12 +533,26 @@ model Project {
+   /// (zie InvoiceBatchService.listInvoiceable()). Instelbaar door ADMIN op het
+   /// backoffice-projectscherm.
+   invoicingEnabled  Boolean                  @default(true) @map("invoicing_enabled")
+-  /// Phase 12, deel A (sectie 1): "Overuren boven 8u/dag" (DAILY, vaste
+-  /// drempel) of "Overuren boven [x]u/week" (WEEKLY, drempel in
++  /// Fase 12-herziening: "Overuren boven 8u/dag" (DAILY, vaste drempel) of
++  /// "Overuren boven [x]u/week" (WEEKLY, drempel in
+   /// overtimeWeeklyThresholdHours — vrij instelbaar getal, bv. 39 of 40).
+-  /// Enkel relevant voor koppelingen met overtimeApplies=true.
++  /// Sinds deze herziening geldt de volledige toeslagregeling (dit +
++  /// onderstaande velden) UNIFORM voor iedereen die op dit project werkt —
++  /// "de medewerker/onderaannemer wordt uitbetaald volgens de afspraken met
++  /// de klant" was de expliciete reden om dit van Employee/ProjectAssignment
++  /// naar hier te verhuizen (geen per-medewerker-uitzondering meer nodig).
+   overtimeThresholdType        OvertimeThresholdType @default(DAILY) @map("overtime_threshold_type")
+   overtimeWeeklyThresholdHours Decimal?              @map("overtime_weekly_threshold_hours") @db.Decimal(4, 2)
++  /// Overuren staat onafhankelijk naast ploegenwerk/nachtwerk (die elkaar
++  /// uitsluiten via premiumType, radiovakjes in de UI).
++  overtimeApplies Boolean     @default(false) @map("overtime_applies")
++  premiumType     PremiumType @default(NONE) @map("premium_type")
++  /// Percentages van het uurtarief — toegepast op zowel Employee.defaultHourlyRateCents
++  /// (facturatie) als Employee.payrollRateCents (uitbetaling): zelfde percentage,
++  /// andere basis. Admin-only zichtbaar (business rule 11).
++  overtimeRatePercent  Int @default(150) @map("overtime_rate_percent")
++  shiftWorkRatePercent Int @default(120) @map("shift_work_rate_percent")
++  nightWorkRatePercent Int @default(150) @map("night_work_rate_percent")
+   /// Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" (default) of
+   /// "Ondertekening per week" (zie WeeklyApproval hieronder).
+   signingMode SigningMode @default(PER_WORK_ORDER) @map("signing_mode")
+@@ -635,13 +653,6 @@ model ProjectAssignment {
+   assignedByUserId String  @map("assigned_by_user_id") @db.Uuid
+   assignedAt      DateTime @default(now()) @map("assigned_at") @db.Timestamptz
+ 
+-  /// Phase 12, deel A (sectie 1): overuren staat onafhankelijk naast
+-  /// ploegenwerk/nachtwerk (die elkaar uitsluiten via premiumType). Erft door
+-  /// naar alle tijdregistraties van deze medewerker op dit project — de
+-  /// medewerker kiest of ziet hier zelf nooit iets van (business rule 11).
+-  overtimeApplies Boolean     @default(false) @map("overtime_applies")
+-  premiumType     PremiumType @default(NONE) @map("premium_type")
+-
+   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+   employee       Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+   assignedByUser User     @relation(fields: [assignedByUserId], references: [id])
+diff --git a/apps/api/src/modules/payroll/payroll.service.ts b/apps/api/src/modules/payroll/payroll.service.ts
+index b01bd91..cc1440e 100644
+--- a/apps/api/src/modules/payroll/payroll.service.ts
++++ b/apps/api/src/modules/payroll/payroll.service.ts
+@@ -10,6 +10,18 @@ import { allocateHoursAcrossEntries, computeRatePercent } from '../rates/rate-ca
+  * voor elke gewerkte, ondertekende uur, ook op een nacalculatie-project
+  * (Phase 12, deel C) zonder klantfactuur.
+  *
++ * Fase 12-herziening: de toeslagregeling (drempel, of overuren van
++ * toepassing is, welke premium, percentages) zit sinds deze herziening
++ * uniform op `Project` (zie rate-calculation.service.ts) — geen
++ * ProjectAssignment-opzoek meer nodig. Daarnaast wordt hier bewust
++ * `Employee.payrollRateCents` (kostprijs/uitbetaling) gebruikt als basis,
++ * NIET `Employee.defaultHourlyRateCents` (verkoopprijs/facturatie aan de
++ * klant, zie teamleader-invoice.service.ts) — dit zijn twee aparte,
++ * onafhankelijk instelbare bedragen (Swatts marge zit in het verschil). Het
++ * toeslagpercentage zelf is wél identiek voor beide, enkel de basis
++ * verschilt — vandaar dat `computeRatePercent()` hier ongewijzigd hergebruikt
++ * wordt.
++ *
+  * "Betaalbaar" = een tijdregistratie die aan een ondertekende werkbon hangt
+  * (`WorkOrderSignature` bestaat — business rule 3: pas dan zijn de uren
+  * definitief) en nog niet in een `PayrollBatchLine` zit (business rule 12).
+@@ -25,27 +37,23 @@ interface PayableTimeEntryRow {
+   employee: {
+     id: string;
+     displayName: string;
+-    defaultHourlyRateCents: number | null;
+-    overtimeRatePercent: number;
+-    shiftWorkRatePercent: number;
+-    nightWorkRatePercent: number;
++    /** Kostprijs — wat effectief aan deze medewerker/onderaannemer uitbetaald wordt. Zie de toelichting bovenaan dit bestand. */
++    payrollRateCents: number | null;
+   };
+   project: {
+     id: string;
+     name: string;
+     overtimeThresholdType: 'DAILY' | 'WEEKLY';
+     overtimeWeeklyThresholdHours: Prisma.Decimal | number | null;
++    overtimeApplies: boolean;
++    premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++    overtimeRatePercent: number;
++    shiftWorkRatePercent: number;
++    nightWorkRatePercent: number;
+   };
+   workOrderLink: { workOrder: { signature: { signedAt: Date } | null } } | null;
+ }
+ 
+-interface ProjectAssignmentRow {
+-  employeeId: string;
+-  projectId: string;
+-  overtimeApplies: boolean;
+-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-}
+-
+ export interface PayableEmployeeSummary {
+   employeeId: string;
+   displayName: string;
+@@ -53,7 +61,7 @@ export interface PayableEmployeeSummary {
+   overtimeHours: number;
+   shiftHours: number;
+   nightHours: number;
+-  /** `null` zolang deze medewerker geen `defaultHourlyRateCents` heeft (zie UserDetailPage) — kan dan wel getoond, maar niet in een batch omgezet worden. */
++  /** `null` zolang deze medewerker geen `payrollRateCents` heeft (zie UserDetailPage) — kan dan wel getoond, maar niet in een batch omgezet worden. */
+   totalAmountCents: number | null;
+ }
+ 
+@@ -98,14 +106,13 @@ export class PayrollService {
+   async listPayableSummary(periodLabel?: string): Promise<PayableEmployeeSummary[]> {
+     const entries = await this.fetchPayableEntries({});
+     const filtered = periodLabel ? entries.filter((entry) => periodLabelOf(this.signedAtOf(entry)) === periodLabel) : entries;
+-    const assignments = await this.fetchAssignmentsFor(Array.from(new Set(filtered.map((entry) => entry.employeeId))));
+ 
+     const perEmployeeEntries = groupBy(filtered, (entry) => entry.employeeId);
+     const summaries: PayableEmployeeSummary[] = [];
+     for (const [employeeId, employeeEntries] of perEmployeeEntries) {
+       const employee = employeeEntries[0]!.employee;
+-      const lines = computeLinesForEmployee(employeeEntries, assignments);
+-      const totalAmountCents = employee.defaultHourlyRateCents === null ? null : lines.reduce((sum, line) => sum + line.amountCents, 0);
++      const lines = computeLinesForEmployee(employeeEntries);
++      const totalAmountCents = employee.payrollRateCents === null ? null : lines.reduce((sum, line) => sum + line.amountCents, 0);
+       summaries.push({
+         employeeId,
+         displayName: employee.displayName,
+@@ -122,8 +129,8 @@ export class PayrollService {
+   /**
+    * Maakt de personeelsuitbetaling effectief aan voor één medewerker/periode
+    * — herberekent op dit moment (niet op basis van listPayableSummary's
+-   * momentopname) om een race condition met een ondertussen gewijzigde
+-   * koppeling/tarief te vermijden, en valideert vóór aanmaak vs. de
++   * momentopname) om een race condition met een ondertussen gewijzigd
++   * project-toeslag/tarief te vermijden, en valideert vóór aanmaak vs. de
+    * unique-constraint-backstop (zelfde P2002-patroon als InvoiceBatchService).
+    */
+   async createBatch(employeeId: string, periodLabel: string, createdByUserId: string): Promise<PayrollBatchRecord> {
+@@ -133,12 +140,11 @@ export class PayrollService {
+     }
+ 
+     const employee = entries[0]!.employee;
+-    if (employee.defaultHourlyRateCents === null) {
++    if (employee.payrollRateCents === null) {
+       throw PayrollErrors.employeeHourlyRateNotSet(employee.displayName);
+     }
+ 
+-    const assignments = await this.fetchAssignmentsFor([employeeId]);
+-    const lines = computeLinesForEmployee(entries, assignments);
++    const lines = computeLinesForEmployee(entries);
+     const totalAmountCents = lines.reduce((sum, line) => sum + line.amountCents, 0);
+ 
+     try {
+@@ -212,14 +218,6 @@ export class PayrollService {
+     })) as unknown as PayableTimeEntryRow[];
+   }
+ 
+-  private async fetchAssignmentsFor(employeeIds: string[]): Promise<ProjectAssignmentRow[]> {
+-    if (employeeIds.length === 0) return [];
+-    return (await this.prisma.projectAssignment.findMany({
+-      where: { employeeId: { in: employeeIds } },
+-      select: { employeeId: true, projectId: true, overtimeApplies: true, premiumType: true },
+-    })) as ProjectAssignmentRow[];
+-  }
+-
+   private signedAtOf(entry: PayableTimeEntryRow): Date {
+     // Kan in de praktijk niet ontbreken — de where-clausule in fetchPayableEntries
+     // sluit entries zonder handtekening al uit — defensief niet-null hier.
+@@ -243,24 +241,18 @@ interface ComputedLine {
+  * (allocateHoursAcrossEntries — dit is precies waarom deel E een aparte
+  * functie nodig had t.o.v. de per-batch-aggregatie in
+  * teamleader-invoice.service.ts, die geen regel-per-brontijdregistratie
+- * hoeft te bewaren), en past per registratie het toeslagpercentage toe.
++ * hoeft te bewaren), en past per registratie het toeslagpercentage toe op de
++ * KOSTPRIJS (employee.payrollRateCents) — niet de verkoopprijs.
+  */
+-function computeLinesForEmployee(entries: PayableTimeEntryRow[], assignments: ProjectAssignmentRow[]): ComputedLine[] {
+-  const assignmentByProjectId = new Map(assignments.map((a) => [a.projectId, a]));
++function computeLinesForEmployee(entries: PayableTimeEntryRow[]): ComputedLine[] {
+   const entriesByProject = groupBy(entries, (entry) => entry.projectId);
+ 
+   const lines: ComputedLine[] = [];
+   for (const [, projectEntries] of entriesByProject) {
+     const project = projectEntries[0]!.project;
+     const employee = projectEntries[0]!.employee;
+-    const assignment: ProjectAssignmentRow = assignmentByProjectId.get(project.id) ?? {
+-      employeeId: employee.id,
+-      projectId: project.id,
+-      overtimeApplies: false,
+-      premiumType: 'NONE',
+-    };
+-    const { normalPercent, overtimePercent } = computeRatePercent(employee, assignment);
+-    const baseRateCents = employee.defaultHourlyRateCents ?? 0;
++    const { normalPercent, overtimePercent } = computeRatePercent(project);
++    const baseRateCents = employee.payrollRateCents ?? 0;
+ 
+     const periodKeyOf = (entry: PayableTimeEntryRow) =>
+       project.overtimeThresholdType === 'DAILY' ? dayKeyOf(entry.startedAt) : isoWeekKeyOf(entry.startedAt);
+@@ -269,7 +261,7 @@ function computeLinesForEmployee(entries: PayableTimeEntryRow[], assignments: Pr
+     for (const [, periodEntries] of entriesByPeriod) {
+       const sorted = [...periodEntries].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+       const hoursById = sorted.map((entry) => ({ id: entry.id, hours: computeWorkedSeconds(entry) / 3600 }));
+-      const split = assignment.overtimeApplies
++      const split = project.overtimeApplies
+         ? allocateHoursAcrossEntries(hoursById, {
+             overtimeThresholdType: project.overtimeThresholdType,
+             overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours === null ? null : Number(project.overtimeWeeklyThresholdHours),
+@@ -284,7 +276,7 @@ function computeLinesForEmployee(entries: PayableTimeEntryRow[], assignments: Pr
+           projectName: project.name,
+           normalHours: round2(normalHours),
+           overtimeHours: round2(overtimeHours),
+-          premiumType: assignment.premiumType,
++          premiumType: project.premiumType,
+           amountCents,
+         });
+       }
+diff --git a/apps/api/src/modules/projects/project.routes.ts b/apps/api/src/modules/projects/project.routes.ts
+index 6595d2d..40f23c8 100644
+--- a/apps/api/src/modules/projects/project.routes.ts
++++ b/apps/api/src/modules/projects/project.routes.ts
+@@ -6,8 +6,6 @@ import type {
+   ProjectSummary,
+   SelectProjectMilestoneBody,
+   SelectProjectMilestoneResponseBody,
+-  UpdateProjectAssignmentPremiumsBody,
+-  UpdateProjectAssignmentPremiumsResponseBody,
+   UpdateProjectInvoicingEnabledBody,
+   UpdateProjectInvoicingEnabledResponseBody,
+   UpdateProjectOvertimeSettingsResponseBody,
+@@ -23,7 +21,6 @@ import {
+   projectAssignmentBodySchema,
+   projectIdParamsSchema,
+   selectProjectMilestoneBodySchema,
+-  updateProjectAssignmentPremiumsBodySchema,
+   updateProjectInvoicingEnabledBodySchema,
+   updateProjectOvertimeSettingsBodySchema,
+   updateProjectSigningModeBodySchema,
+@@ -117,16 +114,12 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
+ 
+       const assignments = await app.prisma.projectAssignment.findMany({
+         where: { employeeId: params.employeeId },
+-        select: { projectId: true, overtimeApplies: true, premiumType: true },
++        select: { projectId: true },
+       });
+-      return {
+-        projectIds: assignments.map((assignment: { projectId: string }) => assignment.projectId),
+-        assignments: assignments.map((assignment: { projectId: string; overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }) => ({
+-          projectId: assignment.projectId,
+-          overtimeApplies: assignment.overtimeApplies,
+-          premiumType: assignment.premiumType,
+-        })),
+-      };
++      // Fase 12-herziening: geen toeslaginfo meer per koppeling (die zit nu
++      // uniform op Project, zie de overtime-settings-route) — enkel nog de
++      // simpele lijst van gekoppelde project-ID's voor de checklist-UI.
++      return { projectIds: assignments.map((assignment: { projectId: string }) => assignment.projectId) };
+     },
+   );
+ 
+@@ -240,11 +233,15 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
+   );
+ 
+   /**
+-   * Phase 12, deel A (sectie 1): overurendrempel per project — "Overuren
+-   * boven 8u/dag" of "Overuren boven [x]u/week". Bewust ADMIN-only, net als
+-   * de facturatie-instelling hierboven: dit is een instelling met directe
+-   * financiële impact op zowel klantfactuur (TeamleaderInvoiceService) als
+-   * personeelsuitbetaling (Phase 12, deel E, nog te bouwen).
++   * Fase 12-herziening: overurendrempel + volledige toeslagregeling per
++   * project — "Overuren boven 8u/dag" of "Overuren boven [x]u/week", of
++   * overuren/ploegenwerk/nachtwerk van toepassing is, en de percentages
++   * zelf. Bewust ADMIN-only: financiële impact op zowel klantfactuur
++   * (TeamleaderInvoiceService) als personeelsuitbetaling (Phase 12, deel E).
++   * Geldt sinds deze herziening UNIFORM voor iedereen die op dit project
++   * werkt — geen aparte instelling per koppeling meer (zie de verwijderde
++   * .../project-assignments/premiums-route, ProjectAssignment.overtimeApplies/
++   * premiumType bestaan niet meer).
+    */
+   app.post(
+     '/admin/projects/:id/overtime-settings',
+@@ -262,46 +259,21 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
+           // opgeslagen getal nodig) — voorkomt een verouderd weekgetal dat na
+           // een latere terugschakeling naar WEEKLY stilzwijgend zou herleven.
+           overtimeWeeklyThresholdHours: body.overtimeThresholdType === 'WEEKLY' ? (body.overtimeWeeklyThresholdHours ?? null) : null,
++          overtimeApplies: body.overtimeApplies,
++          premiumType: body.premiumType,
++          overtimeRatePercent: body.overtimeRatePercent,
++          shiftWorkRatePercent: body.shiftWorkRatePercent,
++          nightWorkRatePercent: body.nightWorkRatePercent,
+         },
+       });
+       return {
+         overtimeThresholdType: project.overtimeThresholdType,
+         overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours ? Number(project.overtimeWeeklyThresholdHours) : null,
+-      };
+-    },
+-  );
+-
+-  /**
+-   * Phase 12, deel A: de toeslaginstelling van één koppeling medewerker↔project
+-   * (overtimeApplies + premiumType). Bewust SUPERVISOR+ — zelfde rechtenniveau
+-   * als de koppeling zelf (POST .../project-assignments hierboven), niet
+-   * ADMIN-only zoals de twee routes hierboven: dit raakt geen tarieven of
+-   * percentages zelf (die blijven op Employee, enkel ADMIN-instelbaar via
+-   * user.routes.ts), enkel *of* een toeslag van toepassing is op déze
+-   * koppeling.
+-   */
+-  app.post(
+-    '/admin/employees/:employeeId/project-assignments/premiums',
+-    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+-    async (request): Promise<UpdateProjectAssignmentPremiumsResponseBody> => {
+-      const params = employeeIdParamsSchema.parse(request.params);
+-      const body: UpdateProjectAssignmentPremiumsBody = updateProjectAssignmentPremiumsBodySchema.parse(request.body);
+-      await assertEmployeeExists(app, params.employeeId);
+-      await assertProjectExists(app, body.projectId);
+-
+-      const existing = await app.prisma.projectAssignment.findUnique({
+-        where: { projectId_employeeId: { projectId: body.projectId, employeeId: params.employeeId } },
+-      });
+-      if (!existing) {
+-        throw ProjectErrors.notFound();
+-      }
+-
+-      const assignment = await app.prisma.projectAssignment.update({
+-        where: { projectId_employeeId: { projectId: body.projectId, employeeId: params.employeeId } },
+-        data: { overtimeApplies: body.overtimeApplies, premiumType: body.premiumType },
+-      });
+-      return {
+-        assignment: { projectId: assignment.projectId, overtimeApplies: assignment.overtimeApplies, premiumType: assignment.premiumType },
++        overtimeApplies: project.overtimeApplies,
++        premiumType: project.premiumType,
++        overtimeRatePercent: project.overtimeRatePercent,
++        shiftWorkRatePercent: project.shiftWorkRatePercent,
++        nightWorkRatePercent: project.nightWorkRatePercent,
+       };
+     },
+   );
+@@ -375,6 +347,12 @@ function toProjectSummary(project: {
+   invoicingEnabled: boolean;
+   overtimeThresholdType: 'DAILY' | 'WEEKLY';
+   overtimeWeeklyThresholdHours: unknown;
++  /** Fase 12-herziening: toeslagregeling zit uniform op Project. */
++  overtimeApplies: boolean;
++  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++  overtimeRatePercent: number;
++  shiftWorkRatePercent: number;
++  nightWorkRatePercent: number;
+   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter, `null` zolang nog niet berekend. */
+   kmDistanceOneWayMeters: number | null;
+@@ -396,6 +374,11 @@ function toProjectSummary(project: {
+     // 40), geen geldbedrag, dus een gewone JS-number is hier veilig genoeg
+     // (in tegenstelling tot centbedragen elders, die altijd Int blijven).
+     overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours === null ? null : Number(project.overtimeWeeklyThresholdHours),
++    overtimeApplies: project.overtimeApplies,
++    premiumType: project.premiumType,
++    overtimeRatePercent: project.overtimeRatePercent,
++    shiftWorkRatePercent: project.shiftWorkRatePercent,
++    nightWorkRatePercent: project.nightWorkRatePercent,
+     signingMode: project.signingMode,
+     kmDistanceOneWayMeters: project.kmDistanceOneWayMeters,
+   };
+diff --git a/apps/api/src/modules/projects/project.schemas.ts b/apps/api/src/modules/projects/project.schemas.ts
+index 5b0074b..81b6f89 100644
+--- a/apps/api/src/modules/projects/project.schemas.ts
++++ b/apps/api/src/modules/projects/project.schemas.ts
+@@ -27,27 +27,24 @@ export const updateProjectInvoicingEnabledBodySchema = z.object({
+ });
+ 
+ /**
+- * Phase 12, deel A (sectie 1): overuren staat onafhankelijk naast
+- * ploegenwerk/nachtwerk (die elkaar uitsluiten via premiumType, radiovakjes
+- * in de UI — zie ProjectAssignment.premiumType in schema.prisma).
+- */
+-export const updateProjectAssignmentPremiumsBodySchema = z.object({
+-  projectId: z.string().uuid(),
+-  overtimeApplies: z.boolean(),
+-  premiumType: z.enum(['NONE', 'SHIFT_WORK', 'NIGHT_WORK']),
+-});
+-
+-/**
+- * Phase 12, deel A: "Overuren boven 8u/dag" (DAILY, geen invoerveld nodig) of
+- * "Overuren boven [x]u/week" (WEEKLY, drempel verplicht). `superRefine`
+- * dwingt af dat de drempel effectief ingevuld is bij WEEKLY — een lege
+- * drempel zou stilzwijgend terugvallen op de default (39) in
+- * rate-calculation.service.ts, wat verwarrend zou zijn op het scherm zelf.
++ * Fase 12-herziening: overurendrempel + volledige toeslagregeling per
++ * project — "Overuren boven 8u/dag" (DAILY, geen invoerveld nodig) of
++ * "Overuren boven [x]u/week" (WEEKLY, drempel verplicht), plus of overuren
++ * van toepassing is, welke premium (ploegenwerk/nachtwerk sluiten elkaar uit
++ * via premiumType, radiovakjes in de UI), en de drie percentages zelf.
++ * `superRefine` dwingt af dat de weekdrempel effectief ingevuld is bij
++ * WEEKLY — een lege drempel zou stilzwijgend terugvallen op de default (39)
++ * in rate-calculation.service.ts, wat verwarrend zou zijn op het scherm zelf.
+  */
+ export const updateProjectOvertimeSettingsBodySchema = z
+   .object({
+     overtimeThresholdType: z.enum(['DAILY', 'WEEKLY']),
+     overtimeWeeklyThresholdHours: z.number().positive().max(80).nullable().optional(),
++    overtimeApplies: z.boolean(),
++    premiumType: z.enum(['NONE', 'SHIFT_WORK', 'NIGHT_WORK']),
++    overtimeRatePercent: z.number().int().min(100).max(500),
++    shiftWorkRatePercent: z.number().int().min(100).max(500),
++    nightWorkRatePercent: z.number().int().min(100).max(500),
+   })
+   .superRefine((value, ctx) => {
+     if (value.overtimeThresholdType === 'WEEKLY' && (value.overtimeWeeklyThresholdHours === undefined || value.overtimeWeeklyThresholdHours === null)) {
+diff --git a/apps/api/src/modules/rates/rate-calculation.service.ts b/apps/api/src/modules/rates/rate-calculation.service.ts
+index f55a35a..70e7b67 100644
+--- a/apps/api/src/modules/rates/rate-calculation.service.ts
++++ b/apps/api/src/modules/rates/rate-calculation.service.ts
+@@ -4,37 +4,43 @@
+  * Prisma-afhankelijkheid, geen class-state) zodat dit zonder database
+  * unit-testbaar is — zelfde patroon als rbac.middleware.ts.
+  *
++ * Fase 12-herziening: de volledige toeslagregeling (drempel, of overuren van
++ * toepassing is, welke premium, en de percentages zelf) zit sinds deze
++ * herziening uniform op `Project` — niet meer verspreid over
++ * Employee/ProjectAssignment. Reden: "de medewerker/onderaannemer wordt
++ * uitbetaald volgens de afspraken met de klant", dus dit is een
++ * project-/klantafspraak, geen persoonlijke instelling. Elke medewerker die
++ * op een project werkt, valt automatisch onder dezelfde regeling.
++ *
+  * Twee onafhankelijke berekeningen:
+  * 1. `splitEffectiveHours()` — hoeveel van een blok gewerkte uren (al
+  *    samengeteld per dag of per week, naargelang Project.overtimeThresholdType)
+  *    normale uren zijn, en hoeveel overuren.
+- * 2. `computeRatePercent()` — welk percentage van het basistarief van een
+- *    medewerker van toepassing is op resp. de normale uren en de overuren van
+- *    een gegeven ProjectAssignment (toeslagen tellen op boven 100%, ze worden
+- *    nooit vermenigvuldigd — zie de toelichting in het ontwerpdocument).
++ * 2. `computeRatePercent()` — welk percentage van het basistarief van
++ *    toepassing is op resp. de normale uren en de overuren van een project
++ *    (toeslagen tellen op boven 100%, ze worden nooit vermenigvuldigd — zie
++ *    de toelichting in het ontwerpdocument). Dit percentage wordt door de
++ *    aanroeper toegepast op zowel `Employee.defaultHourlyRateCents`
++ *    (facturatie aan de klant) als `Employee.payrollRateCents` (uitbetaling)
++ *    — zelfde percentage, andere basis.
+  *
+- * Belangrijk: ploegenwerk/nachtwerk geldt op ALLE uren van een koppeling
+- * (het is geen overurendrempel-gebonden toeslag), overuren enkel op het deel
++ * Belangrijk: ploegenwerk/nachtwerk geldt op ALLE uren van een project (het
++ * is geen overurendrempel-gebonden toeslag), overuren enkel op het deel
+  * boven de drempel. Vandaar twee aparte percentages in het resultaat.
+  */
+ 
+ const DAILY_THRESHOLD_HOURS = 8;
+ 
+-export interface EmployeeRatePercentages {
+-  overtimeRatePercent: number;
+-  shiftWorkRatePercent: number;
+-  nightWorkRatePercent: number;
+-}
+-
+-export interface ProjectAssignmentPremiumSettings {
+-  overtimeApplies: boolean;
+-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-}
+-
+-export interface ProjectOvertimeSettings {
++/** Alle toeslaginstellingen van één project — samen gebruikt door beide berekeningen hieronder. */
++export interface ProjectPremiumSettings {
+   overtimeThresholdType: 'DAILY' | 'WEEKLY';
+   /** Enkel relevant/ingevuld bij WEEKLY — vrij instelbaar getal (bv. 39 of 40). */
+   overtimeWeeklyThresholdHours: number | null;
++  overtimeApplies: boolean;
++  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++  overtimeRatePercent: number;
++  shiftWorkRatePercent: number;
++  nightWorkRatePercent: number;
+ }
+ 
+ export interface EffectiveHoursSplit {
+@@ -66,7 +72,7 @@ export interface RatePercentSplit {
+  */
+ export function allocateHoursAcrossEntries(
+   entries: Array<{ id: string; hours: number }>,
+-  project: ProjectOvertimeSettings,
++  project: Pick<ProjectPremiumSettings, 'overtimeThresholdType' | 'overtimeWeeklyThresholdHours'>,
+ ): Map<string, EffectiveHoursSplit> {
+   const threshold =
+     project.overtimeThresholdType === 'DAILY' ? DAILY_THRESHOLD_HOURS : (project.overtimeWeeklyThresholdHours ?? 39);
+@@ -88,10 +94,13 @@ export function allocateHoursAcrossEntries(
+  * bij WEEKLY — de aanroeper telt dit vooraf op, deze functie kent geen datums)
+  * in normale uren en overuren op basis van de projectdrempel. Geeft altijd
+  * `{ normalHours: totalHours, overtimeHours: 0 }` terug wanneer overuren niet
+- * van toepassing is op de koppeling — de aanroeper roept deze functie dus
+- * enkel aan voor koppelingen met `overtimeApplies = true`.
++ * van toepassing is op het project — de aanroeper roept deze functie dus
++ * enkel aan wanneer `project.overtimeApplies === true`.
+  */
+-export function splitEffectiveHours(totalHours: number, project: ProjectOvertimeSettings): EffectiveHoursSplit {
++export function splitEffectiveHours(
++  totalHours: number,
++  project: Pick<ProjectPremiumSettings, 'overtimeThresholdType' | 'overtimeWeeklyThresholdHours'>,
++): EffectiveHoursSplit {
+   const threshold =
+     project.overtimeThresholdType === 'DAILY' ? DAILY_THRESHOLD_HOURS : (project.overtimeWeeklyThresholdHours ?? 39);
+ 
+@@ -105,19 +114,21 @@ export function splitEffectiveHours(totalHours: number, project: ProjectOvertime
+  * Toeslagpercentages tellen op boven de 100% basis, nooit vermenigvuldigd —
+  * bv. overuren (150% = +50%) + nachtwerk (150% = +50%) → 200%; overuren
+  * (150% = +50%) + ploegenwerk (120% = +20%) → 170%. Ploegenwerk/nachtwerk telt
+- * mee op zowel de normale uren als de overuren van deze koppeling (het is een
++ * mee op zowel de normale uren als de overuren van dit project (het is een
+  * "hoe/wanneer werd er gewerkt"-toeslag, geen overurendrempel-toeslag).
+  */
+-export function computeRatePercent(employee: EmployeeRatePercentages, assignment: ProjectAssignmentPremiumSettings): RatePercentSplit {
++export function computeRatePercent(
++  project: Pick<ProjectPremiumSettings, 'overtimeApplies' | 'premiumType' | 'overtimeRatePercent' | 'shiftWorkRatePercent' | 'nightWorkRatePercent'>,
++): RatePercentSplit {
+   const premiumSurcharge =
+-    assignment.premiumType === 'SHIFT_WORK'
+-      ? employee.shiftWorkRatePercent - 100
+-      : assignment.premiumType === 'NIGHT_WORK'
+-        ? employee.nightWorkRatePercent - 100
++    project.premiumType === 'SHIFT_WORK'
++      ? project.shiftWorkRatePercent - 100
++      : project.premiumType === 'NIGHT_WORK'
++        ? project.nightWorkRatePercent - 100
+         : 0;
+ 
+   const normalPercent = 100 + premiumSurcharge;
+-  const overtimeSurcharge = assignment.overtimeApplies ? employee.overtimeRatePercent - 100 : 0;
++  const overtimeSurcharge = project.overtimeApplies ? project.overtimeRatePercent - 100 : 0;
+   const overtimePercent = normalPercent + overtimeSurcharge;
+ 
+   return { normalPercent, overtimePercent };
+diff --git a/apps/api/src/modules/teamleader/teamleader-invoice.service.ts b/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
+index d8e38e8..b38db0a 100644
+--- a/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
++++ b/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
+@@ -16,7 +16,7 @@ const WITH_DRAFT_DETAILS = {
+       include: {
+         workOrder: {
+           include: {
+-            project: { include: { assignments: true } },
++            project: true,
+             timeEntries: { include: { timeEntry: { include: { employee: true } } } },
+           },
+         },
+@@ -26,13 +26,6 @@ const WITH_DRAFT_DETAILS = {
+   },
+ } as const;
+ 
+-/** Fase 12, deel A: enkel de velden van een ProjectAssignment die de rekenlogica nodig heeft. */
+-interface ProjectAssignmentRow {
+-  employeeId: string;
+-  overtimeApplies: boolean;
+-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-}
+-
+ /** Handgeschreven vorm van de query hierboven — zelfde reden als elders in deze codebase (stale gegenereerde Prisma-client in de sandbox, zie invoice-batch.service.ts). */
+ interface DraftBatchLineRow {
+   invoiceableSeconds: number;
+@@ -47,7 +40,12 @@ interface DraftBatchLineRow {
+       teamleaderId: string;
+       overtimeThresholdType: 'DAILY' | 'WEEKLY';
+       overtimeWeeklyThresholdHours: number | null;
+-      assignments: ProjectAssignmentRow[];
++      /** Fase 12-herziening: toeslagregeling zit nu volledig en uniform op Project, niet meer per ProjectAssignment. */
++      overtimeApplies: boolean;
++      premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++      overtimeRatePercent: number;
++      shiftWorkRatePercent: number;
++      nightWorkRatePercent: number;
+     };
+     timeEntries: Array<{
+       timeEntry: {
+@@ -58,9 +56,6 @@ interface DraftBatchLineRow {
+           id: string;
+           displayName: string;
+           defaultHourlyRateCents: number | null;
+-          overtimeRatePercent: number;
+-          shiftWorkRatePercent: number;
+-          nightWorkRatePercent: number;
+         };
+       };
+     }>;
+@@ -313,17 +308,11 @@ function buildLineItemsForBatch(
+   }
+ 
+   return Array.from(bucketsByEmployeeProject.values()).flatMap((bucket) => {
+-    const assignment: ProjectAssignmentRow = bucket.project.assignments.find((a) => a.employeeId === bucket.employeeId) ?? {
+-      employeeId: bucket.employeeId,
+-      overtimeApplies: false,
+-      premiumType: 'NONE',
+-    };
+-
+     let normalHours = 0;
+     let overtimeHours = 0;
+     for (const seconds of bucket.secondsByPeriod.values()) {
+       const totalHours = seconds / 3600;
+-      if (assignment.overtimeApplies) {
++      if (bucket.project.overtimeApplies) {
+         const split = splitEffectiveHours(totalHours, {
+           overtimeThresholdType: bucket.project.overtimeThresholdType,
+           overtimeWeeklyThresholdHours: bucket.project.overtimeWeeklyThresholdHours,
+@@ -338,7 +327,7 @@ function buildLineItemsForBatch(
+     overtimeHours = Math.round(overtimeHours * 100) / 100;
+ 
+     const employeeRate = rateByEmployeeId.get(bucket.employeeId)!;
+-    const { normalPercent, overtimePercent } = computeRatePercent(bucket.employee, assignment);
++    const { normalPercent, overtimePercent } = computeRatePercent(bucket.project);
+     const workOrderRefs = Array.from(bucket.workOrderNumbers).sort().join(', ');
+ 
+     const items: Array<{ quantity: number; description: string; unit_price: { amount: number; tax: 'excluding' }; tax_rate_id: string }> = [];
+diff --git a/apps/api/src/modules/users/user.routes.ts b/apps/api/src/modules/users/user.routes.ts
+index 708f476..4a82501 100644
+--- a/apps/api/src/modules/users/user.routes.ts
++++ b/apps/api/src/modules/users/user.routes.ts
+@@ -142,9 +142,7 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+         body.displayName !== undefined ||
+         body.phone !== undefined ||
+         body.defaultHourlyRateCents !== undefined ||
+-        body.overtimeRatePercent !== undefined ||
+-        body.shiftWorkRatePercent !== undefined ||
+-        body.nightWorkRatePercent !== undefined ||
++        body.payrollRateCents !== undefined ||
+         body.employmentType !== undefined
+       ) {
+         if (!existing.employee) {
+@@ -157,11 +155,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+           data: {
+             ...(body.displayName !== undefined ? { displayName: body.displayName } : {}),
+             ...(body.phone !== undefined ? { phone: body.phone } : {}),
++            // Fase 12-herziening: defaultHourlyRateCents = verkoopprijs (facturatie
++            // aan de klant), payrollRateCents = kostprijs (uitbetaling). Twee
++            // aparte, onafhankelijk instelbare bedragen — zie de toelichting bij
++            // Employee.payrollRateCents in schema.prisma. Toeslagpercentages
++            // zitten sinds deze herziening uniform op Project, niet meer hier.
+             ...(body.defaultHourlyRateCents !== undefined ? { defaultHourlyRateCents: body.defaultHourlyRateCents } : {}),
+-            // Phase 12, deel A (sectie 1) — enkel hier (admin-only route) instelbaar.
+-            ...(body.overtimeRatePercent !== undefined ? { overtimeRatePercent: body.overtimeRatePercent } : {}),
+-            ...(body.shiftWorkRatePercent !== undefined ? { shiftWorkRatePercent: body.shiftWorkRatePercent } : {}),
+-            ...(body.nightWorkRatePercent !== undefined ? { nightWorkRatePercent: body.nightWorkRatePercent } : {}),
++            ...(body.payrollRateCents !== undefined ? { payrollRateCents: body.payrollRateCents } : {}),
+             ...(body.employmentType !== undefined ? { employmentType: body.employmentType } : {}),
+           },
+         });
+@@ -300,9 +300,7 @@ function toAdminUserSummary(user: {
+     displayName: string;
+     phone: string | null;
+     defaultHourlyRateCents: number | null;
+-    overtimeRatePercent: number;
+-    shiftWorkRatePercent: number;
+-    nightWorkRatePercent: number;
++    payrollRateCents: number | null;
+     employmentType: EmploymentType;
+   } | null;
+ }): AdminUserSummary {
+@@ -317,9 +315,7 @@ function toAdminUserSummary(user: {
+           displayName: user.employee.displayName,
+           phone: user.employee.phone,
+           defaultHourlyRateCents: user.employee.defaultHourlyRateCents,
+-          overtimeRatePercent: user.employee.overtimeRatePercent,
+-          shiftWorkRatePercent: user.employee.shiftWorkRatePercent,
+-          nightWorkRatePercent: user.employee.nightWorkRatePercent,
++          payrollRateCents: user.employee.payrollRateCents,
+           employmentType: user.employee.employmentType,
+         }
+       : null,
+diff --git a/apps/api/src/modules/users/user.schemas.ts b/apps/api/src/modules/users/user.schemas.ts
+index 0898c44..da3bf02 100644
+--- a/apps/api/src/modules/users/user.schemas.ts
++++ b/apps/api/src/modules/users/user.schemas.ts
+@@ -23,10 +23,8 @@ export const updateUserBodySchema = z.object({
+   teamleaderUserId: z.string().trim().min(1).nullable().optional(),
+   /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), zie Employee.defaultHourlyRateCents. `null` wist het weer. */
+   defaultHourlyRateCents: z.number().int().positive().nullable().optional(),
+-  /** Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only, nooit zichtbaar voor de medewerker zelf (business rule 11). */
+-  overtimeRatePercent: z.number().int().min(100).max(500).optional(),
+-  shiftWorkRatePercent: z.number().int().min(100).max(500).optional(),
+-  nightWorkRatePercent: z.number().int().min(100).max(500).optional(),
++  /** Fase 12-herziening: kostprijs — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (in eurocent), zie Employee.payrollRateCents. `null` wist het weer. Los van defaultHourlyRateCents hierboven (verkoopprijs). */
++  payrollRateCents: z.number().int().positive().nullable().optional(),
+   /** Werknemer vs. Onderaannemer (backlog-item 30/8), zie Employee.employmentType. */
+   employmentType: employmentTypeSchema.optional(),
+ });
+diff --git a/apps/api/test/payroll.service.test.ts b/apps/api/test/payroll.service.test.ts
+index c61ebdc..a525266 100644
+--- a/apps/api/test/payroll.service.test.ts
++++ b/apps/api/test/payroll.service.test.ts
+@@ -10,15 +10,17 @@ import { PayrollService } from '../src/modules/payroll/payroll.service';
+  * tijdregistratie mag maar één keer uitbetaald worden") realistisch getest
+  * wordt — aanmaken van een batch maakt de tijdregistratie meteen onbeschikbaar
+  * voor een volgende listPayableSummary()/createBatch().
++ *
++ * Fase 12-herziening: toeslagen zitten nu uniform op FakeProject (geen
++ * FakeAssignment/projectAssignment-opzoek meer), en het gebruikte basistarief
++ * is `payrollRateCents` (kostprijs) i.p.v. `defaultHourlyRateCents`
++ * (verkoopprijs, blijft enkel relevant voor de klantfactuur).
+  */
+ 
+ interface FakeEmployee {
+   id: string;
+   displayName: string;
+-  defaultHourlyRateCents: number | null;
+-  overtimeRatePercent: number;
+-  shiftWorkRatePercent: number;
+-  nightWorkRatePercent: number;
++  payrollRateCents: number | null;
+ }
+ 
+ interface FakeProject {
+@@ -26,13 +28,11 @@ interface FakeProject {
+   name: string;
+   overtimeThresholdType: 'DAILY' | 'WEEKLY';
+   overtimeWeeklyThresholdHours: number | null;
+-}
+-
+-interface FakeAssignment {
+-  employeeId: string;
+-  projectId: string;
+   overtimeApplies: boolean;
+   premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++  overtimeRatePercent: number;
++  shiftWorkRatePercent: number;
++  nightWorkRatePercent: number;
+ }
+ 
+ interface FakeTimeEntry {
+@@ -45,8 +45,8 @@ interface FakeTimeEntry {
+   signed: boolean; // vervangt workOrderLink.workOrder.signature — enkel signed=true is "betaalbaar"
+ }
+ 
+-function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProject[]; assignments: FakeAssignment[]; entries: FakeTimeEntry[] }) {
+-  const { employees, projects, assignments, entries } = opts;
++function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProject[]; entries: FakeTimeEntry[] }) {
++  const { employees, projects, entries } = opts;
+   const batches = new Map<string, { id: string; employeeId: string; periodLabel: string; status: string; totalAmountCents: number; createdByUserId: string; createdAt: Date; closedAt: Date | null }>();
+   const lines = new Map<string, { id: string; payrollBatchId: string; timeEntryId: string; normalHours: number; overtimeHours: number; premiumType: string; amountCents: number }>();
+   let nextId = 1;
+@@ -93,10 +93,6 @@ function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProje
+           }));
+       },
+     },
+-    projectAssignment: {
+-      findMany: async ({ where }: { where: { employeeId: { in: string[] } } }) =>
+-        assignments.filter((a) => where.employeeId.in.includes(a.employeeId)),
+-    },
+     payrollBatch: {
+       create: async ({ data }: { data: { employeeId: string; periodLabel: string; createdByUserId: string; totalAmountCents: number; lines: { create: Array<{ timeEntryId: string; normalHours: number; overtimeHours: number; premiumType: string; amountCents: number }> } } }) => {
+         const paid = paidTimeEntryIds();
+@@ -142,9 +138,10 @@ function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProje
+   return { prisma: prisma as unknown as PrismaClient };
+ }
+ 
+-const peter: FakeEmployee = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+-const projectNormal: FakeProject = { id: 'proj-normal', name: 'Onderhoud HVAC (gefactureerd)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null };
+-const projectNacalc: FakeProject = { id: 'proj-nacalc', name: 'Interne renovatie (nacalculatie)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null };
++const peter: FakeEmployee = { id: 'emp-peter', displayName: 'Peter Janssens', payrollRateCents: 6500 };
++const NO_PREMIUM = { overtimeApplies: false, premiumType: 'NONE' as const, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
++const projectNormal: FakeProject = { id: 'proj-normal', name: 'Onderhoud HVAC (gefactureerd)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null, ...NO_PREMIUM };
++const projectNacalc: FakeProject = { id: 'proj-nacalc', name: 'Interne renovatie (nacalculatie)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null, ...NO_PREMIUM };
+ 
+ describe('PayrollService', () => {
+   it('listPayableSummary() telt uren van een gewoon EN een nacalculatie-project even hard mee', async () => {
+@@ -152,7 +149,7 @@ describe('PayrollService', () => {
+       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
+       { id: 'te-2', employeeId: peter.id, projectId: projectNacalc.id, startedAt: new Date('2026-08-11T08:00:00Z'), endedAt: new Date('2026-08-11T10:00:00Z'), pausedSeconds: 0, signed: true },
+     ];
+-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal, projectNacalc], assignments: [], entries });
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal, projectNacalc], entries });
+     const service = new PayrollService(prisma);
+ 
+     const summary = await service.listPayableSummary('2026-08');
+@@ -162,11 +159,11 @@ describe('PayrollService', () => {
+   });
+ 
+   it('splitst overuren correct binnen één DAILY-project (9u30 → 8u normaal + 1u30 overuren)', async () => {
+-    const assignments: FakeAssignment[] = [{ employeeId: peter.id, projectId: projectNormal.id, overtimeApplies: true, premiumType: 'NONE' }];
++    const project: FakeProject = { ...projectNormal, overtimeApplies: true, premiumType: 'NONE' };
+     const entries: FakeTimeEntry[] = [
+-      { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T07:00:00Z'), endedAt: new Date('2026-08-10T16:30:00Z'), pausedSeconds: 0, signed: true },
++      { id: 'te-1', employeeId: peter.id, projectId: project.id, startedAt: new Date('2026-08-10T07:00:00Z'), endedAt: new Date('2026-08-10T16:30:00Z'), pausedSeconds: 0, signed: true },
+     ];
+-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments, entries });
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [project], entries });
+     const service = new PayrollService(prisma);
+ 
+     const summary = await service.listPayableSummary('2026-08');
+@@ -179,11 +176,11 @@ describe('PayrollService', () => {
+   });
+ 
+   it('createBatch(): het bedrag komt overeen met wat voor dezelfde uren aan de klant zou worden aangerekend (nachtwerk+overuren = 200%)', async () => {
+-    const assignments: FakeAssignment[] = [{ employeeId: peter.id, projectId: projectNormal.id, overtimeApplies: true, premiumType: 'NIGHT_WORK' }];
++    const project: FakeProject = { ...projectNormal, overtimeApplies: true, premiumType: 'NIGHT_WORK' };
+     const entries: FakeTimeEntry[] = [
+-      { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T06:00:00Z'), endedAt: new Date('2026-08-10T16:00:00Z'), pausedSeconds: 0, signed: true }, // 10u
++      { id: 'te-1', employeeId: peter.id, projectId: project.id, startedAt: new Date('2026-08-10T06:00:00Z'), endedAt: new Date('2026-08-10T16:00:00Z'), pausedSeconds: 0, signed: true }, // 10u
+     ];
+-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments, entries });
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [project], entries });
+     const service = new PayrollService(prisma);
+ 
+     const batch = await service.createBatch(peter.id, '2026-08', 'user-admin');
+@@ -191,14 +188,14 @@ describe('PayrollService', () => {
+     // 8u @150% (nachtwerk) + 2u @200% (nachtwerk+overuren) = 8*6500*1.5 + 2*6500*2.0
+     expect(batch.totalAmountCents).toBe(Math.round(8 * 6500 * 1.5 + 2 * 6500 * 2.0));
+     expect(batch.lines).toHaveLength(1);
+-    expect(batch.lines[0]?.projectName).toBe(projectNormal.name);
++    expect(batch.lines[0]?.projectName).toBe(project.name);
+   });
+ 
+   it('business rule 12: dezelfde tijdregistratie kan niet tweemaal uitbetaald worden', async () => {
+     const entries: FakeTimeEntry[] = [
+       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
+     ];
+-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries });
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
+     const service = new PayrollService(prisma);
+ 
+     await service.createBatch(peter.id, '2026-08', 'user-admin');
+@@ -212,19 +209,19 @@ describe('PayrollService', () => {
+     await expect(service.createBatch(peter.id, '2026-08', 'user-admin')).rejects.toMatchObject({ code: 'PAYROLL_BATCH_NO_TIME_ENTRIES' });
+   });
+ 
+-  it('weigert createBatch() zonder ingesteld uurtarief', async () => {
+-    const zonderTarief: FakeEmployee = { ...peter, id: 'emp-zonder', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null };
++  it('weigert createBatch() zonder ingesteld uitbetalingstarief (payrollRateCents)', async () => {
++    const zonderTarief: FakeEmployee = { ...peter, id: 'emp-zonder', displayName: 'Steven Zonder Tarief', payrollRateCents: null };
+     const entries: FakeTimeEntry[] = [
+       { id: 'te-1', employeeId: zonderTarief.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
+     ];
+-    const { prisma } = createFakePrisma({ employees: [zonderTarief], projects: [projectNormal], assignments: [], entries });
++    const { prisma } = createFakePrisma({ employees: [zonderTarief], projects: [projectNormal], entries });
+     const service = new PayrollService(prisma);
+ 
+     await expect(service.createBatch(zonderTarief.id, '2026-08', 'user-admin')).rejects.toMatchObject({ code: 'PAYROLL_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET' });
+   });
+ 
+   it('weigert createBatch() zonder betaalbare uren in de gekozen periode', async () => {
+-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries: [] });
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries: [] });
+     const service = new PayrollService(prisma);
+ 
+     await expect(service.createBatch(peter.id, '2026-08', 'user-admin')).rejects.toMatchObject({ code: 'PAYROLL_BATCH_NO_TIME_ENTRIES' });
+@@ -234,7 +231,7 @@ describe('PayrollService', () => {
+     const entries: FakeTimeEntry[] = [
+       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
+     ];
+-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries });
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
+     const service = new PayrollService(prisma);
+ 
+     const batch = await service.createBatch(peter.id, '2026-08', 'user-admin');
+@@ -248,7 +245,7 @@ describe('PayrollService', () => {
+     const entries: FakeTimeEntry[] = [
+       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: false },
+     ];
+-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries });
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
+     const service = new PayrollService(prisma);
+ 
+     expect(await service.listPayableSummary('2026-08')).toHaveLength(0);
+diff --git a/apps/api/test/rate-calculation.service.test.ts b/apps/api/test/rate-calculation.service.test.ts
+index 2b89917..6d8cce6 100644
+--- a/apps/api/test/rate-calculation.service.test.ts
++++ b/apps/api/test/rate-calculation.service.test.ts
+@@ -1,8 +1,6 @@
+ import { describe, expect, it } from 'vitest';
+ import { allocateHoursAcrossEntries, computeRatePercent, splitEffectiveHours } from '../src/modules/rates/rate-calculation.service';
+ 
+-const EMPLOYEE = { overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+-
+ describe('splitEffectiveHours()', () => {
+   it('DAILY: exact op de grens (8u) levert geen overuren op', () => {
+     expect(splitEffectiveHours(8, { overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null })).toEqual({
+@@ -101,45 +99,53 @@ describe('allocateHoursAcrossEntries() — Phase 12, deel E', () => {
+   });
+ });
+ 
+-describe('computeRatePercent()', () => {
++describe('computeRatePercent() — Fase 12-herziening: alles op Project, uniform per project', () => {
++  const BASE = { overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
++
+   it('geen enkele toeslag van toepassing: 100% op alles', () => {
+-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: false, premiumType: 'NONE' })).toEqual({
++    expect(computeRatePercent({ ...BASE, overtimeApplies: false, premiumType: 'NONE' })).toEqual({
+       normalPercent: 100,
+       overtimePercent: 100,
+     });
+   });
+ 
+   it('enkel overuren van toepassing: normale uren 100%, overuren 150%', () => {
+-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: true, premiumType: 'NONE' })).toEqual({
++    expect(computeRatePercent({ ...BASE, overtimeApplies: true, premiumType: 'NONE' })).toEqual({
+       normalPercent: 100,
+       overtimePercent: 150,
+     });
+   });
+ 
+   it('enkel ploegenwerk: geldt op zowel normale uren als overuren (er zijn hier geen overuren)', () => {
+-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: false, premiumType: 'SHIFT_WORK' })).toEqual({
++    expect(computeRatePercent({ ...BASE, overtimeApplies: false, premiumType: 'SHIFT_WORK' })).toEqual({
+       normalPercent: 120,
+       overtimePercent: 120,
+     });
+   });
+ 
+   it('overuren + nachtwerk combineren: opgeteld boven 100%, niet vermenigvuldigd (100+50+50=200%)', () => {
+-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: true, premiumType: 'NIGHT_WORK' })).toEqual({
++    expect(computeRatePercent({ ...BASE, overtimeApplies: true, premiumType: 'NIGHT_WORK' })).toEqual({
+       normalPercent: 150,
+       overtimePercent: 200,
+     });
+   });
+ 
+   it('overuren + ploegenwerk combineren (100+50+20=170%)', () => {
+-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: true, premiumType: 'SHIFT_WORK' })).toEqual({
++    expect(computeRatePercent({ ...BASE, overtimeApplies: true, premiumType: 'SHIFT_WORK' })).toEqual({
+       normalPercent: 120,
+       overtimePercent: 170,
+     });
+   });
+ 
+-  it('respecteert de individuele percentages van de medewerker, niet enkel de defaults', () => {
+-    const customEmployee = { overtimeRatePercent: 200, shiftWorkRatePercent: 110, nightWorkRatePercent: 175 };
+-    expect(computeRatePercent(customEmployee, { overtimeApplies: true, premiumType: 'NIGHT_WORK' })).toEqual({
++  it('respecteert de individuele percentages van het project, niet enkel de defaults', () => {
++    const customProject = { overtimeRatePercent: 200, shiftWorkRatePercent: 110, nightWorkRatePercent: 175 };
++    expect(
++      computeRatePercent({
++        overtimeApplies: true,
++        premiumType: 'NIGHT_WORK',
++        ...customProject,
++      }),
++    ).toEqual({
+       normalPercent: 175,
+       overtimePercent: 275,
+     });
+diff --git a/apps/api/test/teamleader-invoice.service.test.ts b/apps/api/test/teamleader-invoice.service.test.ts
+index 3de1c9d..9ac1abd 100644
+--- a/apps/api/test/teamleader-invoice.service.test.ts
++++ b/apps/api/test/teamleader-invoice.service.test.ts
+@@ -28,18 +28,9 @@ interface FakeTimeEntry {
+     id: string;
+     displayName: string;
+     defaultHourlyRateCents: number | null;
+-    overtimeRatePercent: number;
+-    shiftWorkRatePercent: number;
+-    nightWorkRatePercent: number;
+   };
+ }
+ 
+-interface FakeProjectAssignment {
+-  employeeId: string;
+-  overtimeApplies: boolean;
+-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-}
+-
+ interface FakeBatch {
+   id: string;
+   status: string;
+@@ -60,7 +51,12 @@ interface FakeBatch {
+         teamleaderId: string;
+         overtimeThresholdType: 'DAILY' | 'WEEKLY';
+         overtimeWeeklyThresholdHours: number | null;
+-        assignments: FakeProjectAssignment[];
++        /** Fase 12-herziening: toeslagregeling zit nu uniform op Project, niet meer per ProjectAssignment/Employee. */
++        overtimeApplies: boolean;
++        premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++        overtimeRatePercent: number;
++        shiftWorkRatePercent: number;
++        nightWorkRatePercent: number;
+       };
+       timeEntries: Array<{ timeEntry: FakeTimeEntry }>;
+     };
+@@ -100,7 +96,16 @@ const validSettings: FakeConnectionSettings = {
+   invoicePaymentTermDays: 0,
+ }
+ 
+-const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
++const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 };
++
++/** Fase 12-herziening: default toeslagregeling van een project — geen toeslag actief, standaardpercentages. */
++const NO_PREMIUM = {
++  overtimeApplies: false,
++  premiumType: 'NONE' as const,
++  overtimeRatePercent: 150,
++  shiftWorkRatePercent: 120,
++  nightWorkRatePercent: 150,
++};
+ 
+ /** 2u17 gewerkt (08:00 → 10:17, geen pauze) — zelfde uren als het oorspronkelijke voorbeeld. */
+ function peterTimeEntry(overrides: Partial<FakeTimeEntry['employee']> = {}) {
+@@ -120,7 +125,7 @@ const baseLine = {
+     workOrderNumber: 'WB-2026-000123',
+     description: 'Onderhoud uitgevoerd.',
+     kmAmountCents: null as number | null,
+-    project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, assignments: [] },
++    project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, ...NO_PREMIUM },
+     timeEntries: [peterTimeEntry()],
+   },
+ };
+@@ -165,7 +170,7 @@ describe('TeamleaderInvoiceService', () => {
+   });
+ 
+   it('splitst één werkbon in aparte factuurregels per medewerker, elk met hun eigen tarief', async () => {
+-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
++    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500 };
+     const multiEmployeeLine = {
+       ...baseLine,
+       workOrder: {
+@@ -202,7 +207,7 @@ describe('TeamleaderInvoiceService', () => {
+   });
+ 
+   it('gebruikt de eenmalige batch-override wanneer de medewerker geen standaardtarief heeft', async () => {
+-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
++    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null };
+     const line = {
+       ...baseLine,
+       workOrder: {
+@@ -237,7 +242,7 @@ describe('TeamleaderInvoiceService', () => {
+   it('laat project_id weg wanneer de batch werkbonnen van verschillende projecten bevat', async () => {
+     const otherProjectLine = {
+       ...baseLine,
+-      workOrder: { ...baseLine.workOrder, project: { id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, assignments: [] } },
++      workOrder: { ...baseLine.workOrder, project: { id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, ...NO_PREMIUM } },
+     };
+     const { prisma } = createFakePrisma(baseBatch({ lines: [baseLine, otherProjectLine] }), validSettings);
+     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+@@ -250,7 +255,7 @@ describe('TeamleaderInvoiceService', () => {
+   });
+ 
+   it('weigert wanneer een medewerker op de batch nog geen uurtarief heeft (noch standaard, noch een eenmalige override)', async () => {
+-    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
++    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null };
+     const line = { ...baseLine, workOrder: { ...baseLine.workOrder, timeEntries: [peterTimeEntry(), { timeEntry: { ...peterTimeEntry().timeEntry, employee: zonderTarief } }] } };
+     const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+@@ -262,7 +267,7 @@ describe('TeamleaderInvoiceService', () => {
+ 
+   describe('Phase 12, deel A — overuren-/ploegen-/nachttoeslag', () => {
+     it('geen enkele toeslag van toepassing (geen ProjectAssignment): exact hetzelfde resultaat als vóór deel A', async () => {
+-      const { prisma } = createFakePrisma(baseBatch(), validSettings); // baseLine.workOrder.project.assignments = []
++      const { prisma } = createFakePrisma(baseBatch(), validSettings); // baseLine.workOrder.project = NO_PREMIUM
+       const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+       const service = new TeamleaderInvoiceService(prisma, client);
+ 
+@@ -283,7 +288,8 @@ describe('TeamleaderInvoiceService', () => {
+           project: {
+             ...baseLine.workOrder.project,
+             overtimeThresholdType: 'DAILY' as const,
+-            assignments: [{ employeeId: peter.id, overtimeApplies: true, premiumType: 'NONE' as const }],
++            overtimeApplies: true,
++            premiumType: 'NONE' as const,
+           },
+           timeEntries: [
+             {
+@@ -317,12 +323,12 @@ describe('TeamleaderInvoiceService', () => {
+ 
+     it('WEEKLY-drempel over meerdere werkbonnen heen: acceptatiecriterium uit het ontwerp — 39u normaal + 3u overuren bij nachtwerk (200%)', async () => {
+       // Peter werkt 3 dagen van 14u (42u totaal) op een WEEKLY-project met drempel 39u, plus nachtwerktoeslag.
+-      const assignments = [{ employeeId: peter.id, overtimeApplies: true, premiumType: 'NIGHT_WORK' as const }];
+       const project = {
+         ...baseLine.workOrder.project,
+         overtimeThresholdType: 'WEEKLY' as const,
+         overtimeWeeklyThresholdHours: 39,
+-        assignments,
++        overtimeApplies: true,
++        premiumType: 'NIGHT_WORK' as const,
+       };
+       const dayEntry = (day: string) => ({
+         timeEntry: { startedAt: new Date(`2026-08-${day}T06:00:00Z`), endedAt: new Date(`2026-08-${day}T20:00:00Z`), pausedSeconds: 0, employee: peter },
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index c119a9f..37cf0cf 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -31,8 +31,8 @@ import type {
+   ResendInviteResponseBody,
+   RetryWorkOrderSyncResponseBody,
+   SelectProjectMilestoneResponseBody,
+-  UpdateProjectAssignmentPremiumsResponseBody,
+   UpdateProjectInvoicingEnabledResponseBody,
++  UpdateProjectOvertimeSettingsBody,
+   UpdateProjectOvertimeSettingsResponseBody,
+   UpdateProjectSigningModeResponseBody,
+   SignWorkOrderBody,
+@@ -438,12 +438,6 @@ export const projectsApi = {
+         method: 'POST',
+         body: JSON.stringify({ projectId }),
+       }),
+-    /** Phase 12, deel A (sectie 1) — overuren/ploegenwerk/nachtwerk voor deze specifieke koppeling. SUPERVISOR+. */
+-    updatePremiums: (employeeId: string, projectId: string, overtimeApplies: boolean, premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK') =>
+-      request<UpdateProjectAssignmentPremiumsResponseBody>(`/admin/employees/${employeeId}/project-assignments/premiums`, {
+-        method: 'POST',
+-        body: JSON.stringify({ projectId, overtimeApplies, premiumType }),
+-      }),
+   },
+   /**
+    * Phase 9 — de "flexibele" milestone-strategie (zie MilestoneSyncService):
+@@ -469,10 +463,10 @@ export const projectsApi = {
+   },
+   /** Phase 12, deel A (sectie 1) — "Overuren boven 8u/dag" of "Overuren boven [x]u/week". ADMIN-only. */
+   overtimeSettings: {
+-    update: (projectId: string, overtimeThresholdType: 'DAILY' | 'WEEKLY', overtimeWeeklyThresholdHours: number | null) =>
++    update: (projectId: string, body: UpdateProjectOvertimeSettingsBody) =>
+       request<UpdateProjectOvertimeSettingsResponseBody>(`/admin/projects/${projectId}/overtime-settings`, {
+         method: 'POST',
+-        body: JSON.stringify({ overtimeThresholdType, overtimeWeeklyThresholdHours }),
++        body: JSON.stringify(body),
+       }),
+   },
+   /** Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" of "Ondertekening per week". ADMIN-only. */
+diff --git a/apps/web/src/pages/HomePage.tsx b/apps/web/src/pages/HomePage.tsx
+index 4f0823b..9ec4a86 100644
+--- a/apps/web/src/pages/HomePage.tsx
++++ b/apps/web/src/pages/HomePage.tsx
+@@ -1,5 +1,6 @@
+-import { useState } from 'react';
++import { useEffect, useState } from 'react';
+ import { Link } from 'react-router-dom';
++import { publicBrandingApi } from '../api/client';
+ import { ApiRequestError, useAuth } from '../auth/AuthContext';
+ import { Logo } from '../components/Logo';
+ import { ROLE_LABELS } from '../constants';
+@@ -13,6 +14,18 @@ export function HomePage() {
+   const { user, logout } = useAuth();
+   const [isLoggingOut, setIsLoggingOut] = useState(false);
+   const [logoutError, setLogoutError] = useState<string | null>(null);
++  // Sectie 21/33 — klantlogo (Bedrijfsgegevens) i.p.v. de eerder generieke
++  // "Technical Support Team"-tekst, zelfde publieke route als LoginPage.tsx
++  // (werkt voor élke rol, niet enkel ADMIN — company-settings.routes.ts zelf
++  // blijft ADMIN-only).
++  const [branding, setBranding] = useState<{ companyName: string; logoDataUrl: string | null } | null>(null);
++
++  useEffect(() => {
++    publicBrandingApi
++      .get()
++      .then(setBranding)
++      .catch(() => setBranding(null));
++  }, []);
+ 
+   if (!user) return null;
+ 
+@@ -33,11 +46,11 @@ export function HomePage() {
+ 
+   return (
+     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
+-      <header className="mb-8 flex flex-col gap-2">
++      <header className="mb-8 flex items-center gap-3">
+         <Logo size="md" />
+-        <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">
+-          Technical Support Team
+-        </p>
++        {branding?.logoDataUrl && (
++          <img src={branding.logoDataUrl} alt={branding.companyName} className="h-8 w-auto object-contain" />
++        )}
+       </header>
+ 
+       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+diff --git a/apps/web/src/pages/admin/ProjectMilestonesPage.tsx b/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
+index 09fb0d2..46ca66b 100644
+--- a/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
++++ b/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
+@@ -186,32 +186,77 @@ function InvoicingPanel({ project, onUpdated }: { project: ProjectSummary; onUpd
+  * hierboven: financiële impact op zowel klantfactuur als
+  * personeelsuitbetaling (Phase 12, deel E).
+  */
++/**
++ * Fase 12-herziening: volledige toeslagregeling per project — drempel
++ * ("Overuren boven 8u/dag" of "Overuren boven [x]u/week"), of
++ * overuren/ploegenwerk/nachtwerk van toepassing is, en de percentages zelf.
++ * Geldt sinds deze herziening UNIFORM voor iedereen die op dit project werkt
++ * — "de medewerker/onderaannemer wordt uitbetaald volgens de afspraken met
++ * de klant" was de expliciete reden om dit hier te consolideren i.p.v.
++ * verspreid over Employee/ProjectAssignment (zie RateCalculationService).
++ */
+ function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
+   const { user: currentUser } = useAuth();
+   const isAdmin = currentUser?.role === 'ADMIN';
++  const [thresholdType, setThresholdType] = useState<'DAILY' | 'WEEKLY'>(project.overtimeThresholdType);
+   const [weeklyHoursInput, setWeeklyHoursInput] = useState(String(project.overtimeWeeklyThresholdHours ?? 39));
++  const [overtimeApplies, setOvertimeApplies] = useState(project.overtimeApplies);
++  const [premiumType, setPremiumType] = useState(project.premiumType);
++  const [overtimeRateInput, setOvertimeRateInput] = useState(String(project.overtimeRatePercent));
++  const [shiftWorkRateInput, setShiftWorkRateInput] = useState(String(project.shiftWorkRatePercent));
++  const [nightWorkRateInput, setNightWorkRateInput] = useState(String(project.nightWorkRatePercent));
+   const [isSaving, setIsSaving] = useState(false);
+   const [error, setError] = useState<string | null>(null);
+ 
+   useEffect(() => {
++    setThresholdType(project.overtimeThresholdType);
+     setWeeklyHoursInput(String(project.overtimeWeeklyThresholdHours ?? 39));
+-  }, [project.overtimeWeeklyThresholdHours]);
++    setOvertimeApplies(project.overtimeApplies);
++    setPremiumType(project.premiumType);
++    setOvertimeRateInput(String(project.overtimeRatePercent));
++    setShiftWorkRateInput(String(project.shiftWorkRatePercent));
++    setNightWorkRateInput(String(project.nightWorkRatePercent));
++  }, [project]);
++
++  async function save(overrides: Partial<{ thresholdType: 'DAILY' | 'WEEKLY'; overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }> = {}) {
++    const effectiveThresholdType = overrides.thresholdType ?? thresholdType;
++    const effectiveOvertimeApplies = overrides.overtimeApplies ?? overtimeApplies;
++    const effectivePremiumType = overrides.premiumType ?? premiumType;
++
++    const parsePercent = (value: string) => {
++      const n = Number(value.trim());
++      return Number.isInteger(n) && n >= 100 && n <= 500 ? n : null;
++    };
++    const overtimeRatePercent = parsePercent(overtimeRateInput);
++    const shiftWorkRatePercent = parsePercent(shiftWorkRateInput);
++    const nightWorkRatePercent = parsePercent(nightWorkRateInput);
++    if (overtimeRatePercent === null || shiftWorkRatePercent === null || nightWorkRatePercent === null) {
++      setError('Vul voor elk percentage een geheel getal tussen 100 en 500 in.');
++      return;
++    }
++
++    let overtimeWeeklyThresholdHours: number | null = null;
++    if (effectiveThresholdType === 'WEEKLY') {
++      const hours = Number(weeklyHoursInput.trim().replace(',', '.'));
++      if (!Number.isFinite(hours) || hours <= 0) {
++        setError('Vul een geldig aantal uren per week in (bv. 39).');
++        return;
++      }
++      overtimeWeeklyThresholdHours = hours;
++    }
+ 
+-  async function handleChange(thresholdType: 'DAILY' | 'WEEKLY') {
+     setIsSaving(true);
+     setError(null);
+     try {
+-      if (thresholdType === 'DAILY') {
+-        await projectsApi.overtimeSettings.update(project.id, 'DAILY', null);
+-      } else {
+-        const hours = Number(weeklyHoursInput.trim().replace(',', '.'));
+-        if (!Number.isFinite(hours) || hours <= 0) {
+-          setError('Vul een geldig aantal uren per week in (bv. 39).');
+-          setIsSaving(false);
+-          return;
+-        }
+-        await projectsApi.overtimeSettings.update(project.id, 'WEEKLY', hours);
+-      }
++      await projectsApi.overtimeSettings.update(project.id, {
++        overtimeThresholdType: effectiveThresholdType,
++        overtimeWeeklyThresholdHours,
++        overtimeApplies: effectiveOvertimeApplies,
++        premiumType: effectivePremiumType,
++        overtimeRatePercent,
++        shiftWorkRatePercent,
++        nightWorkRatePercent,
++      });
+       onUpdated();
+     } catch (err) {
+       setError(err instanceof ApiRequestError ? err.message : 'Opslaan van de overurenregeling is mislukt.');
+@@ -224,21 +269,41 @@ function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary
+ 
+   return (
+     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+-      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Overurenregeling</h2>
++      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Toeslagen &amp; overurenregeling</h2>
+       <p className="mb-4 text-sm text-neutral-500">
+-        {project.customerName} — {project.name}
++        {project.customerName} — {project.name}. Geldt voor iedereen die op dit project werkt (afspraak met de klant),
++        geen aparte instelling per medewerker.
+       </p>
+ 
+       {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+ 
+-      <div className="flex flex-col gap-2 text-sm">
++      <div className="mb-4 flex items-center gap-2">
++        <label className="flex items-center gap-1.5 text-sm">
++          <input
++            type="checkbox"
++            checked={overtimeApplies}
++            disabled={isSaving}
++            onChange={(e) => {
++              setOvertimeApplies(e.target.checked);
++              void save({ overtimeApplies: e.target.checked });
++            }}
++            className="h-4 w-4 accent-swatt-gold"
++          />
++          Overuren van toepassing
++        </label>
++      </div>
++
++      <div className="mb-4 flex flex-col gap-2 text-sm">
+         <label className="flex items-center gap-2">
+           <input
+             type="radio"
+             name={`overtime-threshold-${project.id}`}
+-            checked={project.overtimeThresholdType === 'DAILY'}
++            checked={thresholdType === 'DAILY'}
+             disabled={isSaving}
+-            onChange={() => void handleChange('DAILY')}
++            onChange={() => {
++              setThresholdType('DAILY');
++              void save({ thresholdType: 'DAILY' });
++            }}
+             className="h-4 w-4 accent-swatt-gold"
+           />
+           Overuren boven 8u/dag
+@@ -247,9 +312,12 @@ function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary
+           <input
+             type="radio"
+             name={`overtime-threshold-${project.id}`}
+-            checked={project.overtimeThresholdType === 'WEEKLY'}
++            checked={thresholdType === 'WEEKLY'}
+             disabled={isSaving}
+-            onChange={() => void handleChange('WEEKLY')}
++            onChange={() => {
++              setThresholdType('WEEKLY');
++              void save({ thresholdType: 'WEEKLY' });
++            }}
+             className="h-4 w-4 accent-swatt-gold"
+           />
+           Overuren boven
+@@ -258,13 +326,89 @@ function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary
+             inputMode="decimal"
+             value={weeklyHoursInput}
+             onChange={(e) => setWeeklyHoursInput(e.target.value)}
+-            onBlur={() => project.overtimeThresholdType === 'WEEKLY' && void handleChange('WEEKLY')}
+-            disabled={isSaving || project.overtimeThresholdType !== 'WEEKLY'}
++            onBlur={() => thresholdType === 'WEEKLY' && void save()}
++            disabled={isSaving || thresholdType !== 'WEEKLY'}
+             className="w-16 rounded-lg border border-neutral-300 bg-white px-2 py-1 text-sm outline-none focus:border-swatt-gold disabled:bg-neutral-100"
+           />
+           u/week
+         </label>
+       </div>
++
++      <div className="mb-4 flex flex-col gap-2 text-sm">
++        <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Ploegenwerk / nachtwerk (sluiten elkaar uit)</p>
++        {(['NONE', 'SHIFT_WORK', 'NIGHT_WORK'] as const).map((option) => (
++          <label key={option} className="flex items-center gap-2">
++            <input
++              type="radio"
++              name={`premium-type-${project.id}`}
++              checked={premiumType === option}
++              disabled={isSaving}
++              onChange={() => {
++                setPremiumType(option);
++                void save({ premiumType: option });
++              }}
++              className="h-4 w-4 accent-swatt-gold"
++            />
++            {option === 'NONE' ? 'Geen toeslag' : option === 'SHIFT_WORK' ? 'Ploegenwerk' : 'Nachtwerk'}
++          </label>
++        ))}
++      </div>
++
++      <div className="flex flex-wrap items-end gap-4">
++        <label className="text-sm text-neutral-600">
++          Overuren
++          <div className="mt-1 flex items-center gap-1">
++            <input
++              type="text"
++              inputMode="numeric"
++              value={overtimeRateInput}
++              onChange={(e) => setOvertimeRateInput(e.target.value)}
++              onBlur={() => void save()}
++              disabled={isSaving}
++              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++            />
++            <span>%</span>
++          </div>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Ploegenwerk
++          <div className="mt-1 flex items-center gap-1">
++            <input
++              type="text"
++              inputMode="numeric"
++              value={shiftWorkRateInput}
++              onChange={(e) => setShiftWorkRateInput(e.target.value)}
++              onBlur={() => void save()}
++              disabled={isSaving}
++              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++            />
++            <span>%</span>
++          </div>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Nachtwerk
++          <div className="mt-1 flex items-center gap-1">
++            <input
++              type="text"
++              inputMode="numeric"
++              value={nightWorkRateInput}
++              onChange={(e) => setNightWorkRateInput(e.target.value)}
++              onBlur={() => void save()}
++              disabled={isSaving}
++              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++            />
++            <span>%</span>
++          </div>
++        </label>
++        <button
++          type="button"
++          onClick={() => void save()}
++          disabled={isSaving}
++          className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
++        >
++          {isSaving ? 'Bezig...' : 'Opslaan'}
++        </button>
++      </div>
+     </section>
+   );
+ }
+diff --git a/apps/web/src/pages/admin/UserDetailPage.tsx b/apps/web/src/pages/admin/UserDetailPage.tsx
+index edbd2d1..c6a5b22 100644
+--- a/apps/web/src/pages/admin/UserDetailPage.tsx
++++ b/apps/web/src/pages/admin/UserDetailPage.tsx
+@@ -38,23 +38,16 @@ export function UserDetailPage() {
+   const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
+   const [isSavingTeamleaderLink, setIsSavingTeamleaderLink] = useState(false);
+ 
+-  // Facturatie: standaard uurtarief per medewerker (zie Employee.defaultHourlyRateCents).
++  // Facturatie: standaard uurtarief per medewerker (zie Employee.defaultHourlyRateCents) — VERKOOPPRIJS (klant).
+   const [hourlyRateInputValue, setHourlyRateInputValue] = useState('');
+   const [isSavingHourlyRate, setIsSavingHourlyRate] = useState(false);
+   const [hourlyRateError, setHourlyRateError] = useState<string | null>(null);
+ 
+-  // Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only.
+-  const [overtimeRateInput, setOvertimeRateInput] = useState('150');
+-  const [shiftWorkRateInput, setShiftWorkRateInput] = useState('120');
+-  const [nightWorkRateInput, setNightWorkRateInput] = useState('150');
+-  const [isSavingPremiumRates, setIsSavingPremiumRates] = useState(false);
+-  const [premiumRatesError, setPremiumRatesError] = useState<string | null>(null);
+-
+-  // Phase 12, deel A — toeslaginstelling per koppeling (projectId → instelling).
+-  const [assignmentPremiums, setAssignmentPremiums] = useState<Map<string, { overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }>>(
+-    new Map(),
+-  );
+-  const [pendingPremiumsProjectId, setPendingPremiumsProjectId] = useState<string | null>(null);
++  // Fase 12-herziening: KOSTPRIJS (uitbetaling aan medewerker/onderaannemer),
++  // los van de verkoopprijs hierboven — zie Employee.payrollRateCents.
++  const [payrollRateInputValue, setPayrollRateInputValue] = useState('');
++  const [isSavingPayrollRate, setIsSavingPayrollRate] = useState(false);
++  const [payrollRateError, setPayrollRateError] = useState<string | null>(null);
+ 
+   // Werknemer vs. Onderaannemer (backlog-item 30/8) — bepaalt welk soort
+   // document deze persoon krijgt bij de maandelijkse uren-export (zie
+@@ -77,7 +70,6 @@ export function UserDetailPage() {
+   const loadAssignments = useCallback(async (employeeId: string) => {
+     const response = await projectsApi.assignments.list(employeeId);
+     setAssignedProjectIds(new Set(response.projectIds));
+-    setAssignmentPremiums(new Map(response.assignments.map((a) => [a.projectId, { overtimeApplies: a.overtimeApplies, premiumType: a.premiumType }])));
+   }, []);
+ 
+   useEffect(() => {
+@@ -89,9 +81,9 @@ export function UserDetailPage() {
+       setHourlyRateInputValue(
+         user.employee.defaultHourlyRateCents !== null ? (user.employee.defaultHourlyRateCents / 100).toFixed(2) : '',
+       );
+-      setOvertimeRateInput(String(user.employee.overtimeRatePercent));
+-      setShiftWorkRateInput(String(user.employee.shiftWorkRatePercent));
+-      setNightWorkRateInput(String(user.employee.nightWorkRatePercent));
++      setPayrollRateInputValue(
++        user.employee.payrollRateCents !== null ? (user.employee.payrollRateCents / 100).toFixed(2) : '',
++      );
+     }
+   }, [user?.employee]);
+ 
+@@ -149,48 +141,26 @@ export function UserDetailPage() {
+     }
+   }
+ 
+-  /** Phase 12, deel A (sectie 1) — de drie toeslagpercentages van deze medewerker (admin-only, business rule 11). */
+-  async function savePremiumRates() {
++  /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (los van het facturatietarief hierboven). */
++  async function savePayrollRate() {
+     if (!userId) return;
+-    const parsePercent = (value: string) => {
+-      const n = Number(value.trim());
+-      return Number.isInteger(n) && n >= 100 && n <= 500 ? n : null;
+-    };
+-    const overtimeRatePercent = parsePercent(overtimeRateInput);
+-    const shiftWorkRatePercent = parsePercent(shiftWorkRateInput);
+-    const nightWorkRatePercent = parsePercent(nightWorkRateInput);
+-    if (overtimeRatePercent === null || shiftWorkRatePercent === null || nightWorkRatePercent === null) {
+-      setPremiumRatesError('Vul voor elk percentage een geheel getal tussen 100 en 500 in.');
++    const trimmed = payrollRateInputValue.trim().replace(',', '.');
++    const euros = trimmed === '' ? null : Number(trimmed);
++    if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
++      setPayrollRateError('Vul een geldig bedrag in (bv. 45,00), of laat leeg om het tarief te wissen.');
+       return;
+     }
+-    setIsSavingPremiumRates(true);
+-    setPremiumRatesError(null);
++    setIsSavingPayrollRate(true);
++    setPayrollRateError(null);
+     try {
+-      const response = await usersApi.update(userId, { overtimeRatePercent, shiftWorkRatePercent, nightWorkRatePercent });
++      const response = await usersApi.update(userId, {
++        payrollRateCents: euros === null ? null : Math.round(euros * 100),
++      });
+       setUser(response.user);
+     } catch (err) {
+-      setPremiumRatesError(err instanceof ApiRequestError ? err.message : 'Opslaan van de toeslagpercentages is mislukt.');
+-    } finally {
+-      setIsSavingPremiumRates(false);
+-    }
+-  }
+-
+-  /** Phase 12, deel A — toeslaginstelling van één koppeling (overuren van toepassing + ploegen-/nachtwerk). */
+-  async function updateAssignmentPremiums(projectId: string, patch: Partial<{ overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }>) {
+-    if (!user?.employee) return;
+-    const employeeId = user.employee.id;
+-    const current = assignmentPremiums.get(projectId) ?? { overtimeApplies: false, premiumType: 'NONE' as const };
+-    const next = { ...current, ...patch };
+-
+-    setPendingPremiumsProjectId(projectId);
+-    setAssignmentPremiums((prev) => new Map(prev).set(projectId, next));
+-    try {
+-      await projectsApi.assignments.updatePremiums(employeeId, projectId, next.overtimeApplies, next.premiumType);
+-    } catch (err) {
+-      setAssignmentPremiums((prev) => new Map(prev).set(projectId, current)); // terugzetten bij fout
+-      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Opslaan van de toeslaginstelling is mislukt.');
++      setPayrollRateError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uitbetalingstarief is mislukt.');
+     } finally {
+-      setPendingPremiumsProjectId(null);
++      setIsSavingPayrollRate(false);
+     }
+   }
+ 
+@@ -286,11 +256,6 @@ export function UserDetailPage() {
+     try {
+       if (isAssigned) {
+         await projectsApi.assignments.unassign(employeeId, project.id);
+-        setAssignmentPremiums((prev) => {
+-          const next = new Map(prev);
+-          next.delete(project.id); // koppeling weg → toeslaginstelling heeft geen betekenis meer, DB-rij is cascade-verwijderd
+-          return next;
+-        });
+       } else {
+         await projectsApi.assignments.assign(employeeId, project.id);
+       }
+@@ -410,14 +375,16 @@ export function UserDetailPage() {
+ 
+           {user.employee && (
+             <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+-              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Facturatie</h2>
++              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Uurtarieven</h2>
+               <p className="mb-4 text-sm text-neutral-500">
+-                Standaard uurtarief van {user.employee.displayName} voor conceptfacturen in Teamleader (sectie 17). Nog
+-                niet ingevuld? Dan kan een admin het tarief eenmalig invullen bij het aanmaken van de factuur zelf.
++                Twee aparte bedragen — Swatts marge zit in het verschil. Toeslagen (overuren/ploegenwerk/nachtwerk)
++                worden sinds de herziening per project ingesteld (zie de projectpagina) en gelden met hetzelfde
++                percentage op beide tarieven hieronder.
+               </p>
+-              <div className="flex items-center gap-2">
++
++              <div className="mb-4 flex items-center gap-2">
+                 <label className="flex items-center gap-2 text-sm text-neutral-600">
+-                  €
++                  Verkoopprijs (klant) €
+                   <input
+                     type="text"
+                     inputMode="decimal"
+@@ -437,70 +404,39 @@ export function UserDetailPage() {
+                   {isSavingHourlyRate ? 'Bezig...' : 'Opslaan'}
+                 </button>
+               </div>
+-              {hourlyRateError && <p className="mt-2 text-xs text-red-700">{hourlyRateError}</p>}
+-            </section>
+-          )}
+-
+-          {user.employee && (
+-            <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+-              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Toeslagen</h2>
+-              <p className="mb-4 text-sm text-neutral-500">
+-                Percentages van het uurtarief hierboven. Enkel hier zichtbaar/instelbaar (nooit voor {user.employee.displayName} zelf of op de
+-                werkbon).
++              {hourlyRateError && <p className="mb-4 text-xs text-red-700">{hourlyRateError}</p>}
++              <p className="mb-4 text-xs text-neutral-400">
++                Standaard uurtarief voor conceptfacturen in Teamleader (sectie 17). Nog niet ingevuld? Dan kan een
++                admin het tarief eenmalig invullen bij het aanmaken van de factuur zelf.
+               </p>
+-              <div className="flex flex-wrap items-end gap-4">
+-                <label className="text-sm text-neutral-600">
+-                  Overuren
+-                  <div className="mt-1 flex items-center gap-1">
+-                    <input
+-                      type="text"
+-                      inputMode="numeric"
+-                      value={overtimeRateInput}
+-                      onChange={(e) => setOvertimeRateInput(e.target.value)}
+-                      disabled={isSavingPremiumRates}
+-                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+-                    />
+-                    <span>%</span>
+-                  </div>
+-                </label>
+-                <label className="text-sm text-neutral-600">
+-                  Ploegenwerk
+-                  <div className="mt-1 flex items-center gap-1">
+-                    <input
+-                      type="text"
+-                      inputMode="numeric"
+-                      value={shiftWorkRateInput}
+-                      onChange={(e) => setShiftWorkRateInput(e.target.value)}
+-                      disabled={isSavingPremiumRates}
+-                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+-                    />
+-                    <span>%</span>
+-                  </div>
+-                </label>
+-                <label className="text-sm text-neutral-600">
+-                  Nachtwerk
+-                  <div className="mt-1 flex items-center gap-1">
+-                    <input
+-                      type="text"
+-                      inputMode="numeric"
+-                      value={nightWorkRateInput}
+-                      onChange={(e) => setNightWorkRateInput(e.target.value)}
+-                      disabled={isSavingPremiumRates}
+-                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+-                    />
+-                    <span>%</span>
+-                  </div>
++
++              <div className="flex items-center gap-2">
++                <label className="flex items-center gap-2 text-sm text-neutral-600">
++                  Kostprijs (uitbetaling) €
++                  <input
++                    type="text"
++                    inputMode="decimal"
++                    value={payrollRateInputValue}
++                    onChange={(e) => setPayrollRateInputValue(e.target.value)}
++                    placeholder="45,00"
++                    disabled={isSavingPayrollRate}
++                    className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++                  />
+                 </label>
+                 <button
+                   type="button"
+-                  onClick={() => void savePremiumRates()}
+-                  disabled={isSavingPremiumRates}
++                  onClick={() => void savePayrollRate()}
++                  disabled={isSavingPayrollRate}
+                   className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                 >
+-                  {isSavingPremiumRates ? 'Bezig...' : 'Opslaan'}
++                  {isSavingPayrollRate ? 'Bezig...' : 'Opslaan'}
+                 </button>
+               </div>
+-              {premiumRatesError && <p className="mt-2 text-xs text-red-700">{premiumRatesError}</p>}
++              {payrollRateError && <p className="mt-2 text-xs text-red-700">{payrollRateError}</p>}
++              <p className="mt-2 text-xs text-neutral-400">
++                Wat effectief uitbetaald wordt aan {user.employee.displayName} (Personeelsuitbetaling). Nog niet
++                ingevuld? Dan kan er nog geen uitbetaling voor deze medewerker afgesloten worden.
++              </p>
+             </section>
+           )}
+ 
+@@ -557,8 +493,6 @@ export function UserDetailPage() {
+               <ul className="divide-y divide-neutral-100">
+                 {allProjects?.map((project) => {
+                   const isAssigned = assignedProjectIds.has(project.id);
+-                  const premiums = assignmentPremiums.get(project.id) ?? { overtimeApplies: false, premiumType: 'NONE' as const };
+-                  const isPremiumsPending = pendingPremiumsProjectId === project.id;
+                   return (
+                     <li key={project.id} className="py-2">
+                       <div className="flex items-center gap-3">
+@@ -578,35 +512,6 @@ export function UserDetailPage() {
+                           )}
+                         </label>
+                       </div>
+-
+-                      {/* Phase 12, deel A (sectie 1): toeslaginstelling enkel tonen/bewerkbaar voor een aangevinkte koppeling. */}
+-                      {isAssigned && (
+-                        <div className="mt-2 ml-7 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-neutral-600">
+-                          <label className="flex items-center gap-1.5">
+-                            <input
+-                              type="checkbox"
+-                              checked={premiums.overtimeApplies}
+-                              disabled={isPremiumsPending}
+-                              onChange={(e) => void updateAssignmentPremiums(project.id, { overtimeApplies: e.target.checked })}
+-                              className="h-3.5 w-3.5 accent-swatt-gold"
+-                            />
+-                            Overuren van toepassing
+-                          </label>
+-                          {(['NONE', 'SHIFT_WORK', 'NIGHT_WORK'] as const).map((option) => (
+-                            <label key={option} className="flex items-center gap-1.5">
+-                              <input
+-                                type="radio"
+-                                name={`premium-${project.id}`}
+-                                checked={premiums.premiumType === option}
+-                                disabled={isPremiumsPending}
+-                                onChange={() => void updateAssignmentPremiums(project.id, { premiumType: option })}
+-                                className="h-3.5 w-3.5 accent-swatt-gold"
+-                              />
+-                              {option === 'NONE' ? 'Geen toeslag' : option === 'SHIFT_WORK' ? 'Ploegenwerk' : 'Nachtwerk'}
+-                            </label>
+-                          ))}
+-                        </div>
+-                      )}
+                     </li>
+                   );
+                 })}
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 110e376..7f18b12 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -122,12 +122,10 @@ export interface AdminUserSummary {
+     id: string;
+     displayName: string;
+     phone: string | null;
+-    /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), zie Employee.defaultHourlyRateCents. */
++    /** Facturatie: standaard uurtarief van deze medewerker (in eurocent) — de VERKOOPPRIJS, gebruikt om de klant te factureren, zie Employee.defaultHourlyRateCents. */
+     defaultHourlyRateCents: number | null;
+-    /** Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only (business rule 11). */
+-    overtimeRatePercent: number;
+-    shiftWorkRatePercent: number;
+-    nightWorkRatePercent: number;
++    /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (Phase 12, deel E), zie Employee.payrollRateCents. Los van defaultHourlyRateCents hierboven. */
++    payrollRateCents: number | null;
+     /** Werknemer vs. Onderaannemer, zie EmploymentType. */
+     employmentType: EmploymentType;
+   } | null;
+@@ -170,12 +168,10 @@ export interface UpdateUserBody {
+   isActive?: boolean;
+   displayName?: string;
+   phone?: string | null;
+-  /** Facturatie: standaard uurtarief van deze medewerker (in eurocent), `null` wist het weer. */
++  /** Facturatie: standaard uurtarief van deze medewerker (in eurocent) — VERKOOPPRIJS, `null` wist het weer. */
+   defaultHourlyRateCents?: number | null;
+-  /** Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only. */
+-  overtimeRatePercent?: number;
+-  shiftWorkRatePercent?: number;
+-  nightWorkRatePercent?: number;
++  /** Fase 12-herziening: KOSTPRIJS (uitbetaling), `null` wist het weer. Los van defaultHourlyRateCents hierboven. */
++  payrollRateCents?: number | null;
+   /** Werknemer vs. Onderaannemer, zie EmploymentType. */
+   employmentType?: EmploymentType;
+ }
+@@ -200,6 +196,12 @@ export interface ProjectSummary {
+   /** Phase 12, deel A (sectie 1) — "Overuren boven 8u/dag" (DAILY) of "Overuren boven [x]u/week" (WEEKLY). */
+   overtimeThresholdType: 'DAILY' | 'WEEKLY';
+   overtimeWeeklyThresholdHours: number | null;
++  /** Fase 12-herziening: toeslagregeling zit uniform op Project — geldt voor iedereen die er werkt (geen aparte keuze meer per medewerker/koppeling). */
++  overtimeApplies: boolean;
++  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++  overtimeRatePercent: number;
++  shiftWorkRatePercent: number;
++  nightWorkRatePercent: number;
+   /** Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" (default) of "Ondertekening per week". */
+   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter tussen het Swatt-adres en dit project, `null` zolang nog niet berekend. */
+@@ -219,16 +221,31 @@ export interface UpdateProjectInvoicingEnabledResponseBody {
+   invoicingEnabled: boolean;
+ }
+ 
+-/** Body/response van POST /admin/projects/:id/overtime-settings (Phase 12, deel A — ADMIN-only). */
++/**
++ * Body/response van POST /admin/projects/:id/overtime-settings (Fase
++ * 12-herziening — ADMIN-only). Bevat sinds de herziening de VOLLEDIGE
++ * toeslagregeling van het project (drempel + of overuren/ploegenwerk/
++ * nachtwerk van toepassing is + de percentages), niet meer enkel de drempel.
++ */
+ export interface UpdateProjectOvertimeSettingsBody {
+   overtimeThresholdType: 'DAILY' | 'WEEKLY';
+   /** Verplicht wanneer overtimeThresholdType='WEEKLY', genegeerd bij 'DAILY'. */
+   overtimeWeeklyThresholdHours?: number | null;
++  overtimeApplies: boolean;
++  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++  overtimeRatePercent: number;
++  shiftWorkRatePercent: number;
++  nightWorkRatePercent: number;
+ }
+ 
+ export interface UpdateProjectOvertimeSettingsResponseBody {
+   overtimeThresholdType: 'DAILY' | 'WEEKLY';
+   overtimeWeeklyThresholdHours: number | null;
++  overtimeApplies: boolean;
++  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++  overtimeRatePercent: number;
++  shiftWorkRatePercent: number;
++  nightWorkRatePercent: number;
+ }
+ 
+ /** Body/response van POST /admin/projects/:id/signing-mode (Phase 12, deel B — ADMIN-only). */
+@@ -273,29 +290,9 @@ export interface SignWeekResponseBody {
+   weeklyApproval: WeeklyApprovalSummary;
+ }
+ 
+-/** Phase 12, deel A — de toeslaginstelling van één koppeling medewerker↔project (sectie 4/23). */
+-export interface ProjectAssignmentPremiumsSummary {
+-  projectId: string;
+-  overtimeApplies: boolean;
+-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-}
+-
+-/** Body/response van POST /admin/employees/:employeeId/project-assignments/premiums (Phase 12, deel A — SUPERVISOR+, zelfde rechten als de koppeling zelf). */
+-export interface UpdateProjectAssignmentPremiumsBody {
+-  projectId: string;
+-  overtimeApplies: boolean;
+-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-}
+-
+-export interface UpdateProjectAssignmentPremiumsResponseBody {
+-  assignment: ProjectAssignmentPremiumsSummary;
+-}
+-
+ /** Response van GET /admin/employees/:employeeId/project-assignments. */
+ export interface ListProjectAssignmentsResponseBody {
+   projectIds: string[];
+-  /** Phase 12, deel A — toeslaginstelling per koppeling, additief naast projectIds (die blijft bestaan voor de bestaande checklist-UI). */
+-  assignments: ProjectAssignmentPremiumsSummary[];
+ }
+ 
+ /** Body van POST .../project-assignments en .../project-assignments/remove. */
+-- 
+2.43.0
+

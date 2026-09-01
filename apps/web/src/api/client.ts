@@ -31,8 +31,8 @@ import type {
   ResendInviteResponseBody,
   RetryWorkOrderSyncResponseBody,
   SelectProjectMilestoneResponseBody,
-  UpdateProjectAssignmentPremiumsResponseBody,
   UpdateProjectInvoicingEnabledResponseBody,
+  UpdateProjectOvertimeSettingsBody,
   UpdateProjectOvertimeSettingsResponseBody,
   UpdateProjectSigningModeResponseBody,
   SignWorkOrderBody,
@@ -438,12 +438,6 @@ export const projectsApi = {
         method: 'POST',
         body: JSON.stringify({ projectId }),
       }),
-    /** Phase 12, deel A (sectie 1) — overuren/ploegenwerk/nachtwerk voor deze specifieke koppeling. SUPERVISOR+. */
-    updatePremiums: (employeeId: string, projectId: string, overtimeApplies: boolean, premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK') =>
-      request<UpdateProjectAssignmentPremiumsResponseBody>(`/admin/employees/${employeeId}/project-assignments/premiums`, {
-        method: 'POST',
-        body: JSON.stringify({ projectId, overtimeApplies, premiumType }),
-      }),
   },
   /**
    * Phase 9 — de "flexibele" milestone-strategie (zie MilestoneSyncService):
@@ -469,10 +463,10 @@ export const projectsApi = {
   },
   /** Phase 12, deel A (sectie 1) — "Overuren boven 8u/dag" of "Overuren boven [x]u/week". ADMIN-only. */
   overtimeSettings: {
-    update: (projectId: string, overtimeThresholdType: 'DAILY' | 'WEEKLY', overtimeWeeklyThresholdHours: number | null) =>
+    update: (projectId: string, body: UpdateProjectOvertimeSettingsBody) =>
       request<UpdateProjectOvertimeSettingsResponseBody>(`/admin/projects/${projectId}/overtime-settings`, {
         method: 'POST',
-        body: JSON.stringify({ overtimeThresholdType, overtimeWeeklyThresholdHours }),
+        body: JSON.stringify(body),
       }),
   },
   /** Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" of "Ondertekening per week". ADMIN-only. */

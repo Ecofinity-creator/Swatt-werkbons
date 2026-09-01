@@ -142,9 +142,7 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
         body.displayName !== undefined ||
         body.phone !== undefined ||
         body.defaultHourlyRateCents !== undefined ||
-        body.overtimeRatePercent !== undefined ||
-        body.shiftWorkRatePercent !== undefined ||
-        body.nightWorkRatePercent !== undefined ||
+        body.payrollRateCents !== undefined ||
         body.employmentType !== undefined
       ) {
         if (!existing.employee) {
@@ -157,11 +155,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
           data: {
             ...(body.displayName !== undefined ? { displayName: body.displayName } : {}),
             ...(body.phone !== undefined ? { phone: body.phone } : {}),
+            // Fase 12-herziening: defaultHourlyRateCents = verkoopprijs (facturatie
+            // aan de klant), payrollRateCents = kostprijs (uitbetaling). Twee
+            // aparte, onafhankelijk instelbare bedragen — zie de toelichting bij
+            // Employee.payrollRateCents in schema.prisma. Toeslagpercentages
+            // zitten sinds deze herziening uniform op Project, niet meer hier.
             ...(body.defaultHourlyRateCents !== undefined ? { defaultHourlyRateCents: body.defaultHourlyRateCents } : {}),
-            // Phase 12, deel A (sectie 1) — enkel hier (admin-only route) instelbaar.
-            ...(body.overtimeRatePercent !== undefined ? { overtimeRatePercent: body.overtimeRatePercent } : {}),
-            ...(body.shiftWorkRatePercent !== undefined ? { shiftWorkRatePercent: body.shiftWorkRatePercent } : {}),
-            ...(body.nightWorkRatePercent !== undefined ? { nightWorkRatePercent: body.nightWorkRatePercent } : {}),
+            ...(body.payrollRateCents !== undefined ? { payrollRateCents: body.payrollRateCents } : {}),
             ...(body.employmentType !== undefined ? { employmentType: body.employmentType } : {}),
           },
         });
@@ -300,9 +300,7 @@ function toAdminUserSummary(user: {
     displayName: string;
     phone: string | null;
     defaultHourlyRateCents: number | null;
-    overtimeRatePercent: number;
-    shiftWorkRatePercent: number;
-    nightWorkRatePercent: number;
+    payrollRateCents: number | null;
     employmentType: EmploymentType;
   } | null;
 }): AdminUserSummary {
@@ -317,9 +315,7 @@ function toAdminUserSummary(user: {
           displayName: user.employee.displayName,
           phone: user.employee.phone,
           defaultHourlyRateCents: user.employee.defaultHourlyRateCents,
-          overtimeRatePercent: user.employee.overtimeRatePercent,
-          shiftWorkRatePercent: user.employee.shiftWorkRatePercent,
-          nightWorkRatePercent: user.employee.nightWorkRatePercent,
+          payrollRateCents: user.employee.payrollRateCents,
           employmentType: user.employee.employmentType,
         }
       : null,

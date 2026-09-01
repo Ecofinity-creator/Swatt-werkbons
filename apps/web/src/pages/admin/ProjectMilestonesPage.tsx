@@ -186,32 +186,77 @@ function InvoicingPanel({ project, onUpdated }: { project: ProjectSummary; onUpd
  * hierboven: financiële impact op zowel klantfactuur als
  * personeelsuitbetaling (Phase 12, deel E).
  */
+/**
+ * Fase 12-herziening: volledige toeslagregeling per project — drempel
+ * ("Overuren boven 8u/dag" of "Overuren boven [x]u/week"), of
+ * overuren/ploegenwerk/nachtwerk van toepassing is, en de percentages zelf.
+ * Geldt sinds deze herziening UNIFORM voor iedereen die op dit project werkt
+ * — "de medewerker/onderaannemer wordt uitbetaald volgens de afspraken met
+ * de klant" was de expliciete reden om dit hier te consolideren i.p.v.
+ * verspreid over Employee/ProjectAssignment (zie RateCalculationService).
+ */
 function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
   const { user: currentUser } = useAuth();
   const isAdmin = currentUser?.role === 'ADMIN';
+  const [thresholdType, setThresholdType] = useState<'DAILY' | 'WEEKLY'>(project.overtimeThresholdType);
   const [weeklyHoursInput, setWeeklyHoursInput] = useState(String(project.overtimeWeeklyThresholdHours ?? 39));
+  const [overtimeApplies, setOvertimeApplies] = useState(project.overtimeApplies);
+  const [premiumType, setPremiumType] = useState(project.premiumType);
+  const [overtimeRateInput, setOvertimeRateInput] = useState(String(project.overtimeRatePercent));
+  const [shiftWorkRateInput, setShiftWorkRateInput] = useState(String(project.shiftWorkRatePercent));
+  const [nightWorkRateInput, setNightWorkRateInput] = useState(String(project.nightWorkRatePercent));
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    setThresholdType(project.overtimeThresholdType);
     setWeeklyHoursInput(String(project.overtimeWeeklyThresholdHours ?? 39));
-  }, [project.overtimeWeeklyThresholdHours]);
+    setOvertimeApplies(project.overtimeApplies);
+    setPremiumType(project.premiumType);
+    setOvertimeRateInput(String(project.overtimeRatePercent));
+    setShiftWorkRateInput(String(project.shiftWorkRatePercent));
+    setNightWorkRateInput(String(project.nightWorkRatePercent));
+  }, [project]);
 
-  async function handleChange(thresholdType: 'DAILY' | 'WEEKLY') {
+  async function save(overrides: Partial<{ thresholdType: 'DAILY' | 'WEEKLY'; overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }> = {}) {
+    const effectiveThresholdType = overrides.thresholdType ?? thresholdType;
+    const effectiveOvertimeApplies = overrides.overtimeApplies ?? overtimeApplies;
+    const effectivePremiumType = overrides.premiumType ?? premiumType;
+
+    const parsePercent = (value: string) => {
+      const n = Number(value.trim());
+      return Number.isInteger(n) && n >= 100 && n <= 500 ? n : null;
+    };
+    const overtimeRatePercent = parsePercent(overtimeRateInput);
+    const shiftWorkRatePercent = parsePercent(shiftWorkRateInput);
+    const nightWorkRatePercent = parsePercent(nightWorkRateInput);
+    if (overtimeRatePercent === null || shiftWorkRatePercent === null || nightWorkRatePercent === null) {
+      setError('Vul voor elk percentage een geheel getal tussen 100 en 500 in.');
+      return;
+    }
+
+    let overtimeWeeklyThresholdHours: number | null = null;
+    if (effectiveThresholdType === 'WEEKLY') {
+      const hours = Number(weeklyHoursInput.trim().replace(',', '.'));
+      if (!Number.isFinite(hours) || hours <= 0) {
+        setError('Vul een geldig aantal uren per week in (bv. 39).');
+        return;
+      }
+      overtimeWeeklyThresholdHours = hours;
+    }
+
     setIsSaving(true);
     setError(null);
     try {
-      if (thresholdType === 'DAILY') {
-        await projectsApi.overtimeSettings.update(project.id, 'DAILY', null);
-      } else {
-        const hours = Number(weeklyHoursInput.trim().replace(',', '.'));
-        if (!Number.isFinite(hours) || hours <= 0) {
-          setError('Vul een geldig aantal uren per week in (bv. 39).');
-          setIsSaving(false);
-          return;
-        }
-        await projectsApi.overtimeSettings.update(project.id, 'WEEKLY', hours);
-      }
+      await projectsApi.overtimeSettings.update(project.id, {
+        overtimeThresholdType: effectiveThresholdType,
+        overtimeWeeklyThresholdHours,
+        overtimeApplies: effectiveOvertimeApplies,
+        premiumType: effectivePremiumType,
+        overtimeRatePercent,
+        shiftWorkRatePercent,
+        nightWorkRatePercent,
+      });
       onUpdated();
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : 'Opslaan van de overurenregeling is mislukt.');
@@ -224,21 +269,41 @@ function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary
 
   return (
     <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Overurenregeling</h2>
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Toeslagen &amp; overurenregeling</h2>
       <p className="mb-4 text-sm text-neutral-500">
-        {project.customerName} — {project.name}
+        {project.customerName} — {project.name}. Geldt voor iedereen die op dit project werkt (afspraak met de klant),
+        geen aparte instelling per medewerker.
       </p>
 
       {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
 
-      <div className="flex flex-col gap-2 text-sm">
+      <div className="mb-4 flex items-center gap-2">
+        <label className="flex items-center gap-1.5 text-sm">
+          <input
+            type="checkbox"
+            checked={overtimeApplies}
+            disabled={isSaving}
+            onChange={(e) => {
+              setOvertimeApplies(e.target.checked);
+              void save({ overtimeApplies: e.target.checked });
+            }}
+            className="h-4 w-4 accent-swatt-gold"
+          />
+          Overuren van toepassing
+        </label>
+      </div>
+
+      <div className="mb-4 flex flex-col gap-2 text-sm">
         <label className="flex items-center gap-2">
           <input
             type="radio"
             name={`overtime-threshold-${project.id}`}
-            checked={project.overtimeThresholdType === 'DAILY'}
+            checked={thresholdType === 'DAILY'}
             disabled={isSaving}
-            onChange={() => void handleChange('DAILY')}
+            onChange={() => {
+              setThresholdType('DAILY');
+              void save({ thresholdType: 'DAILY' });
+            }}
             className="h-4 w-4 accent-swatt-gold"
           />
           Overuren boven 8u/dag
@@ -247,9 +312,12 @@ function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary
           <input
             type="radio"
             name={`overtime-threshold-${project.id}`}
-            checked={project.overtimeThresholdType === 'WEEKLY'}
+            checked={thresholdType === 'WEEKLY'}
             disabled={isSaving}
-            onChange={() => void handleChange('WEEKLY')}
+            onChange={() => {
+              setThresholdType('WEEKLY');
+              void save({ thresholdType: 'WEEKLY' });
+            }}
             className="h-4 w-4 accent-swatt-gold"
           />
           Overuren boven
@@ -258,12 +326,88 @@ function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary
             inputMode="decimal"
             value={weeklyHoursInput}
             onChange={(e) => setWeeklyHoursInput(e.target.value)}
-            onBlur={() => project.overtimeThresholdType === 'WEEKLY' && void handleChange('WEEKLY')}
-            disabled={isSaving || project.overtimeThresholdType !== 'WEEKLY'}
+            onBlur={() => thresholdType === 'WEEKLY' && void save()}
+            disabled={isSaving || thresholdType !== 'WEEKLY'}
             className="w-16 rounded-lg border border-neutral-300 bg-white px-2 py-1 text-sm outline-none focus:border-swatt-gold disabled:bg-neutral-100"
           />
           u/week
         </label>
+      </div>
+
+      <div className="mb-4 flex flex-col gap-2 text-sm">
+        <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Ploegenwerk / nachtwerk (sluiten elkaar uit)</p>
+        {(['NONE', 'SHIFT_WORK', 'NIGHT_WORK'] as const).map((option) => (
+          <label key={option} className="flex items-center gap-2">
+            <input
+              type="radio"
+              name={`premium-type-${project.id}`}
+              checked={premiumType === option}
+              disabled={isSaving}
+              onChange={() => {
+                setPremiumType(option);
+                void save({ premiumType: option });
+              }}
+              className="h-4 w-4 accent-swatt-gold"
+            />
+            {option === 'NONE' ? 'Geen toeslag' : option === 'SHIFT_WORK' ? 'Ploegenwerk' : 'Nachtwerk'}
+          </label>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="text-sm text-neutral-600">
+          Overuren
+          <div className="mt-1 flex items-center gap-1">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={overtimeRateInput}
+              onChange={(e) => setOvertimeRateInput(e.target.value)}
+              onBlur={() => void save()}
+              disabled={isSaving}
+              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+            />
+            <span>%</span>
+          </div>
+        </label>
+        <label className="text-sm text-neutral-600">
+          Ploegenwerk
+          <div className="mt-1 flex items-center gap-1">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={shiftWorkRateInput}
+              onChange={(e) => setShiftWorkRateInput(e.target.value)}
+              onBlur={() => void save()}
+              disabled={isSaving}
+              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+            />
+            <span>%</span>
+          </div>
+        </label>
+        <label className="text-sm text-neutral-600">
+          Nachtwerk
+          <div className="mt-1 flex items-center gap-1">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={nightWorkRateInput}
+              onChange={(e) => setNightWorkRateInput(e.target.value)}
+              onBlur={() => void save()}
+              disabled={isSaving}
+              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+            />
+            <span>%</span>
+          </div>
+        </label>
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={isSaving}
+          className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+        >
+          {isSaving ? 'Bezig...' : 'Opslaan'}
+        </button>
       </div>
     </section>
   );

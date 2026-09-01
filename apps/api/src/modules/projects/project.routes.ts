@@ -6,8 +6,6 @@ import type {
   ProjectSummary,
   SelectProjectMilestoneBody,
   SelectProjectMilestoneResponseBody,
-  UpdateProjectAssignmentPremiumsBody,
-  UpdateProjectAssignmentPremiumsResponseBody,
   UpdateProjectInvoicingEnabledBody,
   UpdateProjectInvoicingEnabledResponseBody,
   UpdateProjectOvertimeSettingsResponseBody,
@@ -23,7 +21,6 @@ import {
   projectAssignmentBodySchema,
   projectIdParamsSchema,
   selectProjectMilestoneBodySchema,
-  updateProjectAssignmentPremiumsBodySchema,
   updateProjectInvoicingEnabledBodySchema,
   updateProjectOvertimeSettingsBodySchema,
   updateProjectSigningModeBodySchema,
@@ -117,16 +114,12 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
 
       const assignments = await app.prisma.projectAssignment.findMany({
         where: { employeeId: params.employeeId },
-        select: { projectId: true, overtimeApplies: true, premiumType: true },
+        select: { projectId: true },
       });
-      return {
-        projectIds: assignments.map((assignment: { projectId: string }) => assignment.projectId),
-        assignments: assignments.map((assignment: { projectId: string; overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }) => ({
-          projectId: assignment.projectId,
-          overtimeApplies: assignment.overtimeApplies,
-          premiumType: assignment.premiumType,
-        })),
-      };
+      // Fase 12-herziening: geen toeslaginfo meer per koppeling (die zit nu
+      // uniform op Project, zie de overtime-settings-route) — enkel nog de
+      // simpele lijst van gekoppelde project-ID's voor de checklist-UI.
+      return { projectIds: assignments.map((assignment: { projectId: string }) => assignment.projectId) };
     },
   );
 
@@ -240,11 +233,15 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
   );
 
   /**
-   * Phase 12, deel A (sectie 1): overurendrempel per project — "Overuren
-   * boven 8u/dag" of "Overuren boven [x]u/week". Bewust ADMIN-only, net als
-   * de facturatie-instelling hierboven: dit is een instelling met directe
-   * financiële impact op zowel klantfactuur (TeamleaderInvoiceService) als
-   * personeelsuitbetaling (Phase 12, deel E, nog te bouwen).
+   * Fase 12-herziening: overurendrempel + volledige toeslagregeling per
+   * project — "Overuren boven 8u/dag" of "Overuren boven [x]u/week", of
+   * overuren/ploegenwerk/nachtwerk van toepassing is, en de percentages
+   * zelf. Bewust ADMIN-only: financiële impact op zowel klantfactuur
+   * (TeamleaderInvoiceService) als personeelsuitbetaling (Phase 12, deel E).
+   * Geldt sinds deze herziening UNIFORM voor iedereen die op dit project
+   * werkt — geen aparte instelling per koppeling meer (zie de verwijderde
+   * .../project-assignments/premiums-route, ProjectAssignment.overtimeApplies/
+   * premiumType bestaan niet meer).
    */
   app.post(
     '/admin/projects/:id/overtime-settings',
@@ -262,46 +259,21 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
           // opgeslagen getal nodig) — voorkomt een verouderd weekgetal dat na
           // een latere terugschakeling naar WEEKLY stilzwijgend zou herleven.
           overtimeWeeklyThresholdHours: body.overtimeThresholdType === 'WEEKLY' ? (body.overtimeWeeklyThresholdHours ?? null) : null,
+          overtimeApplies: body.overtimeApplies,
+          premiumType: body.premiumType,
+          overtimeRatePercent: body.overtimeRatePercent,
+          shiftWorkRatePercent: body.shiftWorkRatePercent,
+          nightWorkRatePercent: body.nightWorkRatePercent,
         },
       });
       return {
         overtimeThresholdType: project.overtimeThresholdType,
         overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours ? Number(project.overtimeWeeklyThresholdHours) : null,
-      };
-    },
-  );
-
-  /**
-   * Phase 12, deel A: de toeslaginstelling van één koppeling medewerker↔project
-   * (overtimeApplies + premiumType). Bewust SUPERVISOR+ — zelfde rechtenniveau
-   * als de koppeling zelf (POST .../project-assignments hierboven), niet
-   * ADMIN-only zoals de twee routes hierboven: dit raakt geen tarieven of
-   * percentages zelf (die blijven op Employee, enkel ADMIN-instelbaar via
-   * user.routes.ts), enkel *of* een toeslag van toepassing is op déze
-   * koppeling.
-   */
-  app.post(
-    '/admin/employees/:employeeId/project-assignments/premiums',
-    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
-    async (request): Promise<UpdateProjectAssignmentPremiumsResponseBody> => {
-      const params = employeeIdParamsSchema.parse(request.params);
-      const body: UpdateProjectAssignmentPremiumsBody = updateProjectAssignmentPremiumsBodySchema.parse(request.body);
-      await assertEmployeeExists(app, params.employeeId);
-      await assertProjectExists(app, body.projectId);
-
-      const existing = await app.prisma.projectAssignment.findUnique({
-        where: { projectId_employeeId: { projectId: body.projectId, employeeId: params.employeeId } },
-      });
-      if (!existing) {
-        throw ProjectErrors.notFound();
-      }
-
-      const assignment = await app.prisma.projectAssignment.update({
-        where: { projectId_employeeId: { projectId: body.projectId, employeeId: params.employeeId } },
-        data: { overtimeApplies: body.overtimeApplies, premiumType: body.premiumType },
-      });
-      return {
-        assignment: { projectId: assignment.projectId, overtimeApplies: assignment.overtimeApplies, premiumType: assignment.premiumType },
+        overtimeApplies: project.overtimeApplies,
+        premiumType: project.premiumType,
+        overtimeRatePercent: project.overtimeRatePercent,
+        shiftWorkRatePercent: project.shiftWorkRatePercent,
+        nightWorkRatePercent: project.nightWorkRatePercent,
       };
     },
   );
@@ -375,6 +347,12 @@ function toProjectSummary(project: {
   invoicingEnabled: boolean;
   overtimeThresholdType: 'DAILY' | 'WEEKLY';
   overtimeWeeklyThresholdHours: unknown;
+  /** Fase 12-herziening: toeslagregeling zit uniform op Project. */
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+  overtimeRatePercent: number;
+  shiftWorkRatePercent: number;
+  nightWorkRatePercent: number;
   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter, `null` zolang nog niet berekend. */
   kmDistanceOneWayMeters: number | null;
@@ -396,6 +374,11 @@ function toProjectSummary(project: {
     // 40), geen geldbedrag, dus een gewone JS-number is hier veilig genoeg
     // (in tegenstelling tot centbedragen elders, die altijd Int blijven).
     overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours === null ? null : Number(project.overtimeWeeklyThresholdHours),
+    overtimeApplies: project.overtimeApplies,
+    premiumType: project.premiumType,
+    overtimeRatePercent: project.overtimeRatePercent,
+    shiftWorkRatePercent: project.shiftWorkRatePercent,
+    nightWorkRatePercent: project.nightWorkRatePercent,
     signingMode: project.signingMode,
     kmDistanceOneWayMeters: project.kmDistanceOneWayMeters,
   };

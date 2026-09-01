@@ -10,15 +10,17 @@ import { PayrollService } from '../src/modules/payroll/payroll.service';
  * tijdregistratie mag maar één keer uitbetaald worden") realistisch getest
  * wordt — aanmaken van een batch maakt de tijdregistratie meteen onbeschikbaar
  * voor een volgende listPayableSummary()/createBatch().
+ *
+ * Fase 12-herziening: toeslagen zitten nu uniform op FakeProject (geen
+ * FakeAssignment/projectAssignment-opzoek meer), en het gebruikte basistarief
+ * is `payrollRateCents` (kostprijs) i.p.v. `defaultHourlyRateCents`
+ * (verkoopprijs, blijft enkel relevant voor de klantfactuur).
  */
 
 interface FakeEmployee {
   id: string;
   displayName: string;
-  defaultHourlyRateCents: number | null;
-  overtimeRatePercent: number;
-  shiftWorkRatePercent: number;
-  nightWorkRatePercent: number;
+  payrollRateCents: number | null;
 }
 
 interface FakeProject {
@@ -26,13 +28,11 @@ interface FakeProject {
   name: string;
   overtimeThresholdType: 'DAILY' | 'WEEKLY';
   overtimeWeeklyThresholdHours: number | null;
-}
-
-interface FakeAssignment {
-  employeeId: string;
-  projectId: string;
   overtimeApplies: boolean;
   premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+  overtimeRatePercent: number;
+  shiftWorkRatePercent: number;
+  nightWorkRatePercent: number;
 }
 
 interface FakeTimeEntry {
@@ -45,8 +45,8 @@ interface FakeTimeEntry {
   signed: boolean; // vervangt workOrderLink.workOrder.signature — enkel signed=true is "betaalbaar"
 }
 
-function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProject[]; assignments: FakeAssignment[]; entries: FakeTimeEntry[] }) {
-  const { employees, projects, assignments, entries } = opts;
+function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProject[]; entries: FakeTimeEntry[] }) {
+  const { employees, projects, entries } = opts;
   const batches = new Map<string, { id: string; employeeId: string; periodLabel: string; status: string; totalAmountCents: number; createdByUserId: string; createdAt: Date; closedAt: Date | null }>();
   const lines = new Map<string, { id: string; payrollBatchId: string; timeEntryId: string; normalHours: number; overtimeHours: number; premiumType: string; amountCents: number }>();
   let nextId = 1;
@@ -93,10 +93,6 @@ function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProje
           }));
       },
     },
-    projectAssignment: {
-      findMany: async ({ where }: { where: { employeeId: { in: string[] } } }) =>
-        assignments.filter((a) => where.employeeId.in.includes(a.employeeId)),
-    },
     payrollBatch: {
       create: async ({ data }: { data: { employeeId: string; periodLabel: string; createdByUserId: string; totalAmountCents: number; lines: { create: Array<{ timeEntryId: string; normalHours: number; overtimeHours: number; premiumType: string; amountCents: number }> } } }) => {
         const paid = paidTimeEntryIds();
@@ -142,9 +138,10 @@ function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProje
   return { prisma: prisma as unknown as PrismaClient };
 }
 
-const peter: FakeEmployee = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
-const projectNormal: FakeProject = { id: 'proj-normal', name: 'Onderhoud HVAC (gefactureerd)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null };
-const projectNacalc: FakeProject = { id: 'proj-nacalc', name: 'Interne renovatie (nacalculatie)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null };
+const peter: FakeEmployee = { id: 'emp-peter', displayName: 'Peter Janssens', payrollRateCents: 6500 };
+const NO_PREMIUM = { overtimeApplies: false, premiumType: 'NONE' as const, overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+const projectNormal: FakeProject = { id: 'proj-normal', name: 'Onderhoud HVAC (gefactureerd)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null, ...NO_PREMIUM };
+const projectNacalc: FakeProject = { id: 'proj-nacalc', name: 'Interne renovatie (nacalculatie)', overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null, ...NO_PREMIUM };
 
 describe('PayrollService', () => {
   it('listPayableSummary() telt uren van een gewoon EN een nacalculatie-project even hard mee', async () => {
@@ -152,7 +149,7 @@ describe('PayrollService', () => {
       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
       { id: 'te-2', employeeId: peter.id, projectId: projectNacalc.id, startedAt: new Date('2026-08-11T08:00:00Z'), endedAt: new Date('2026-08-11T10:00:00Z'), pausedSeconds: 0, signed: true },
     ];
-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal, projectNacalc], assignments: [], entries });
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal, projectNacalc], entries });
     const service = new PayrollService(prisma);
 
     const summary = await service.listPayableSummary('2026-08');
@@ -162,11 +159,11 @@ describe('PayrollService', () => {
   });
 
   it('splitst overuren correct binnen één DAILY-project (9u30 → 8u normaal + 1u30 overuren)', async () => {
-    const assignments: FakeAssignment[] = [{ employeeId: peter.id, projectId: projectNormal.id, overtimeApplies: true, premiumType: 'NONE' }];
+    const project: FakeProject = { ...projectNormal, overtimeApplies: true, premiumType: 'NONE' };
     const entries: FakeTimeEntry[] = [
-      { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T07:00:00Z'), endedAt: new Date('2026-08-10T16:30:00Z'), pausedSeconds: 0, signed: true },
+      { id: 'te-1', employeeId: peter.id, projectId: project.id, startedAt: new Date('2026-08-10T07:00:00Z'), endedAt: new Date('2026-08-10T16:30:00Z'), pausedSeconds: 0, signed: true },
     ];
-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments, entries });
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [project], entries });
     const service = new PayrollService(prisma);
 
     const summary = await service.listPayableSummary('2026-08');
@@ -179,11 +176,11 @@ describe('PayrollService', () => {
   });
 
   it('createBatch(): het bedrag komt overeen met wat voor dezelfde uren aan de klant zou worden aangerekend (nachtwerk+overuren = 200%)', async () => {
-    const assignments: FakeAssignment[] = [{ employeeId: peter.id, projectId: projectNormal.id, overtimeApplies: true, premiumType: 'NIGHT_WORK' }];
+    const project: FakeProject = { ...projectNormal, overtimeApplies: true, premiumType: 'NIGHT_WORK' };
     const entries: FakeTimeEntry[] = [
-      { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T06:00:00Z'), endedAt: new Date('2026-08-10T16:00:00Z'), pausedSeconds: 0, signed: true }, // 10u
+      { id: 'te-1', employeeId: peter.id, projectId: project.id, startedAt: new Date('2026-08-10T06:00:00Z'), endedAt: new Date('2026-08-10T16:00:00Z'), pausedSeconds: 0, signed: true }, // 10u
     ];
-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments, entries });
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [project], entries });
     const service = new PayrollService(prisma);
 
     const batch = await service.createBatch(peter.id, '2026-08', 'user-admin');
@@ -191,14 +188,14 @@ describe('PayrollService', () => {
     // 8u @150% (nachtwerk) + 2u @200% (nachtwerk+overuren) = 8*6500*1.5 + 2*6500*2.0
     expect(batch.totalAmountCents).toBe(Math.round(8 * 6500 * 1.5 + 2 * 6500 * 2.0));
     expect(batch.lines).toHaveLength(1);
-    expect(batch.lines[0]?.projectName).toBe(projectNormal.name);
+    expect(batch.lines[0]?.projectName).toBe(project.name);
   });
 
   it('business rule 12: dezelfde tijdregistratie kan niet tweemaal uitbetaald worden', async () => {
     const entries: FakeTimeEntry[] = [
       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
     ];
-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries });
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
     const service = new PayrollService(prisma);
 
     await service.createBatch(peter.id, '2026-08', 'user-admin');
@@ -212,19 +209,19 @@ describe('PayrollService', () => {
     await expect(service.createBatch(peter.id, '2026-08', 'user-admin')).rejects.toMatchObject({ code: 'PAYROLL_BATCH_NO_TIME_ENTRIES' });
   });
 
-  it('weigert createBatch() zonder ingesteld uurtarief', async () => {
-    const zonderTarief: FakeEmployee = { ...peter, id: 'emp-zonder', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null };
+  it('weigert createBatch() zonder ingesteld uitbetalingstarief (payrollRateCents)', async () => {
+    const zonderTarief: FakeEmployee = { ...peter, id: 'emp-zonder', displayName: 'Steven Zonder Tarief', payrollRateCents: null };
     const entries: FakeTimeEntry[] = [
       { id: 'te-1', employeeId: zonderTarief.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
     ];
-    const { prisma } = createFakePrisma({ employees: [zonderTarief], projects: [projectNormal], assignments: [], entries });
+    const { prisma } = createFakePrisma({ employees: [zonderTarief], projects: [projectNormal], entries });
     const service = new PayrollService(prisma);
 
     await expect(service.createBatch(zonderTarief.id, '2026-08', 'user-admin')).rejects.toMatchObject({ code: 'PAYROLL_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET' });
   });
 
   it('weigert createBatch() zonder betaalbare uren in de gekozen periode', async () => {
-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries: [] });
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries: [] });
     const service = new PayrollService(prisma);
 
     await expect(service.createBatch(peter.id, '2026-08', 'user-admin')).rejects.toMatchObject({ code: 'PAYROLL_BATCH_NO_TIME_ENTRIES' });
@@ -234,7 +231,7 @@ describe('PayrollService', () => {
     const entries: FakeTimeEntry[] = [
       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
     ];
-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries });
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
     const service = new PayrollService(prisma);
 
     const batch = await service.createBatch(peter.id, '2026-08', 'user-admin');
@@ -248,7 +245,7 @@ describe('PayrollService', () => {
     const entries: FakeTimeEntry[] = [
       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: false },
     ];
-    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], assignments: [], entries });
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
     const service = new PayrollService(prisma);
 
     expect(await service.listPayableSummary('2026-08')).toHaveLength(0);

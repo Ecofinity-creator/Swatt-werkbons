@@ -4,37 +4,43 @@
  * Prisma-afhankelijkheid, geen class-state) zodat dit zonder database
  * unit-testbaar is — zelfde patroon als rbac.middleware.ts.
  *
+ * Fase 12-herziening: de volledige toeslagregeling (drempel, of overuren van
+ * toepassing is, welke premium, en de percentages zelf) zit sinds deze
+ * herziening uniform op `Project` — niet meer verspreid over
+ * Employee/ProjectAssignment. Reden: "de medewerker/onderaannemer wordt
+ * uitbetaald volgens de afspraken met de klant", dus dit is een
+ * project-/klantafspraak, geen persoonlijke instelling. Elke medewerker die
+ * op een project werkt, valt automatisch onder dezelfde regeling.
+ *
  * Twee onafhankelijke berekeningen:
  * 1. `splitEffectiveHours()` — hoeveel van een blok gewerkte uren (al
  *    samengeteld per dag of per week, naargelang Project.overtimeThresholdType)
  *    normale uren zijn, en hoeveel overuren.
- * 2. `computeRatePercent()` — welk percentage van het basistarief van een
- *    medewerker van toepassing is op resp. de normale uren en de overuren van
- *    een gegeven ProjectAssignment (toeslagen tellen op boven 100%, ze worden
- *    nooit vermenigvuldigd — zie de toelichting in het ontwerpdocument).
+ * 2. `computeRatePercent()` — welk percentage van het basistarief van
+ *    toepassing is op resp. de normale uren en de overuren van een project
+ *    (toeslagen tellen op boven 100%, ze worden nooit vermenigvuldigd — zie
+ *    de toelichting in het ontwerpdocument). Dit percentage wordt door de
+ *    aanroeper toegepast op zowel `Employee.defaultHourlyRateCents`
+ *    (facturatie aan de klant) als `Employee.payrollRateCents` (uitbetaling)
+ *    — zelfde percentage, andere basis.
  *
- * Belangrijk: ploegenwerk/nachtwerk geldt op ALLE uren van een koppeling
- * (het is geen overurendrempel-gebonden toeslag), overuren enkel op het deel
+ * Belangrijk: ploegenwerk/nachtwerk geldt op ALLE uren van een project (het
+ * is geen overurendrempel-gebonden toeslag), overuren enkel op het deel
  * boven de drempel. Vandaar twee aparte percentages in het resultaat.
  */
 
 const DAILY_THRESHOLD_HOURS = 8;
 
-export interface EmployeeRatePercentages {
-  overtimeRatePercent: number;
-  shiftWorkRatePercent: number;
-  nightWorkRatePercent: number;
-}
-
-export interface ProjectAssignmentPremiumSettings {
-  overtimeApplies: boolean;
-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
-}
-
-export interface ProjectOvertimeSettings {
+/** Alle toeslaginstellingen van één project — samen gebruikt door beide berekeningen hieronder. */
+export interface ProjectPremiumSettings {
   overtimeThresholdType: 'DAILY' | 'WEEKLY';
   /** Enkel relevant/ingevuld bij WEEKLY — vrij instelbaar getal (bv. 39 of 40). */
   overtimeWeeklyThresholdHours: number | null;
+  overtimeApplies: boolean;
+  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+  overtimeRatePercent: number;
+  shiftWorkRatePercent: number;
+  nightWorkRatePercent: number;
 }
 
 export interface EffectiveHoursSplit {
@@ -66,7 +72,7 @@ export interface RatePercentSplit {
  */
 export function allocateHoursAcrossEntries(
   entries: Array<{ id: string; hours: number }>,
-  project: ProjectOvertimeSettings,
+  project: Pick<ProjectPremiumSettings, 'overtimeThresholdType' | 'overtimeWeeklyThresholdHours'>,
 ): Map<string, EffectiveHoursSplit> {
   const threshold =
     project.overtimeThresholdType === 'DAILY' ? DAILY_THRESHOLD_HOURS : (project.overtimeWeeklyThresholdHours ?? 39);
@@ -88,10 +94,13 @@ export function allocateHoursAcrossEntries(
  * bij WEEKLY — de aanroeper telt dit vooraf op, deze functie kent geen datums)
  * in normale uren en overuren op basis van de projectdrempel. Geeft altijd
  * `{ normalHours: totalHours, overtimeHours: 0 }` terug wanneer overuren niet
- * van toepassing is op de koppeling — de aanroeper roept deze functie dus
- * enkel aan voor koppelingen met `overtimeApplies = true`.
+ * van toepassing is op het project — de aanroeper roept deze functie dus
+ * enkel aan wanneer `project.overtimeApplies === true`.
  */
-export function splitEffectiveHours(totalHours: number, project: ProjectOvertimeSettings): EffectiveHoursSplit {
+export function splitEffectiveHours(
+  totalHours: number,
+  project: Pick<ProjectPremiumSettings, 'overtimeThresholdType' | 'overtimeWeeklyThresholdHours'>,
+): EffectiveHoursSplit {
   const threshold =
     project.overtimeThresholdType === 'DAILY' ? DAILY_THRESHOLD_HOURS : (project.overtimeWeeklyThresholdHours ?? 39);
 
@@ -105,19 +114,21 @@ export function splitEffectiveHours(totalHours: number, project: ProjectOvertime
  * Toeslagpercentages tellen op boven de 100% basis, nooit vermenigvuldigd —
  * bv. overuren (150% = +50%) + nachtwerk (150% = +50%) → 200%; overuren
  * (150% = +50%) + ploegenwerk (120% = +20%) → 170%. Ploegenwerk/nachtwerk telt
- * mee op zowel de normale uren als de overuren van deze koppeling (het is een
+ * mee op zowel de normale uren als de overuren van dit project (het is een
  * "hoe/wanneer werd er gewerkt"-toeslag, geen overurendrempel-toeslag).
  */
-export function computeRatePercent(employee: EmployeeRatePercentages, assignment: ProjectAssignmentPremiumSettings): RatePercentSplit {
+export function computeRatePercent(
+  project: Pick<ProjectPremiumSettings, 'overtimeApplies' | 'premiumType' | 'overtimeRatePercent' | 'shiftWorkRatePercent' | 'nightWorkRatePercent'>,
+): RatePercentSplit {
   const premiumSurcharge =
-    assignment.premiumType === 'SHIFT_WORK'
-      ? employee.shiftWorkRatePercent - 100
-      : assignment.premiumType === 'NIGHT_WORK'
-        ? employee.nightWorkRatePercent - 100
+    project.premiumType === 'SHIFT_WORK'
+      ? project.shiftWorkRatePercent - 100
+      : project.premiumType === 'NIGHT_WORK'
+        ? project.nightWorkRatePercent - 100
         : 0;
 
   const normalPercent = 100 + premiumSurcharge;
-  const overtimeSurcharge = assignment.overtimeApplies ? employee.overtimeRatePercent - 100 : 0;
+  const overtimeSurcharge = project.overtimeApplies ? project.overtimeRatePercent - 100 : 0;
   const overtimePercent = normalPercent + overtimeSurcharge;
 
   return { normalPercent, overtimePercent };

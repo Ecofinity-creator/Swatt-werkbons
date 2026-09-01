@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { allocateHoursAcrossEntries, computeRatePercent, splitEffectiveHours } from '../src/modules/rates/rate-calculation.service';
 
-const EMPLOYEE = { overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
-
 describe('splitEffectiveHours()', () => {
   it('DAILY: exact op de grens (8u) levert geen overuren op', () => {
     expect(splitEffectiveHours(8, { overtimeThresholdType: 'DAILY', overtimeWeeklyThresholdHours: null })).toEqual({
@@ -101,45 +99,53 @@ describe('allocateHoursAcrossEntries() — Phase 12, deel E', () => {
   });
 });
 
-describe('computeRatePercent()', () => {
+describe('computeRatePercent() — Fase 12-herziening: alles op Project, uniform per project', () => {
+  const BASE = { overtimeRatePercent: 150, shiftWorkRatePercent: 120, nightWorkRatePercent: 150 };
+
   it('geen enkele toeslag van toepassing: 100% op alles', () => {
-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: false, premiumType: 'NONE' })).toEqual({
+    expect(computeRatePercent({ ...BASE, overtimeApplies: false, premiumType: 'NONE' })).toEqual({
       normalPercent: 100,
       overtimePercent: 100,
     });
   });
 
   it('enkel overuren van toepassing: normale uren 100%, overuren 150%', () => {
-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: true, premiumType: 'NONE' })).toEqual({
+    expect(computeRatePercent({ ...BASE, overtimeApplies: true, premiumType: 'NONE' })).toEqual({
       normalPercent: 100,
       overtimePercent: 150,
     });
   });
 
   it('enkel ploegenwerk: geldt op zowel normale uren als overuren (er zijn hier geen overuren)', () => {
-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: false, premiumType: 'SHIFT_WORK' })).toEqual({
+    expect(computeRatePercent({ ...BASE, overtimeApplies: false, premiumType: 'SHIFT_WORK' })).toEqual({
       normalPercent: 120,
       overtimePercent: 120,
     });
   });
 
   it('overuren + nachtwerk combineren: opgeteld boven 100%, niet vermenigvuldigd (100+50+50=200%)', () => {
-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: true, premiumType: 'NIGHT_WORK' })).toEqual({
+    expect(computeRatePercent({ ...BASE, overtimeApplies: true, premiumType: 'NIGHT_WORK' })).toEqual({
       normalPercent: 150,
       overtimePercent: 200,
     });
   });
 
   it('overuren + ploegenwerk combineren (100+50+20=170%)', () => {
-    expect(computeRatePercent(EMPLOYEE, { overtimeApplies: true, premiumType: 'SHIFT_WORK' })).toEqual({
+    expect(computeRatePercent({ ...BASE, overtimeApplies: true, premiumType: 'SHIFT_WORK' })).toEqual({
       normalPercent: 120,
       overtimePercent: 170,
     });
   });
 
-  it('respecteert de individuele percentages van de medewerker, niet enkel de defaults', () => {
-    const customEmployee = { overtimeRatePercent: 200, shiftWorkRatePercent: 110, nightWorkRatePercent: 175 };
-    expect(computeRatePercent(customEmployee, { overtimeApplies: true, premiumType: 'NIGHT_WORK' })).toEqual({
+  it('respecteert de individuele percentages van het project, niet enkel de defaults', () => {
+    const customProject = { overtimeRatePercent: 200, shiftWorkRatePercent: 110, nightWorkRatePercent: 175 };
+    expect(
+      computeRatePercent({
+        overtimeApplies: true,
+        premiumType: 'NIGHT_WORK',
+        ...customProject,
+      }),
+    ).toEqual({
       normalPercent: 175,
       overtimePercent: 275,
     });

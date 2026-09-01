@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { publicBrandingApi } from '../api/client';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
 import { Logo } from '../components/Logo';
 import { ROLE_LABELS } from '../constants';
@@ -13,6 +14,18 @@ export function HomePage() {
   const { user, logout } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  // Sectie 21/33 — klantlogo (Bedrijfsgegevens) i.p.v. de eerder generieke
+  // "Technical Support Team"-tekst, zelfde publieke route als LoginPage.tsx
+  // (werkt voor élke rol, niet enkel ADMIN — company-settings.routes.ts zelf
+  // blijft ADMIN-only).
+  const [branding, setBranding] = useState<{ companyName: string; logoDataUrl: string | null } | null>(null);
+
+  useEffect(() => {
+    publicBrandingApi
+      .get()
+      .then(setBranding)
+      .catch(() => setBranding(null));
+  }, []);
 
   if (!user) return null;
 
@@ -33,11 +46,11 @@ export function HomePage() {
 
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
-      <header className="mb-8 flex flex-col gap-2">
+      <header className="mb-8 flex items-center gap-3">
         <Logo size="md" />
-        <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">
-          Technical Support Team
-        </p>
+        {branding?.logoDataUrl && (
+          <img src={branding.logoDataUrl} alt={branding.companyName} className="h-8 w-auto object-contain" />
+        )}
       </header>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">

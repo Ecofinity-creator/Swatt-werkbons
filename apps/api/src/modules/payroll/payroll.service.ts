@@ -10,6 +10,18 @@ import { allocateHoursAcrossEntries, computeRatePercent } from '../rates/rate-ca
  * voor elke gewerkte, ondertekende uur, ook op een nacalculatie-project
  * (Phase 12, deel C) zonder klantfactuur.
  *
+ * Fase 12-herziening: de toeslagregeling (drempel, of overuren van
+ * toepassing is, welke premium, percentages) zit sinds deze herziening
+ * uniform op `Project` (zie rate-calculation.service.ts) — geen
+ * ProjectAssignment-opzoek meer nodig. Daarnaast wordt hier bewust
+ * `Employee.payrollRateCents` (kostprijs/uitbetaling) gebruikt als basis,
+ * NIET `Employee.defaultHourlyRateCents` (verkoopprijs/facturatie aan de
+ * klant, zie teamleader-invoice.service.ts) — dit zijn twee aparte,
+ * onafhankelijk instelbare bedragen (Swatts marge zit in het verschil). Het
+ * toeslagpercentage zelf is wél identiek voor beide, enkel de basis
+ * verschilt — vandaar dat `computeRatePercent()` hier ongewijzigd hergebruikt
+ * wordt.
+ *
  * "Betaalbaar" = een tijdregistratie die aan een ondertekende werkbon hangt
  * (`WorkOrderSignature` bestaat — business rule 3: pas dan zijn de uren
  * definitief) en nog niet in een `PayrollBatchLine` zit (business rule 12).
@@ -25,25 +37,21 @@ interface PayableTimeEntryRow {
   employee: {
     id: string;
     displayName: string;
-    defaultHourlyRateCents: number | null;
-    overtimeRatePercent: number;
-    shiftWorkRatePercent: number;
-    nightWorkRatePercent: number;
+    /** Kostprijs — wat effectief aan deze medewerker/onderaannemer uitbetaald wordt. Zie de toelichting bovenaan dit bestand. */
+    payrollRateCents: number | null;
   };
   project: {
     id: string;
     name: string;
     overtimeThresholdType: 'DAILY' | 'WEEKLY';
     overtimeWeeklyThresholdHours: Prisma.Decimal | number | null;
+    overtimeApplies: boolean;
+    premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+    overtimeRatePercent: number;
+    shiftWorkRatePercent: number;
+    nightWorkRatePercent: number;
   };
   workOrderLink: { workOrder: { signature: { signedAt: Date } | null } } | null;
-}
-
-interface ProjectAssignmentRow {
-  employeeId: string;
-  projectId: string;
-  overtimeApplies: boolean;
-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
 }
 
 export interface PayableEmployeeSummary {
@@ -53,7 +61,7 @@ export interface PayableEmployeeSummary {
   overtimeHours: number;
   shiftHours: number;
   nightHours: number;
-  /** `null` zolang deze medewerker geen `defaultHourlyRateCents` heeft (zie UserDetailPage) — kan dan wel getoond, maar niet in een batch omgezet worden. */
+  /** `null` zolang deze medewerker geen `payrollRateCents` heeft (zie UserDetailPage) — kan dan wel getoond, maar niet in een batch omgezet worden. */
   totalAmountCents: number | null;
 }
 
@@ -98,14 +106,13 @@ export class PayrollService {
   async listPayableSummary(periodLabel?: string): Promise<PayableEmployeeSummary[]> {
     const entries = await this.fetchPayableEntries({});
     const filtered = periodLabel ? entries.filter((entry) => periodLabelOf(this.signedAtOf(entry)) === periodLabel) : entries;
-    const assignments = await this.fetchAssignmentsFor(Array.from(new Set(filtered.map((entry) => entry.employeeId))));
 
     const perEmployeeEntries = groupBy(filtered, (entry) => entry.employeeId);
     const summaries: PayableEmployeeSummary[] = [];
     for (const [employeeId, employeeEntries] of perEmployeeEntries) {
       const employee = employeeEntries[0]!.employee;
-      const lines = computeLinesForEmployee(employeeEntries, assignments);
-      const totalAmountCents = employee.defaultHourlyRateCents === null ? null : lines.reduce((sum, line) => sum + line.amountCents, 0);
+      const lines = computeLinesForEmployee(employeeEntries);
+      const totalAmountCents = employee.payrollRateCents === null ? null : lines.reduce((sum, line) => sum + line.amountCents, 0);
       summaries.push({
         employeeId,
         displayName: employee.displayName,
@@ -122,8 +129,8 @@ export class PayrollService {
   /**
    * Maakt de personeelsuitbetaling effectief aan voor één medewerker/periode
    * — herberekent op dit moment (niet op basis van listPayableSummary's
-   * momentopname) om een race condition met een ondertussen gewijzigde
-   * koppeling/tarief te vermijden, en valideert vóór aanmaak vs. de
+   * momentopname) om een race condition met een ondertussen gewijzigd
+   * project-toeslag/tarief te vermijden, en valideert vóór aanmaak vs. de
    * unique-constraint-backstop (zelfde P2002-patroon als InvoiceBatchService).
    */
   async createBatch(employeeId: string, periodLabel: string, createdByUserId: string): Promise<PayrollBatchRecord> {
@@ -133,12 +140,11 @@ export class PayrollService {
     }
 
     const employee = entries[0]!.employee;
-    if (employee.defaultHourlyRateCents === null) {
+    if (employee.payrollRateCents === null) {
       throw PayrollErrors.employeeHourlyRateNotSet(employee.displayName);
     }
 
-    const assignments = await this.fetchAssignmentsFor([employeeId]);
-    const lines = computeLinesForEmployee(entries, assignments);
+    const lines = computeLinesForEmployee(entries);
     const totalAmountCents = lines.reduce((sum, line) => sum + line.amountCents, 0);
 
     try {
@@ -212,14 +218,6 @@ export class PayrollService {
     })) as unknown as PayableTimeEntryRow[];
   }
 
-  private async fetchAssignmentsFor(employeeIds: string[]): Promise<ProjectAssignmentRow[]> {
-    if (employeeIds.length === 0) return [];
-    return (await this.prisma.projectAssignment.findMany({
-      where: { employeeId: { in: employeeIds } },
-      select: { employeeId: true, projectId: true, overtimeApplies: true, premiumType: true },
-    })) as ProjectAssignmentRow[];
-  }
-
   private signedAtOf(entry: PayableTimeEntryRow): Date {
     // Kan in de praktijk niet ontbreken — de where-clausule in fetchPayableEntries
     // sluit entries zonder handtekening al uit — defensief niet-null hier.
@@ -243,24 +241,18 @@ interface ComputedLine {
  * (allocateHoursAcrossEntries — dit is precies waarom deel E een aparte
  * functie nodig had t.o.v. de per-batch-aggregatie in
  * teamleader-invoice.service.ts, die geen regel-per-brontijdregistratie
- * hoeft te bewaren), en past per registratie het toeslagpercentage toe.
+ * hoeft te bewaren), en past per registratie het toeslagpercentage toe op de
+ * KOSTPRIJS (employee.payrollRateCents) — niet de verkoopprijs.
  */
-function computeLinesForEmployee(entries: PayableTimeEntryRow[], assignments: ProjectAssignmentRow[]): ComputedLine[] {
-  const assignmentByProjectId = new Map(assignments.map((a) => [a.projectId, a]));
+function computeLinesForEmployee(entries: PayableTimeEntryRow[]): ComputedLine[] {
   const entriesByProject = groupBy(entries, (entry) => entry.projectId);
 
   const lines: ComputedLine[] = [];
   for (const [, projectEntries] of entriesByProject) {
     const project = projectEntries[0]!.project;
     const employee = projectEntries[0]!.employee;
-    const assignment: ProjectAssignmentRow = assignmentByProjectId.get(project.id) ?? {
-      employeeId: employee.id,
-      projectId: project.id,
-      overtimeApplies: false,
-      premiumType: 'NONE',
-    };
-    const { normalPercent, overtimePercent } = computeRatePercent(employee, assignment);
-    const baseRateCents = employee.defaultHourlyRateCents ?? 0;
+    const { normalPercent, overtimePercent } = computeRatePercent(project);
+    const baseRateCents = employee.payrollRateCents ?? 0;
 
     const periodKeyOf = (entry: PayableTimeEntryRow) =>
       project.overtimeThresholdType === 'DAILY' ? dayKeyOf(entry.startedAt) : isoWeekKeyOf(entry.startedAt);
@@ -269,7 +261,7 @@ function computeLinesForEmployee(entries: PayableTimeEntryRow[], assignments: Pr
     for (const [, periodEntries] of entriesByPeriod) {
       const sorted = [...periodEntries].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
       const hoursById = sorted.map((entry) => ({ id: entry.id, hours: computeWorkedSeconds(entry) / 3600 }));
-      const split = assignment.overtimeApplies
+      const split = project.overtimeApplies
         ? allocateHoursAcrossEntries(hoursById, {
             overtimeThresholdType: project.overtimeThresholdType,
             overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours === null ? null : Number(project.overtimeWeeklyThresholdHours),
@@ -284,7 +276,7 @@ function computeLinesForEmployee(entries: PayableTimeEntryRow[], assignments: Pr
           projectName: project.name,
           normalHours: round2(normalHours),
           overtimeHours: round2(overtimeHours),
-          premiumType: assignment.premiumType,
+          premiumType: project.premiumType,
           amountCents,
         });
       }

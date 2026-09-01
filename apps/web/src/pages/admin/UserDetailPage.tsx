@@ -38,23 +38,16 @@ export function UserDetailPage() {
   const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
   const [isSavingTeamleaderLink, setIsSavingTeamleaderLink] = useState(false);
 
-  // Facturatie: standaard uurtarief per medewerker (zie Employee.defaultHourlyRateCents).
+  // Facturatie: standaard uurtarief per medewerker (zie Employee.defaultHourlyRateCents) — VERKOOPPRIJS (klant).
   const [hourlyRateInputValue, setHourlyRateInputValue] = useState('');
   const [isSavingHourlyRate, setIsSavingHourlyRate] = useState(false);
   const [hourlyRateError, setHourlyRateError] = useState<string | null>(null);
 
-  // Phase 12, deel A (sectie 1) — toeslagpercentages, admin-only.
-  const [overtimeRateInput, setOvertimeRateInput] = useState('150');
-  const [shiftWorkRateInput, setShiftWorkRateInput] = useState('120');
-  const [nightWorkRateInput, setNightWorkRateInput] = useState('150');
-  const [isSavingPremiumRates, setIsSavingPremiumRates] = useState(false);
-  const [premiumRatesError, setPremiumRatesError] = useState<string | null>(null);
-
-  // Phase 12, deel A — toeslaginstelling per koppeling (projectId → instelling).
-  const [assignmentPremiums, setAssignmentPremiums] = useState<Map<string, { overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }>>(
-    new Map(),
-  );
-  const [pendingPremiumsProjectId, setPendingPremiumsProjectId] = useState<string | null>(null);
+  // Fase 12-herziening: KOSTPRIJS (uitbetaling aan medewerker/onderaannemer),
+  // los van de verkoopprijs hierboven — zie Employee.payrollRateCents.
+  const [payrollRateInputValue, setPayrollRateInputValue] = useState('');
+  const [isSavingPayrollRate, setIsSavingPayrollRate] = useState(false);
+  const [payrollRateError, setPayrollRateError] = useState<string | null>(null);
 
   // Werknemer vs. Onderaannemer (backlog-item 30/8) — bepaalt welk soort
   // document deze persoon krijgt bij de maandelijkse uren-export (zie
@@ -77,7 +70,6 @@ export function UserDetailPage() {
   const loadAssignments = useCallback(async (employeeId: string) => {
     const response = await projectsApi.assignments.list(employeeId);
     setAssignedProjectIds(new Set(response.projectIds));
-    setAssignmentPremiums(new Map(response.assignments.map((a) => [a.projectId, { overtimeApplies: a.overtimeApplies, premiumType: a.premiumType }])));
   }, []);
 
   useEffect(() => {
@@ -89,9 +81,9 @@ export function UserDetailPage() {
       setHourlyRateInputValue(
         user.employee.defaultHourlyRateCents !== null ? (user.employee.defaultHourlyRateCents / 100).toFixed(2) : '',
       );
-      setOvertimeRateInput(String(user.employee.overtimeRatePercent));
-      setShiftWorkRateInput(String(user.employee.shiftWorkRatePercent));
-      setNightWorkRateInput(String(user.employee.nightWorkRatePercent));
+      setPayrollRateInputValue(
+        user.employee.payrollRateCents !== null ? (user.employee.payrollRateCents / 100).toFixed(2) : '',
+      );
     }
   }, [user?.employee]);
 
@@ -149,48 +141,26 @@ export function UserDetailPage() {
     }
   }
 
-  /** Phase 12, deel A (sectie 1) — de drie toeslagpercentages van deze medewerker (admin-only, business rule 11). */
-  async function savePremiumRates() {
+  /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (los van het facturatietarief hierboven). */
+  async function savePayrollRate() {
     if (!userId) return;
-    const parsePercent = (value: string) => {
-      const n = Number(value.trim());
-      return Number.isInteger(n) && n >= 100 && n <= 500 ? n : null;
-    };
-    const overtimeRatePercent = parsePercent(overtimeRateInput);
-    const shiftWorkRatePercent = parsePercent(shiftWorkRateInput);
-    const nightWorkRatePercent = parsePercent(nightWorkRateInput);
-    if (overtimeRatePercent === null || shiftWorkRatePercent === null || nightWorkRatePercent === null) {
-      setPremiumRatesError('Vul voor elk percentage een geheel getal tussen 100 en 500 in.');
+    const trimmed = payrollRateInputValue.trim().replace(',', '.');
+    const euros = trimmed === '' ? null : Number(trimmed);
+    if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
+      setPayrollRateError('Vul een geldig bedrag in (bv. 45,00), of laat leeg om het tarief te wissen.');
       return;
     }
-    setIsSavingPremiumRates(true);
-    setPremiumRatesError(null);
+    setIsSavingPayrollRate(true);
+    setPayrollRateError(null);
     try {
-      const response = await usersApi.update(userId, { overtimeRatePercent, shiftWorkRatePercent, nightWorkRatePercent });
+      const response = await usersApi.update(userId, {
+        payrollRateCents: euros === null ? null : Math.round(euros * 100),
+      });
       setUser(response.user);
     } catch (err) {
-      setPremiumRatesError(err instanceof ApiRequestError ? err.message : 'Opslaan van de toeslagpercentages is mislukt.');
+      setPayrollRateError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uitbetalingstarief is mislukt.');
     } finally {
-      setIsSavingPremiumRates(false);
-    }
-  }
-
-  /** Phase 12, deel A — toeslaginstelling van één koppeling (overuren van toepassing + ploegen-/nachtwerk). */
-  async function updateAssignmentPremiums(projectId: string, patch: Partial<{ overtimeApplies: boolean; premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK' }>) {
-    if (!user?.employee) return;
-    const employeeId = user.employee.id;
-    const current = assignmentPremiums.get(projectId) ?? { overtimeApplies: false, premiumType: 'NONE' as const };
-    const next = { ...current, ...patch };
-
-    setPendingPremiumsProjectId(projectId);
-    setAssignmentPremiums((prev) => new Map(prev).set(projectId, next));
-    try {
-      await projectsApi.assignments.updatePremiums(employeeId, projectId, next.overtimeApplies, next.premiumType);
-    } catch (err) {
-      setAssignmentPremiums((prev) => new Map(prev).set(projectId, current)); // terugzetten bij fout
-      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Opslaan van de toeslaginstelling is mislukt.');
-    } finally {
-      setPendingPremiumsProjectId(null);
+      setIsSavingPayrollRate(false);
     }
   }
 
@@ -286,11 +256,6 @@ export function UserDetailPage() {
     try {
       if (isAssigned) {
         await projectsApi.assignments.unassign(employeeId, project.id);
-        setAssignmentPremiums((prev) => {
-          const next = new Map(prev);
-          next.delete(project.id); // koppeling weg → toeslaginstelling heeft geen betekenis meer, DB-rij is cascade-verwijderd
-          return next;
-        });
       } else {
         await projectsApi.assignments.assign(employeeId, project.id);
       }
@@ -410,14 +375,16 @@ export function UserDetailPage() {
 
           {user.employee && (
             <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Facturatie</h2>
+              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Uurtarieven</h2>
               <p className="mb-4 text-sm text-neutral-500">
-                Standaard uurtarief van {user.employee.displayName} voor conceptfacturen in Teamleader (sectie 17). Nog
-                niet ingevuld? Dan kan een admin het tarief eenmalig invullen bij het aanmaken van de factuur zelf.
+                Twee aparte bedragen — Swatts marge zit in het verschil. Toeslagen (overuren/ploegenwerk/nachtwerk)
+                worden sinds de herziening per project ingesteld (zie de projectpagina) en gelden met hetzelfde
+                percentage op beide tarieven hieronder.
               </p>
-              <div className="flex items-center gap-2">
+
+              <div className="mb-4 flex items-center gap-2">
                 <label className="flex items-center gap-2 text-sm text-neutral-600">
-                  €
+                  Verkoopprijs (klant) €
                   <input
                     type="text"
                     inputMode="decimal"
@@ -437,70 +404,39 @@ export function UserDetailPage() {
                   {isSavingHourlyRate ? 'Bezig...' : 'Opslaan'}
                 </button>
               </div>
-              {hourlyRateError && <p className="mt-2 text-xs text-red-700">{hourlyRateError}</p>}
-            </section>
-          )}
-
-          {user.employee && (
-            <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Toeslagen</h2>
-              <p className="mb-4 text-sm text-neutral-500">
-                Percentages van het uurtarief hierboven. Enkel hier zichtbaar/instelbaar (nooit voor {user.employee.displayName} zelf of op de
-                werkbon).
+              {hourlyRateError && <p className="mb-4 text-xs text-red-700">{hourlyRateError}</p>}
+              <p className="mb-4 text-xs text-neutral-400">
+                Standaard uurtarief voor conceptfacturen in Teamleader (sectie 17). Nog niet ingevuld? Dan kan een
+                admin het tarief eenmalig invullen bij het aanmaken van de factuur zelf.
               </p>
-              <div className="flex flex-wrap items-end gap-4">
-                <label className="text-sm text-neutral-600">
-                  Overuren
-                  <div className="mt-1 flex items-center gap-1">
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={overtimeRateInput}
-                      onChange={(e) => setOvertimeRateInput(e.target.value)}
-                      disabled={isSavingPremiumRates}
-                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
-                    />
-                    <span>%</span>
-                  </div>
-                </label>
-                <label className="text-sm text-neutral-600">
-                  Ploegenwerk
-                  <div className="mt-1 flex items-center gap-1">
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={shiftWorkRateInput}
-                      onChange={(e) => setShiftWorkRateInput(e.target.value)}
-                      disabled={isSavingPremiumRates}
-                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
-                    />
-                    <span>%</span>
-                  </div>
-                </label>
-                <label className="text-sm text-neutral-600">
-                  Nachtwerk
-                  <div className="mt-1 flex items-center gap-1">
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={nightWorkRateInput}
-                      onChange={(e) => setNightWorkRateInput(e.target.value)}
-                      disabled={isSavingPremiumRates}
-                      className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
-                    />
-                    <span>%</span>
-                  </div>
+
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 text-sm text-neutral-600">
+                  Kostprijs (uitbetaling) €
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={payrollRateInputValue}
+                    onChange={(e) => setPayrollRateInputValue(e.target.value)}
+                    placeholder="45,00"
+                    disabled={isSavingPayrollRate}
+                    className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+                  />
                 </label>
                 <button
                   type="button"
-                  onClick={() => void savePremiumRates()}
-                  disabled={isSavingPremiumRates}
+                  onClick={() => void savePayrollRate()}
+                  disabled={isSavingPayrollRate}
                   className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
                 >
-                  {isSavingPremiumRates ? 'Bezig...' : 'Opslaan'}
+                  {isSavingPayrollRate ? 'Bezig...' : 'Opslaan'}
                 </button>
               </div>
-              {premiumRatesError && <p className="mt-2 text-xs text-red-700">{premiumRatesError}</p>}
+              {payrollRateError && <p className="mt-2 text-xs text-red-700">{payrollRateError}</p>}
+              <p className="mt-2 text-xs text-neutral-400">
+                Wat effectief uitbetaald wordt aan {user.employee.displayName} (Personeelsuitbetaling). Nog niet
+                ingevuld? Dan kan er nog geen uitbetaling voor deze medewerker afgesloten worden.
+              </p>
             </section>
           )}
 
@@ -557,8 +493,6 @@ export function UserDetailPage() {
               <ul className="divide-y divide-neutral-100">
                 {allProjects?.map((project) => {
                   const isAssigned = assignedProjectIds.has(project.id);
-                  const premiums = assignmentPremiums.get(project.id) ?? { overtimeApplies: false, premiumType: 'NONE' as const };
-                  const isPremiumsPending = pendingPremiumsProjectId === project.id;
                   return (
                     <li key={project.id} className="py-2">
                       <div className="flex items-center gap-3">
@@ -578,35 +512,6 @@ export function UserDetailPage() {
                           )}
                         </label>
                       </div>
-
-                      {/* Phase 12, deel A (sectie 1): toeslaginstelling enkel tonen/bewerkbaar voor een aangevinkte koppeling. */}
-                      {isAssigned && (
-                        <div className="mt-2 ml-7 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-neutral-600">
-                          <label className="flex items-center gap-1.5">
-                            <input
-                              type="checkbox"
-                              checked={premiums.overtimeApplies}
-                              disabled={isPremiumsPending}
-                              onChange={(e) => void updateAssignmentPremiums(project.id, { overtimeApplies: e.target.checked })}
-                              className="h-3.5 w-3.5 accent-swatt-gold"
-                            />
-                            Overuren van toepassing
-                          </label>
-                          {(['NONE', 'SHIFT_WORK', 'NIGHT_WORK'] as const).map((option) => (
-                            <label key={option} className="flex items-center gap-1.5">
-                              <input
-                                type="radio"
-                                name={`premium-${project.id}`}
-                                checked={premiums.premiumType === option}
-                                disabled={isPremiumsPending}
-                                onChange={() => void updateAssignmentPremiums(project.id, { premiumType: option })}
-                                className="h-3.5 w-3.5 accent-swatt-gold"
-                              />
-                              {option === 'NONE' ? 'Geen toeslag' : option === 'SHIFT_WORK' ? 'Ploegenwerk' : 'Nachtwerk'}
-                            </label>
-                          ))}
-                        </div>
-                      )}
                     </li>
                   );
                 })}

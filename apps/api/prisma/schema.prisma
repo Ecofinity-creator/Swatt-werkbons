@@ -327,13 +327,17 @@ model Employee {
   /// hoeven verlaten.
   defaultHourlyRateCents Int? @map("default_hourly_rate_cents")
 
-  /// Phase 12, deel A (sectie 1): toeslagpercentages — enkel admin-zichtbaar
-  /// (Medewerkers-instellingen), nooit voor de medewerker zelf of op de
-  /// werkbon-PDF (business rule 11). Effectief van toepassing enkel wanneer de
-  /// bijhorende koppeling (ProjectAssignment) dit expliciet aanvinkt/kiest.
-  overtimeRatePercent  Int @default(150) @map("overtime_rate_percent")
-  shiftWorkRatePercent Int @default(120) @map("shift_work_rate_percent")
-  nightWorkRatePercent Int @default(150) @map("night_work_rate_percent")
+  /// Fase 12-herziening (op vraag na de eerste versie van deel A/E):
+  /// `defaultHourlyRateCents` hierboven is de VERKOOPPRIJS (facturatie aan de
+  /// klant, ongewijzigd qua betekenis/gebruik). Dit hier is de KOSTPRIJS —
+  /// wat effectief aan de medewerker/onderaannemer uitbetaald wordt
+  /// (PayrollService). Dit zijn bewust twee aparte bedragen (Swatts marge zit
+  /// in het verschil); de toeslagpercentages (nu op Project, zie
+  /// Project.overtimeRatePercent e.a.) worden wél identiek op beide tarieven
+  /// toegepast, enkel de basis verschilt. `null` tot een admin dit invult —
+  /// PayrollService kan dan nog geen personeelsuitbetaling voor deze
+  /// medewerker afsluiten (zelfde "nog geen tarief"-patroon als hierboven).
+  payrollRateCents Int? @map("payroll_rate_cents")
 
   /// Werknemer vs. Onderaannemer (zie EmploymentType hierboven) — bepaalt
   /// welk soort document deze persoon krijgt bij de maandelijkse
@@ -529,12 +533,26 @@ model Project {
   /// (zie InvoiceBatchService.listInvoiceable()). Instelbaar door ADMIN op het
   /// backoffice-projectscherm.
   invoicingEnabled  Boolean                  @default(true) @map("invoicing_enabled")
-  /// Phase 12, deel A (sectie 1): "Overuren boven 8u/dag" (DAILY, vaste
-  /// drempel) of "Overuren boven [x]u/week" (WEEKLY, drempel in
+  /// Fase 12-herziening: "Overuren boven 8u/dag" (DAILY, vaste drempel) of
+  /// "Overuren boven [x]u/week" (WEEKLY, drempel in
   /// overtimeWeeklyThresholdHours — vrij instelbaar getal, bv. 39 of 40).
-  /// Enkel relevant voor koppelingen met overtimeApplies=true.
+  /// Sinds deze herziening geldt de volledige toeslagregeling (dit +
+  /// onderstaande velden) UNIFORM voor iedereen die op dit project werkt —
+  /// "de medewerker/onderaannemer wordt uitbetaald volgens de afspraken met
+  /// de klant" was de expliciete reden om dit van Employee/ProjectAssignment
+  /// naar hier te verhuizen (geen per-medewerker-uitzondering meer nodig).
   overtimeThresholdType        OvertimeThresholdType @default(DAILY) @map("overtime_threshold_type")
   overtimeWeeklyThresholdHours Decimal?              @map("overtime_weekly_threshold_hours") @db.Decimal(4, 2)
+  /// Overuren staat onafhankelijk naast ploegenwerk/nachtwerk (die elkaar
+  /// uitsluiten via premiumType, radiovakjes in de UI).
+  overtimeApplies Boolean     @default(false) @map("overtime_applies")
+  premiumType     PremiumType @default(NONE) @map("premium_type")
+  /// Percentages van het uurtarief — toegepast op zowel Employee.defaultHourlyRateCents
+  /// (facturatie) als Employee.payrollRateCents (uitbetaling): zelfde percentage,
+  /// andere basis. Admin-only zichtbaar (business rule 11).
+  overtimeRatePercent  Int @default(150) @map("overtime_rate_percent")
+  shiftWorkRatePercent Int @default(120) @map("shift_work_rate_percent")
+  nightWorkRatePercent Int @default(150) @map("night_work_rate_percent")
   /// Phase 12, deel B (sectie 2) — "Ondertekening per werkbon" (default) of
   /// "Ondertekening per week" (zie WeeklyApproval hieronder).
   signingMode SigningMode @default(PER_WORK_ORDER) @map("signing_mode")
@@ -634,13 +652,6 @@ model ProjectAssignment {
   employeeId      String   @map("employee_id") @db.Uuid
   assignedByUserId String  @map("assigned_by_user_id") @db.Uuid
   assignedAt      DateTime @default(now()) @map("assigned_at") @db.Timestamptz
-
-  /// Phase 12, deel A (sectie 1): overuren staat onafhankelijk naast
-  /// ploegenwerk/nachtwerk (die elkaar uitsluiten via premiumType). Erft door
-  /// naar alle tijdregistraties van deze medewerker op dit project — de
-  /// medewerker kiest of ziet hier zelf nooit iets van (business rule 11).
-  overtimeApplies Boolean     @default(false) @map("overtime_applies")
-  premiumType     PremiumType @default(NONE) @map("premium_type")
 
   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   employee       Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)

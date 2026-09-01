@@ -16,7 +16,7 @@ const WITH_DRAFT_DETAILS = {
       include: {
         workOrder: {
           include: {
-            project: { include: { assignments: true } },
+            project: true,
             timeEntries: { include: { timeEntry: { include: { employee: true } } } },
           },
         },
@@ -25,13 +25,6 @@ const WITH_DRAFT_DETAILS = {
     employeeRates: true,
   },
 } as const;
-
-/** Fase 12, deel A: enkel de velden van een ProjectAssignment die de rekenlogica nodig heeft. */
-interface ProjectAssignmentRow {
-  employeeId: string;
-  overtimeApplies: boolean;
-  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
-}
 
 /** Handgeschreven vorm van de query hierboven — zelfde reden als elders in deze codebase (stale gegenereerde Prisma-client in de sandbox, zie invoice-batch.service.ts). */
 interface DraftBatchLineRow {
@@ -47,7 +40,12 @@ interface DraftBatchLineRow {
       teamleaderId: string;
       overtimeThresholdType: 'DAILY' | 'WEEKLY';
       overtimeWeeklyThresholdHours: number | null;
-      assignments: ProjectAssignmentRow[];
+      /** Fase 12-herziening: toeslagregeling zit nu volledig en uniform op Project, niet meer per ProjectAssignment. */
+      overtimeApplies: boolean;
+      premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+      overtimeRatePercent: number;
+      shiftWorkRatePercent: number;
+      nightWorkRatePercent: number;
     };
     timeEntries: Array<{
       timeEntry: {
@@ -58,9 +56,6 @@ interface DraftBatchLineRow {
           id: string;
           displayName: string;
           defaultHourlyRateCents: number | null;
-          overtimeRatePercent: number;
-          shiftWorkRatePercent: number;
-          nightWorkRatePercent: number;
         };
       };
     }>;
@@ -313,17 +308,11 @@ function buildLineItemsForBatch(
   }
 
   return Array.from(bucketsByEmployeeProject.values()).flatMap((bucket) => {
-    const assignment: ProjectAssignmentRow = bucket.project.assignments.find((a) => a.employeeId === bucket.employeeId) ?? {
-      employeeId: bucket.employeeId,
-      overtimeApplies: false,
-      premiumType: 'NONE',
-    };
-
     let normalHours = 0;
     let overtimeHours = 0;
     for (const seconds of bucket.secondsByPeriod.values()) {
       const totalHours = seconds / 3600;
-      if (assignment.overtimeApplies) {
+      if (bucket.project.overtimeApplies) {
         const split = splitEffectiveHours(totalHours, {
           overtimeThresholdType: bucket.project.overtimeThresholdType,
           overtimeWeeklyThresholdHours: bucket.project.overtimeWeeklyThresholdHours,
@@ -338,7 +327,7 @@ function buildLineItemsForBatch(
     overtimeHours = Math.round(overtimeHours * 100) / 100;
 
     const employeeRate = rateByEmployeeId.get(bucket.employeeId)!;
-    const { normalPercent, overtimePercent } = computeRatePercent(bucket.employee, assignment);
+    const { normalPercent, overtimePercent } = computeRatePercent(bucket.project);
     const workOrderRefs = Array.from(bucket.workOrderNumbers).sort().join(', ');
 
     const items: Array<{ quantity: number; description: string; unit_price: { amount: number; tax: 'excluding' }; tax_rate_id: string }> = [];

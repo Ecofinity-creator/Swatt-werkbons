@@ -1,0 +1,108 @@
+From 8aa938595818b300f0822cfe21b656c1ce606565 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 31 Aug 2026 14:01:00 +0000
+Subject: [PATCH] =?UTF-8?q?Fix:=20Prisma=20schema=20ondersteunt=20geen=20/?=
+ =?UTF-8?q?**=20*/=20blokcommentaar=20=E2=80=94=20omgezet=20naar=20///=20(?=
+ =?UTF-8?q?loste=2036=20validatiefouten=20op,=20zie=20CI)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ apps/api/prisma/schema.prisma | 66 ++++++++++++++++-------------------
+ 1 file changed, 30 insertions(+), 36 deletions(-)
+
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 703eeb8..1dbf401 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -832,24 +832,22 @@ model WorkOrder {
+   @@map("work_order")
+ }
+ 
+-/**
+- * Phase 12, deel B (sectie 2 van de projectbrief): "werkbonnen per week laten
+- * tekenen door de klant". Eén rij per (project, kalenderweek) — de
+- * kalenderweek wordt bepaald op basis van `WorkOrder.createdAt` (er bestaat
+- * geen apart "werkdatum"-veld; een werkbon wordt aangemaakt op de dag zelf,
+- * zie WorkOrderService.create()).
+- *
+- * Bewust GEEN aparte weekoverzicht-PDF/Teamleader-upload-pijplijn (dat zou
+- * een volledig tweede document-template + upload-mechanisme betekenen naast
+- * het al bestaande per-werkbon-PDF-systeem, Phase 8/9) — bij het ondertekenen
+- * van de week krijgt élke onderliggende werkbon gewoon zijn eigen
+- * `WorkOrderSignature` (zelfde afbeelding/naam, individuele contentHash) en
+- * doorloopt zijn eigen bestaande PDF-generatie + Teamleader-upload
+- * ongewijzigd. Dit voldoet aan de functionele kern ("de klant tekent één
+- * keer voor de hele week") zonder de PDF/Teamleader-architectuur te
+- * verdubbelen — een gecombineerd weekoverzicht-PDF blijft een losstaande,
+- * additieve verbetering voor een latere fase.
+- */
++ /// Phase 12, deel B (sectie 2 van de projectbrief): "werkbonnen per week laten
++ /// tekenen door de klant". Eén rij per (project, kalenderweek) — de
++ /// kalenderweek wordt bepaald op basis van `WorkOrder.createdAt` (er bestaat
++ /// geen apart "werkdatum"-veld; een werkbon wordt aangemaakt op de dag zelf,
++ /// zie WorkOrderService.create()).
++ ///
++ /// Bewust GEEN aparte weekoverzicht-PDF/Teamleader-upload-pijplijn (dat zou
++ /// een volledig tweede document-template + upload-mechanisme betekenen naast
++ /// het al bestaande per-werkbon-PDF-systeem, Phase 8/9) — bij het ondertekenen
++ /// van de week krijgt élke onderliggende werkbon gewoon zijn eigen
++ /// `WorkOrderSignature` (zelfde afbeelding/naam, individuele contentHash) en
++ /// doorloopt zijn eigen bestaande PDF-generatie + Teamleader-upload
++ /// ongewijzigd. Dit voldoet aan de functionele kern ("de klant tekent één
++ /// keer voor de hele week") zonder de PDF/Teamleader-architectuur te
++ /// verdubbelen — een gecombineerd weekoverzicht-PDF blijft een losstaande,
++ /// additieve verbetering voor een latere fase.
+ model WeeklyApproval {
+   id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+   projectId     String               @map("project_id") @db.Uuid
+@@ -1179,14 +1177,12 @@ model InvoiceBatchEmployeeRate {
+   @@map("invoice_batch_employee_rate")
+ }
+ 
+-/**
+- * Phase 12, deel E (sectie "Personeelsuitbetaling"): maandoverzicht per
+- * medewerker met exact dezelfde rekenlogica als de klantfactuur
+- * (RateCalculationService, zie teamleader-invoice.service.ts) — maar bewust
+- * losgekoppeld van InvoiceBatch/Project.invoicingEnabled: een medewerker
+- * wordt uitbetaald voor ELKE gewerkte, ondertekende uur, ook op een
+- * nacalculatie-project (Phase 12, deel C) zonder klantfactuur.
+- */
++ /// Phase 12, deel E (sectie "Personeelsuitbetaling"): maandoverzicht per
++ /// medewerker met exact dezelfde rekenlogica als de klantfactuur
++ /// (RateCalculationService, zie teamleader-invoice.service.ts) — maar bewust
++ /// losgekoppeld van InvoiceBatch/Project.invoicingEnabled: een medewerker
++ /// wordt uitbetaald voor ELKE gewerkte, ondertekende uur, ook op een
++ /// nacalculatie-project (Phase 12, deel C) zonder klantfactuur.
+ model PayrollBatch {
+   id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+   employeeId  String             @map("employee_id") @db.Uuid
+@@ -1211,16 +1207,14 @@ model PayrollBatch {
+   @@map("payroll_batch")
+ }
+ 
+-/**
+- * Eén rij per bronregistratie (TimeEntry) — `timeEntryId` is uniek over de
+- * hele tabel, business rule 12: "elke tijdregistratie mag maar één keer aan
+- * de medewerker uitbetaald worden" (zelfde databank-afgedwongen patroon als
+- * InvoiceBatchLine.workOrderId voor business rule 7). Bewust normale/overuren
+- * gescheiden op één rij per bronregistratie i.p.v. één generieke
+- * "categorie"-kolom: een enkele tijdregistratie kan zelf al deels normaal en
+- * deels overuren zijn (bv. een dag van 9u30 met een 8u-drempel), en dit
+- * behoudt toch de "één rij per bron"-garantie die business rule 12 vereist.
+- */
++ /// Eén rij per bronregistratie (TimeEntry) — `timeEntryId` is uniek over de
++ /// hele tabel, business rule 12: "elke tijdregistratie mag maar één keer aan
++ /// de medewerker uitbetaald worden" (zelfde databank-afgedwongen patroon als
++ /// InvoiceBatchLine.workOrderId voor business rule 7). Bewust normale/overuren
++ /// gescheiden op één rij per bronregistratie i.p.v. één generieke
++ /// "categorie"-kolom: een enkele tijdregistratie kan zelf al deels normaal en
++ /// deels overuren zijn (bv. een dag van 9u30 met een 8u-drempel), en dit
++ /// behoudt toch de "één rij per bron"-garantie die business rule 12 vereist.
+ model PayrollBatchLine {
+   id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+   payrollBatchId String      @map("payroll_batch_id") @db.Uuid
+-- 
+2.43.0
+
