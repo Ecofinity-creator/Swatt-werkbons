@@ -228,16 +228,32 @@ export function PayrollPage() {
                       {formatEuroCents(batch.totalAmountCents)} · afgesloten op {formatDate(batch.createdAt)}
                     </span>
                   </div>
-                  {batch.status === 'DRAFT' && (
-                    <button
-                      type="button"
-                      disabled={removingBatchId === batch.id}
-                      onClick={() => void handleRemoveBatch(batch.id)}
-                      className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50"
+                  <div className="flex items-center gap-2">
+                    <a
+                      href={`/admin/payroll/batches/${batch.id}/excel`}
+                      download
+                      className="rounded-lg bg-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-white"
                     >
-                      {removingBatchId === batch.id ? 'Bezig...' : 'Verwijderen'}
-                    </button>
-                  )}
+                      Excel
+                    </a>
+                    <a
+                      href={`/admin/payroll/batches/${batch.id}/pdf`}
+                      download
+                      className="rounded-lg border border-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-swatt-gold-dark"
+                    >
+                      PDF
+                    </a>
+                    {batch.status === 'DRAFT' && (
+                      <button
+                        type="button"
+                        disabled={removingBatchId === batch.id}
+                        onClick={() => void handleRemoveBatch(batch.id)}
+                        className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50"
+                      >
+                        {removingBatchId === batch.id ? 'Bezig...' : 'Verwijderen'}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {expandedBatchId === batch.id && (

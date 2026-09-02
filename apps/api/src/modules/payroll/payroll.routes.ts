@@ -7,7 +7,11 @@ import type {
 } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
 import { AuthErrors } from '../../errors';
+import { CompanySettingsService } from '../company-settings/company-settings.service';
 import { requireRole } from '../rbac/rbac.middleware';
+import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+import { renderPayrollStatementPdf } from './payroll-statement-document';
+import { buildPayrollStatementWorkbook } from './payroll-statement-workbook';
 import type { PayrollBatchRecord } from './payroll.service';
 import { PayrollService } from './payroll.service';
 import { createPayrollBatchBodySchema, listPayableSummaryQuerySchema, listPayrollBatchesQuerySchema, payrollBatchIdParamsSchema } from './payroll.schemas';
@@ -20,6 +24,8 @@ import { createPayrollBatchBodySchema, listPayableSummaryQuerySchema, listPayrol
  */
 export default async function payrollRoutes(app: FastifyInstance): Promise<void> {
   const service = new PayrollService(app.prisma);
+  const companySettings = new CompanySettingsService(app.prisma);
+  const storage: StorageService = new DatabaseStorageService(app.prisma);
 
   app.get(
     '/admin/payroll/payable',
@@ -66,6 +72,65 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
       return null;
     },
   );
+
+  // Downloadbaar overzichtsdocument (PDF) — op vraag, 1/9/2026: "mooie tabel
+  // met per dag beginuur, einduur, pauze en totaal gewerkte uren + overuren".
+  // Gebaseerd op de al bevroren batch-data, geen verse herberekening.
+  app.get(
+    '/admin/payroll/batches/:id/pdf',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request, reply) => {
+      const params = payrollBatchIdParamsSchema.parse(request.params);
+      const batch = await service.getById(params.id);
+
+      const settings = await companySettings.get();
+      const logo = settings.logoFileKey ? await storage.read(settings.logoFileKey) : null;
+
+      const buffer = await renderPayrollStatementPdf(batch, {
+        companyName: settings.companyName,
+        addressLine: settings.addressLine,
+        vatNumber: settings.vatNumber,
+        contactEmail: settings.contactEmail,
+        contactPhone: settings.contactPhone,
+        logo,
+      });
+
+      reply.header('Content-Type', 'application/pdf');
+      reply.header(
+        'Content-Disposition',
+        `attachment; filename="personeelsuitbetaling-${slugify(batch.employeeDisplayName)}-${batch.periodLabel}.pdf"`,
+      );
+      return reply.send(buffer);
+    },
+  );
+
+  // Zelfde totalisatie-met-detail als hierboven, als Excel-bestand.
+  app.get(
+    '/admin/payroll/batches/:id/excel',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request, reply) => {
+      const params = payrollBatchIdParamsSchema.parse(request.params);
+      const batch = await service.getById(params.id);
+
+      const buffer = await buildPayrollStatementWorkbook(batch);
+      reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      reply.header(
+        'Content-Disposition',
+        `attachment; filename="personeelsuitbetaling-${slugify(batch.employeeDisplayName)}-${batch.periodLabel}.xlsx"`,
+      );
+      return reply.send(buffer);
+    },
+  );
+}
+
+/** Zelfde aanpak als slugify() in work-order-pdf.service.ts/hours-export.routes.ts. */
+function slugify(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '') // accenten weg (bv. é → e)
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
 }
 
 function toBatchSummary(batch: PayrollBatchRecord): PayrollBatchSummary {

@@ -67,7 +67,16 @@ function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProje
       lines: batchLines.map((l) => {
         const entry = entries.find((e) => e.id === l.timeEntryId)!;
         const project = projects.find((p) => p.id === entry.projectId)!;
-        return { ...l, timeEntry: { project: { name: project.name } } };
+        return {
+          ...l,
+          timeEntry: {
+            project: { name: project.name },
+            startedAt: entry.startedAt,
+            endedAt: entry.endedAt,
+            pausedSeconds: entry.pausedSeconds,
+            workOrderLink: { workOrder: { workOrderNumber: `WB-${entry.id}` } },
+          },
+        };
       }),
     };
   }
@@ -189,6 +198,26 @@ describe('PayrollService', () => {
     expect(batch.totalAmountCents).toBe(Math.round(8 * 6500 * 1.5 + 2 * 6500 * 2.0));
     expect(batch.lines).toHaveLength(1);
     expect(batch.lines[0]?.projectName).toBe(project.name);
+  });
+
+  it('createBatch() met meerdere regels: sorteert chronologisch en vult per regel werkbon/tijden correct in (dekt een eerder stil scenario waarbij sort() met 1 regel de vergelijkingsfunctie nooit aanriep)', async () => {
+    const entries: FakeTimeEntry[] = [
+      { id: 'te-2', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-12T08:00:00Z'), endedAt: new Date('2026-08-12T10:00:00Z'), pausedSeconds: 0, signed: true },
+      { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 900, signed: true },
+    ];
+    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
+    const service = new PayrollService(prisma);
+
+    const batch = await service.createBatch(peter.id, '2026-08', 'user-admin');
+
+    expect(batch.lines).toHaveLength(2);
+    // Chronologisch gesorteerd, ondanks dat te-2 (12/8) vóór te-1 (10/8) werd aangemaakt.
+    expect(batch.lines[0]?.timeEntryId).toBe('te-1');
+    expect(batch.lines[0]?.startedAt).toEqual(new Date('2026-08-10T08:00:00Z'));
+    expect(batch.lines[0]?.endedAt).toEqual(new Date('2026-08-10T10:00:00Z'));
+    expect(batch.lines[0]?.pausedSeconds).toBe(900);
+    expect(batch.lines[0]?.workOrderNumber).toBe('WB-te-1');
+    expect(batch.lines[1]?.timeEntryId).toBe('te-2');
   });
 
   it('business rule 12: dezelfde tijdregistratie kan niet tweemaal uitbetaald worden', async () => {

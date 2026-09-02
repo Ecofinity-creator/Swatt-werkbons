@@ -15,11 +15,12 @@ export function Logo({ size = 'lg', className = '' }: { size?: 'lg' | 'md'; clas
       />
     );
   }
-  return (
-    <img
-      src="/logo-uurivo.png"
-      alt="Uurivo"
-      className={['h-auto w-64', className].filter(Boolean).join(' ')}
-    />
-  );
+  // Bewust GEEN hardcoded w-64 als vaste basisklasse: als de aanroeper een
+  // eigen breedte meegeeft via `className` (bv. de kleinere lockup in de
+  // header van HomePage.tsx), zou een tweede, conflicterende `w-*`-klasse
+  // in dezelfde classlist onvoorspelbaar zijn (Tailwind lost dat op via
+  // stylesheet-volgorde, niet via JSX-volgorde) — vandaar de expliciete
+  // fallback hieronder i.p.v. simpelweg samen te voegen.
+  const widthClassName = className.includes('w-') ? className : ['w-64', className].filter(Boolean).join(' ');
+  return <img src="/logo-uurivo.png" alt="Uurivo" className={['h-auto', widthClassName].join(' ')} />;
 }

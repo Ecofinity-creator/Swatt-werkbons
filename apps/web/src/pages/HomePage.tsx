@@ -46,10 +46,16 @@ export function HomePage() {
 
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
-      <header className="mb-8 flex items-center gap-3">
-        <Logo size="md" />
+      <header className="mb-8 flex flex-col items-start gap-3">
+        {/* Volledige lockup (icoon + "UURIVO"-woordmerk) zoals op het loginscherm,
+            i.p.v. enkel het compacte icoon — zelfde goudomrande lichte kaart
+            nodig voor zichtbaarheid (donkere tekst/pictogram op transparante
+            achtergrond versmelt anders met bg-swatt-black, zie LoginPage.tsx). */}
+        <div className="rounded-xl border-2 border-swatt-gold bg-neutral-50 p-4">
+          <Logo size="lg" className="w-40" />
+        </div>
         {branding?.logoDataUrl && (
-          <img src={branding.logoDataUrl} alt={branding.companyName} className="h-8 w-auto object-contain" />
+          <img src={branding.logoDataUrl} alt={branding.companyName} className="h-10 w-auto object-contain" />
         )}
       </header>
 

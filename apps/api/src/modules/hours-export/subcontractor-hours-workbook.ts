@@ -9,6 +9,8 @@ import type { HoursExportSubcontractorDetail } from './hours-export.service';
  * tijdregistraties, en een eindtotaal onderaan). Op uitdrukkelijke vraag
  * (steven, 1/9/2026): "totalisatie downloadbaar in Excel, PDF mag blijven" —
  * dus bewust een aanvulling naast de bestaande PDF-route, geen vervanging.
+ * Sinds de herziening van diezelfde dag: aparte kolommen voor normale
+ * uren/overuren i.p.v. één "Uren"-kolom (zelfde reden als de PDF-versie).
  */
 export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcontractorDetail): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
@@ -25,7 +27,8 @@ export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcont
     { key: 'd', width: 10 },
     { key: 'e', width: 10 },
     { key: 'f', width: 12 },
-    { key: 'g', width: 10 },
+    { key: 'g', width: 12 },
+    { key: 'h', width: 12 },
   ];
 
   const titleRow = sheet.addRow([`Urenoverzicht — ${detail.displayName}`]);
@@ -36,13 +39,12 @@ export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcont
   for (const project of detail.projects) {
     const projectHeaderRow = sheet.addRow([`${project.projectName} — ${project.customerName}`]);
     projectHeaderRow.font = { bold: true, size: 11 };
-    sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 7);
+    sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 8);
 
-    const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Omschrijving', 'Van', 'Tot', 'Pauze (min)', 'Uren']);
+    const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Omschrijving', 'Van', 'Tot', 'Pauze (min)', 'Normaal (u)', 'Overuren (u)']);
     styleColumnHeaderRow(columnHeaderRow);
 
     for (const entry of project.entries) {
-      const seconds = workedSeconds(entry);
       sheet.addRow([
         formatDate(entry.startedAt),
         entry.workOrderNumber,
@@ -50,19 +52,39 @@ export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcont
         formatTime(entry.startedAt),
         formatTime(entry.endedAt),
         Math.round(entry.pausedSeconds / 60),
-        Number((seconds / 3600).toFixed(2)),
+        Number(entry.normalHours.toFixed(2)),
+        Number(entry.overtimeHours.toFixed(2)),
       ]);
     }
 
-    const subtotalRow = sheet.addRow(['', '', '', '', '', 'Subtotaal', Number((project.totalSeconds / 3600).toFixed(2))]);
+    const subtotalRow = sheet.addRow([
+      '',
+      '',
+      '',
+      '',
+      '',
+      'Subtotaal',
+      Number(project.totalNormalHours.toFixed(2)),
+      Number(project.totalOvertimeHours.toFixed(2)),
+    ]);
     subtotalRow.font = { bold: true };
     sheet.addRow([]);
   }
 
-  const totalRow = sheet.addRow(['', '', '', '', '', 'Totaal', Number((detail.totalSeconds / 3600).toFixed(2))]);
+  const totalRow = sheet.addRow([
+    '',
+    '',
+    '',
+    '',
+    '',
+    'Totaal',
+    Number(detail.totalNormalHours.toFixed(2)),
+    Number(detail.totalOvertimeHours.toFixed(2)),
+  ]);
   totalRow.font = { bold: true, size: 12 };
   totalRow.getCell(6).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
   totalRow.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+  totalRow.getCell(8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
 
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);
@@ -73,12 +95,6 @@ function styleColumnHeaderRow(row: ExcelJS.Row): void {
   row.eachCell((cell) => {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
   });
-}
-
-/** Zelfde formule als hours-export.service.ts — bewust lokaal gehouden, zie de toelichting daar. */
-function workedSeconds(entry: { startedAt: Date; endedAt: Date; pausedSeconds: number }): number {
-  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
-  return Math.max(0, raw);
 }
 
 function formatDate(date: Date): string {

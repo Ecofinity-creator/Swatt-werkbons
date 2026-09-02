@@ -6,8 +6,11 @@
     { "source": "/health", "destination": "https://swatt-api.onrender.com/health" },
     { "source": "/auth/:path*", "destination": "https://swatt-api.onrender.com/auth/:path*" },
     { "source": "/admin/:path*", "destination": "https://swatt-api.onrender.com/admin/:path*" },
+    { "source": "/public/:path*", "destination": "https://swatt-api.onrender.com/public/:path*" },
     { "source": "/projects", "destination": "https://swatt-api.onrender.com/projects" },
     { "source": "/projects/:path*", "destination": "https://swatt-api.onrender.com/projects/:path*" },
+    { "source": "/weekly-approvals", "destination": "https://swatt-api.onrender.com/weekly-approvals" },
+    { "source": "/weekly-approvals/:path*", "destination": "https://swatt-api.onrender.com/weekly-approvals/:path*" },
     { "source": "/teamleader/status", "destination": "https://swatt-api.onrender.com/teamleader/status" },
     {
       "source": "/teamleader/oauth/prepare-authorize",

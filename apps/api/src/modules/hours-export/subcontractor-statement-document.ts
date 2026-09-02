@@ -57,8 +57,8 @@ const styles = {
   tableHeaderRow: { flexDirection: 'row', backgroundColor: '#f5f5f5', paddingVertical: 5, paddingHorizontal: 8 },
   tableRow: { flexDirection: 'row', paddingVertical: 5, paddingHorizontal: 8, borderTopWidth: 1, borderTopColor: '#eee' },
   colDate: { flex: 1, fontSize: 8 },
-  colWorkOrder: { flex: 1.4, fontSize: 8 },
-  colTime: { flex: 1, fontSize: 8, textAlign: 'right' },
+  colWorkOrder: { flex: 1.2, fontSize: 8 },
+  colTime: { flex: 0.9, fontSize: 8, textAlign: 'right' },
   tableHeaderText: { fontSize: 7, textTransform: 'uppercase', color: '#666', fontFamily: 'Helvetica-Bold' },
   grandTotalRow: {
     flexDirection: 'row',
@@ -89,6 +89,8 @@ export interface SubcontractorStatementEntryData {
   startedAt: Date;
   endedAt: Date;
   pausedSeconds: number;
+  normalHours: number;
+  overtimeHours: number;
 }
 
 export interface SubcontractorStatementProjectData {
@@ -187,7 +189,6 @@ function buildParty({ View, Text }: PdfKit, data: SubcontractorStatementData) {
 
 function buildProject({ View, Text }: PdfKit, project: SubcontractorStatementProjectData, index: number) {
   const rows = project.entries.map((entry, entryIndex) => {
-    const seconds = workedSeconds(entry);
     return h(
       View,
       { key: String(entryIndex), style: styles.tableRow },
@@ -196,7 +197,8 @@ function buildProject({ View, Text }: PdfKit, project: SubcontractorStatementPro
       h(Text, { style: styles.colTime }, formatTime(entry.startedAt)),
       h(Text, { style: styles.colTime }, formatTime(entry.endedAt)),
       h(Text, { style: styles.colTime }, formatHm(entry.pausedSeconds)),
-      h(Text, { style: styles.colTime }, formatHm(seconds)),
+      h(Text, { style: styles.colTime }, formatHours(entry.normalHours)),
+      h(Text, { style: styles.colTime }, formatHours(entry.overtimeHours)),
     );
   });
 
@@ -229,7 +231,8 @@ function buildProject({ View, Text }: PdfKit, project: SubcontractorStatementPro
         h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Van'),
         h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Tot'),
         h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Pauze'),
-        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Uren'),
+        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Normaal'),
+        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Overuren'),
       ),
       ...rows,
     ),
@@ -249,16 +252,15 @@ function buildFooter({ Text }: PdfKit, legalText: string) {
   return h(Text, { style: styles.footer, fixed: true }, legalText);
 }
 
-function workedSeconds(entry: { startedAt: Date; endedAt: Date; pausedSeconds: number }): number {
-  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
-  return Math.max(0, raw);
-}
-
 function formatHm(totalSeconds: number): string {
   const totalMinutes = Math.round(totalSeconds / 60);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return `${hours}:${String(minutes).padStart(2, '0')}`;
+}
+
+function formatHours(hours: number): string {
+  return hours.toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function formatTime(date: Date): string {

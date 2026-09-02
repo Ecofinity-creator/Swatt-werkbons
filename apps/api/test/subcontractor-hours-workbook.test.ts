@@ -8,12 +8,16 @@ const detail: HoursExportSubcontractorDetail = {
   displayName: 'Jan Onderaannemer',
   periodLabel: '2026-08',
   totalSeconds: 4 * 3600 + 2 * 3600,
+  totalNormalHours: 5,
+  totalOvertimeHours: 1,
   projects: [
     {
       projectName: 'Onderhoud HVAC',
       projectNumber: 'PRO-1',
       customerName: 'Janssens BV',
       totalSeconds: 4 * 3600,
+      totalNormalHours: 3,
+      totalOvertimeHours: 1,
       entries: [
         {
           workOrderId: 'wo-1',
@@ -27,6 +31,8 @@ const detail: HoursExportSubcontractorDetail = {
           pausedSeconds: 0,
           isManual: false,
           description: 'Onderhoud uitgevoerd.',
+          normalHours: 3,
+          overtimeHours: 1,
         },
       ],
     },
@@ -35,6 +41,8 @@ const detail: HoursExportSubcontractorDetail = {
       projectNumber: null,
       customerName: 'De Smet NV',
       totalSeconds: 2 * 3600,
+      totalNormalHours: 2,
+      totalOvertimeHours: 0,
       entries: [
         {
           workOrderId: 'wo-2',
@@ -48,6 +56,8 @@ const detail: HoursExportSubcontractorDetail = {
           pausedSeconds: 0,
           isManual: false,
           description: null,
+          normalHours: 2,
+          overtimeHours: 0,
         },
       ],
     },
@@ -55,7 +65,7 @@ const detail: HoursExportSubcontractorDetail = {
 };
 
 describe('buildSubcontractorHoursWorkbook()', () => {
-  it('genereert een geldig, niet-leeg .xlsx-bestand met de juiste totalen', async () => {
+  it('genereert een geldig .xlsx-bestand met de juiste normale-uren-/overuren-totalen', async () => {
     const buffer = await buildSubcontractorHoursWorkbook(detail);
     expect(buffer.length).toBeGreaterThan(0);
 
@@ -80,8 +90,9 @@ describe('buildSubcontractorHoursWorkbook()', () => {
     expect(allValues).toContain('Interventie — De Smet NV');
     expect(allValues).toContain('WB-2026-000123');
     expect(allValues).toContain('WB-2026-000124');
-    expect(allValues).toContain(4); // subtotaal project 1 (4u)
-    expect(allValues).toContain(2); // subtotaal project 2 (2u)
-    expect(allValues).toContain(6); // eindtotaal (6u)
+    expect(allValues).toContain(3); // normaal, project 1 (regel + subtotaal)
+    expect(allValues).toContain(1); // overuren, project 1 (regel + subtotaal)
+    expect(allValues).toContain(2); // normaal, project 2 (regel + subtotaal)
+    expect(allValues).toContain(5); // eindtotaal normaal
   });
 });

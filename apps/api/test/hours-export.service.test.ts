@@ -17,7 +17,15 @@ interface FakeTimeEntry {
     workOrder: {
       id: string;
       workOrderNumber: string;
-      project: { name: string; projectNumber: string | null; customer: { name: string } };
+      project: {
+        id: string;
+        name: string;
+        projectNumber: string | null;
+        customer: { name: string };
+        overtimeApplies: boolean;
+        overtimeThresholdType: 'DAILY' | 'WEEKLY';
+        overtimeWeeklyThresholdHours: number | null;
+      };
       signature: { signedAt: Date } | null;
     };
   } | null;
@@ -44,7 +52,16 @@ function createFakePrisma(employees: FakeEmployee[]) {
   } as unknown as PrismaClient;
 }
 
-function signedTimeEntry(overrides: Partial<FakeTimeEntry> & { workOrderId?: string; signedAt?: Date | null }): FakeTimeEntry {
+function signedTimeEntry(
+  overrides: Partial<FakeTimeEntry> & {
+    workOrderId?: string;
+    signedAt?: Date | null;
+    projectId?: string;
+    overtimeApplies?: boolean;
+    overtimeThresholdType?: 'DAILY' | 'WEEKLY';
+    overtimeWeeklyThresholdHours?: number | null;
+  },
+): FakeTimeEntry {
   const workOrderId = overrides.workOrderId ?? 'wo-1';
   const signedAt = overrides.signedAt === undefined ? new Date('2026-08-15T12:00:00Z') : overrides.signedAt;
   return {
@@ -59,7 +76,15 @@ function signedTimeEntry(overrides: Partial<FakeTimeEntry> & { workOrderId?: str
           workOrder: {
             id: workOrderId,
             workOrderNumber: `WB-${workOrderId}`,
-            project: { name: 'Onderhoud warmtepomp', projectNumber: 'P-1', customer: { name: 'Janssens BV' } },
+            project: {
+              id: overrides.projectId ?? 'proj-1',
+              name: 'Onderhoud warmtepomp',
+              projectNumber: 'P-1',
+              customer: { name: 'Janssens BV' },
+              overtimeApplies: overrides.overtimeApplies ?? false,
+              overtimeThresholdType: overrides.overtimeThresholdType ?? 'DAILY',
+              overtimeWeeklyThresholdHours: overrides.overtimeWeeklyThresholdHours ?? null,
+            },
             signature: { signedAt },
           },
         }
@@ -131,6 +156,57 @@ describe('HoursExportService', () => {
     await expect(service.getSubcontractorDetail('emp-1', '2026-08')).rejects.toMatchObject({
       code: 'HOURS_EXPORT_WRONG_EMPLOYMENT_TYPE',
     });
+  });
+
+  it('getSubcontractorDetail() splitst normale uren/overuren per project (DAILY-drempel, 9u30 → 8u normaal + 1u30 overuren)', async () => {
+    const subcontractor: FakeEmployee = {
+      id: 'sub-1',
+      displayName: 'Aannemer BV',
+      employmentType: 'SUBCONTRACTOR',
+      timeEntries: [
+        signedTimeEntry({
+          workOrderId: 'wo-1',
+          startedAt: new Date('2026-08-20T07:00:00Z'),
+          endedAt: new Date('2026-08-20T16:30:00Z'), // 9u30
+          pausedSeconds: 0,
+          overtimeApplies: true,
+          overtimeThresholdType: 'DAILY',
+        }),
+      ],
+    };
+    const service = new HoursExportService(createFakePrisma([subcontractor]));
+
+    const detail = await service.getSubcontractorDetail('sub-1', '2026-08');
+
+    expect(detail.projects[0]!.entries[0]).toMatchObject({ normalHours: 8, overtimeHours: 1.5 });
+    expect(detail.totalNormalHours).toBe(8);
+    expect(detail.totalOvertimeHours).toBe(1.5);
+  });
+
+  it('getSubcontractorDetail() bucket overuren over meerdere werkbonnen heen bij een WEEKLY-drempel', async () => {
+    const dayEntry = (day: string, workOrderId: string) =>
+      signedTimeEntry({
+        workOrderId,
+        startedAt: new Date(`2026-08-${day}T06:00:00Z`),
+        endedAt: new Date(`2026-08-${day}T20:00:00Z`), // 14u
+        pausedSeconds: 0,
+        overtimeApplies: true,
+        overtimeThresholdType: 'WEEKLY',
+        overtimeWeeklyThresholdHours: 39,
+      });
+    const subcontractor: FakeEmployee = {
+      id: 'sub-1',
+      displayName: 'Aannemer BV',
+      employmentType: 'SUBCONTRACTOR',
+      timeEntries: [dayEntry('17', 'wo-1'), dayEntry('18', 'wo-2'), dayEntry('19', 'wo-3')], // 3×14u = 42u
+    };
+    const service = new HoursExportService(createFakePrisma([subcontractor]));
+
+    const detail = await service.getSubcontractorDetail('sub-1', '2026-08');
+
+    // Exact hetzelfde acceptatiecriterium als bij de klantfactuur/personeelsuitbetaling: 39u normaal + 3u overuren.
+    expect(detail.totalNormalHours).toBe(39);
+    expect(detail.totalOvertimeHours).toBe(3);
   });
 
   it('weigert een ongeldig periode-formaat', async () => {

@@ -1,0 +1,1451 @@
+diff --git a/apps/api/src/modules/hours-export/hours-export.service.ts b/apps/api/src/modules/hours-export/hours-export.service.ts
+index e3b6e86..94c58e9 100644
+--- a/apps/api/src/modules/hours-export/hours-export.service.ts
++++ b/apps/api/src/modules/hours-export/hours-export.service.ts
+@@ -1,5 +1,6 @@
+ import type { PrismaClient } from '@prisma/client';
+ import { HoursExportErrors } from '../../errors';
++import { allocateHoursAcrossEntries } from '../rates/rate-calculation.service';
+ 
+ /**
+  * Werknemer vs. Onderaannemer — maandelijkse uren-export (backlog-item 30/8,
+@@ -14,6 +15,13 @@ import { HoursExportErrors } from '../../errors';
+  * Enige voorwaarde: de gekoppelde werkbon moet ondertekend zijn
+  * (`signature` niet null) — een niet-ondertekende werkbon is nog geen
+  * definitieve, betrouwbare urenregistratie (sectie 11).
++ *
++ * Op vraag (1/9/2026): het onderaannemersdocument toont per registratie ook
++ * de overuren-splitsing (normaal/overuren), niet enkel het totaal — zelfde
++ * bucket-per-dag/week-logica als PayrollService.computeLinesForEmployee(),
++ * hier bewust lokaal opnieuw toegepast (geen gedeelde helper, om
++ * HoursExportService niet afhankelijk te maken van PayrollService se
++ * bevroren-batch-semantiek — dit overzicht herberekent altijd vers).
+  */
+ export class HoursExportService {
+   constructor(private readonly prisma: PrismaClient) {}
+@@ -39,7 +47,9 @@ export class HoursExportService {
+       .map((employee) => ({
+         employeeId: employee.id,
+         displayName: employee.displayName,
+-        entries: employee.entries.map(toEntryRecord).sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime()),
++        entries: this.splitOvertimePerProject(employee.entries)
++          .map(toEntryRecord)
++          .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime()),
+       }))
+       .sort((a, b) => a.displayName.localeCompare(b.displayName));
+   }
+@@ -56,7 +66,7 @@ export class HoursExportService {
+       throw HoursExportErrors.wrongEmploymentType('Onderaannemer');
+     }
+ 
+-    const entries = employee.entries.map(toEntryRecord);
++    const entries = this.splitOvertimePerProject(employee.entries).map(toEntryRecord);
+     const projectsByKey = new Map<string, HoursExportProjectGroup>();
+     for (const entry of entries) {
+       const key = `${entry.projectName}::${entry.projectNumber ?? ''}`;
+@@ -64,6 +74,8 @@ export class HoursExportService {
+       if (existing) {
+         existing.entries.push(entry);
+         existing.totalSeconds += computeWorkedSeconds(entry);
++        existing.totalNormalHours += entry.normalHours;
++        existing.totalOvertimeHours += entry.overtimeHours;
+       } else {
+         projectsByKey.set(key, {
+           projectName: entry.projectName,
+@@ -71,6 +83,8 @@ export class HoursExportService {
+           customerName: entry.customerName,
+           entries: [entry],
+           totalSeconds: computeWorkedSeconds(entry),
++          totalNormalHours: entry.normalHours,
++          totalOvertimeHours: entry.overtimeHours,
+         });
+       }
+     }
+@@ -85,9 +99,62 @@ export class HoursExportService {
+       periodLabel,
+       projects,
+       totalSeconds: projects.reduce((sum, project) => sum + project.totalSeconds, 0),
++      totalNormalHours: round2(projects.reduce((sum, project) => sum + project.totalNormalHours, 0)),
++      totalOvertimeHours: round2(projects.reduce((sum, project) => sum + project.totalOvertimeHours, 0)),
+     };
+   }
+ 
++  /**
++   * Verdeelt elke tijdregistratie in normale uren/overuren, gegroepeerd per
++   * project en per dag/week naargelang de overurenregeling van dat project
++   * (zie Project.overtimeThresholdType, Fase 12-herziening: uniform per
++   * project). Wanneer overuren niet van toepassing is op een project, blijft
++   * alles "normaal" (overtimeHours = 0) — zelfde aanpak als
++   * PayrollService.computeLinesForEmployee().
++   */
++  private splitOvertimePerProject(entries: SignedEntryRow[]): SignedEntryRowWithSplit[] {
++    const byProject = new Map<string, SignedEntryRow[]>();
++    for (const entry of entries) {
++      const projectId = entry.workOrderLink.workOrder.project.id;
++      if (!byProject.has(projectId)) byProject.set(projectId, []);
++      byProject.get(projectId)!.push(entry);
++    }
++
++    const result: SignedEntryRowWithSplit[] = [];
++    for (const [, projectEntries] of byProject) {
++      const project = projectEntries[0]!.workOrderLink.workOrder.project;
++      if (!project.overtimeApplies) {
++        for (const entry of projectEntries) {
++          result.push({ ...entry, normalHours: round2(computeWorkedSeconds(entry) / 3600), overtimeHours: 0 });
++        }
++        continue;
++      }
++
++      const periodKeyOf = (entry: SignedEntryRow) =>
++        project.overtimeThresholdType === 'DAILY' ? dayKeyOf(entry.startedAt) : isoWeekKeyOf(entry.startedAt);
++      const byPeriod = new Map<string, SignedEntryRow[]>();
++      for (const entry of projectEntries) {
++        const key = periodKeyOf(entry);
++        if (!byPeriod.has(key)) byPeriod.set(key, []);
++        byPeriod.get(key)!.push(entry);
++      }
++
++      for (const [, periodEntries] of byPeriod) {
++        const sorted = [...periodEntries].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
++        const hoursById = sorted.map((entry, index) => ({ id: String(index), hours: computeWorkedSeconds(entry) / 3600 }));
++        const split = allocateHoursAcrossEntries(hoursById, {
++          overtimeThresholdType: project.overtimeThresholdType,
++          overtimeWeeklyThresholdHours: project.overtimeWeeklyThresholdHours === null ? null : Number(project.overtimeWeeklyThresholdHours),
++        });
++        sorted.forEach((entry, index) => {
++          const { normalHours, overtimeHours } = split.get(String(index))!;
++          result.push({ ...entry, normalHours: round2(normalHours), overtimeHours: round2(overtimeHours) });
++        });
++      }
++    }
++    return result;
++  }
++
+   /**
+    * Handgeschreven vorm van de query hieronder — zelfde reden als elders in
+    * deze codebase (mogelijk stale gegenereerde Prisma-client in de sandbox,
+@@ -120,9 +187,13 @@ export class HoursExportService {
+                     workOrderNumber: true,
+                     project: {
+                       select: {
++                        id: true,
+                         name: true,
+                         projectNumber: true,
+                         customer: { select: { name: true } },
++                        overtimeApplies: true,
++                        overtimeThresholdType: true,
++                        overtimeWeeklyThresholdHours: true,
+                       },
+                     },
+                     signature: { select: { signedAt: true } },
+@@ -165,6 +236,9 @@ export interface HoursExportEntryRecord {
+   pausedSeconds: number;
+   isManual: boolean;
+   description: string | null;
++  /** Fase 12-herziening: overuren-splitsing, zie splitOvertimePerProject() hierboven. */
++  normalHours: number;
++  overtimeHours: number;
+ }
+ 
+ export interface HoursExportEmployeeDetail {
+@@ -179,6 +253,8 @@ export interface HoursExportProjectGroup {
+   customerName: string;
+   entries: HoursExportEntryRecord[];
+   totalSeconds: number;
++  totalNormalHours: number;
++  totalOvertimeHours: number;
+ }
+ 
+ export interface HoursExportSubcontractorDetail {
+@@ -187,13 +263,23 @@ export interface HoursExportSubcontractorDetail {
+   periodLabel: string;
+   projects: HoursExportProjectGroup[];
+   totalSeconds: number;
++  totalNormalHours: number;
++  totalOvertimeHours: number;
+ }
+ 
+ interface WorkOrderLinkRow {
+   workOrder: {
+     id: string;
+     workOrderNumber: string;
+-    project: { name: string; projectNumber: string | null; customer: { name: string } };
++    project: {
++      id: string;
++      name: string;
++      projectNumber: string | null;
++      customer: { name: string };
++      overtimeApplies: boolean;
++      overtimeThresholdType: 'DAILY' | 'WEEKLY';
++      overtimeWeeklyThresholdHours: number | null;
++    };
+     signature: { signedAt: Date } | null;
+   };
+ }
+@@ -212,6 +298,12 @@ interface SignedEntryRow extends TimeEntryRow {
+   workOrderLink: WorkOrderLinkRow;
+ }
+ 
++/** Tussenvorm ná splitOvertimePerProject() — zelfde velden als SignedEntryRow plus de berekende splitsing. */
++interface SignedEntryRowWithSplit extends SignedEntryRow {
++  normalHours: number;
++  overtimeHours: number;
++}
++
+ interface EmployeeWithSignedEntriesRow {
+   id: string;
+   displayName: string;
+@@ -221,7 +313,7 @@ interface EmployeeWithSignedEntriesRow {
+   entries: SignedEntryRow[];
+ }
+ 
+-function toEntryRecord(entry: SignedEntryRow): HoursExportEntryRecord {
++function toEntryRecord(entry: SignedEntryRowWithSplit): HoursExportEntryRecord {
+   const workOrder = entry.workOrderLink.workOrder;
+   return {
+     workOrderId: workOrder.id,
+@@ -236,6 +328,8 @@ function toEntryRecord(entry: SignedEntryRow): HoursExportEntryRecord {
+     pausedSeconds: entry.pausedSeconds,
+     isManual: entry.isManual,
+     description: entry.description,
++    normalHours: entry.normalHours,
++    overtimeHours: entry.overtimeHours,
+   };
+ }
+ 
+@@ -251,6 +345,27 @@ function periodLabelOf(date: Date): string {
+   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+ }
+ 
++function round2(value: number): number {
++  return Math.round(value * 100) / 100;
++}
++
++function dayKeyOf(date: Date): string {
++  return date.toISOString().slice(0, 10);
++}
++
++/** ISO-8601-weeknummer (maandag als eerste dag) — zelfde implementatie als teamleader-invoice.service.ts/payroll.service.ts (bewust lokaal gehouden, zie de toelichting daar). */
++function isoWeekKeyOf(date: Date): string {
++  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
++  const dayNumber = (d.getUTCDay() + 6) % 7;
++  d.setUTCDate(d.getUTCDate() - dayNumber + 3);
++  const isoYear = d.getUTCFullYear();
++  const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
++  const firstThursdayDayNumber = (firstThursday.getUTCDay() + 6) % 7;
++  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstThursdayDayNumber + 3);
++  const weekNumber = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 24 * 60 * 60 * 1000));
++  return `${isoYear}-W${String(weekNumber).padStart(2, '0')}`;
++}
++
+ const PERIOD_LABEL_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+ 
+ function assertValidPeriod(periodLabel: string): void {
+diff --git a/apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts b/apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts
+index 74767b9..fdeb5d0 100644
+--- a/apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts
++++ b/apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts
+@@ -9,6 +9,8 @@ import type { HoursExportSubcontractorDetail } from './hours-export.service';
+  * tijdregistraties, en een eindtotaal onderaan). Op uitdrukkelijke vraag
+  * (steven, 1/9/2026): "totalisatie downloadbaar in Excel, PDF mag blijven" —
+  * dus bewust een aanvulling naast de bestaande PDF-route, geen vervanging.
++ * Sinds de herziening van diezelfde dag: aparte kolommen voor normale
++ * uren/overuren i.p.v. één "Uren"-kolom (zelfde reden als de PDF-versie).
+  */
+ export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcontractorDetail): Promise<Buffer> {
+   const workbook = new ExcelJS.Workbook();
+@@ -25,7 +27,8 @@ export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcont
+     { key: 'd', width: 10 },
+     { key: 'e', width: 10 },
+     { key: 'f', width: 12 },
+-    { key: 'g', width: 10 },
++    { key: 'g', width: 12 },
++    { key: 'h', width: 12 },
+   ];
+ 
+   const titleRow = sheet.addRow([`Urenoverzicht — ${detail.displayName}`]);
+@@ -36,13 +39,12 @@ export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcont
+   for (const project of detail.projects) {
+     const projectHeaderRow = sheet.addRow([`${project.projectName} — ${project.customerName}`]);
+     projectHeaderRow.font = { bold: true, size: 11 };
+-    sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 7);
++    sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 8);
+ 
+-    const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Omschrijving', 'Van', 'Tot', 'Pauze (min)', 'Uren']);
++    const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Omschrijving', 'Van', 'Tot', 'Pauze (min)', 'Normaal (u)', 'Overuren (u)']);
+     styleColumnHeaderRow(columnHeaderRow);
+ 
+     for (const entry of project.entries) {
+-      const seconds = workedSeconds(entry);
+       sheet.addRow([
+         formatDate(entry.startedAt),
+         entry.workOrderNumber,
+@@ -50,19 +52,39 @@ export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcont
+         formatTime(entry.startedAt),
+         formatTime(entry.endedAt),
+         Math.round(entry.pausedSeconds / 60),
+-        Number((seconds / 3600).toFixed(2)),
++        Number(entry.normalHours.toFixed(2)),
++        Number(entry.overtimeHours.toFixed(2)),
+       ]);
+     }
+ 
+-    const subtotalRow = sheet.addRow(['', '', '', '', '', 'Subtotaal', Number((project.totalSeconds / 3600).toFixed(2))]);
++    const subtotalRow = sheet.addRow([
++      '',
++      '',
++      '',
++      '',
++      '',
++      'Subtotaal',
++      Number(project.totalNormalHours.toFixed(2)),
++      Number(project.totalOvertimeHours.toFixed(2)),
++    ]);
+     subtotalRow.font = { bold: true };
+     sheet.addRow([]);
+   }
+ 
+-  const totalRow = sheet.addRow(['', '', '', '', '', 'Totaal', Number((detail.totalSeconds / 3600).toFixed(2))]);
++  const totalRow = sheet.addRow([
++    '',
++    '',
++    '',
++    '',
++    '',
++    'Totaal',
++    Number(detail.totalNormalHours.toFixed(2)),
++    Number(detail.totalOvertimeHours.toFixed(2)),
++  ]);
+   totalRow.font = { bold: true, size: 12 };
+   totalRow.getCell(6).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+   totalRow.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
++  totalRow.getCell(8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+ 
+   const buffer = await workbook.xlsx.writeBuffer();
+   return Buffer.from(buffer);
+@@ -75,12 +97,6 @@ function styleColumnHeaderRow(row: ExcelJS.Row): void {
+   });
+ }
+ 
+-/** Zelfde formule als hours-export.service.ts — bewust lokaal gehouden, zie de toelichting daar. */
+-function workedSeconds(entry: { startedAt: Date; endedAt: Date; pausedSeconds: number }): number {
+-  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
+-  return Math.max(0, raw);
+-}
+-
+ function formatDate(date: Date): string {
+   return date.toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+ }
+diff --git a/apps/api/src/modules/hours-export/subcontractor-statement-document.ts b/apps/api/src/modules/hours-export/subcontractor-statement-document.ts
+index d5b7cfd..291ef8e 100644
+--- a/apps/api/src/modules/hours-export/subcontractor-statement-document.ts
++++ b/apps/api/src/modules/hours-export/subcontractor-statement-document.ts
+@@ -57,8 +57,8 @@ const styles = {
+   tableHeaderRow: { flexDirection: 'row', backgroundColor: '#f5f5f5', paddingVertical: 5, paddingHorizontal: 8 },
+   tableRow: { flexDirection: 'row', paddingVertical: 5, paddingHorizontal: 8, borderTopWidth: 1, borderTopColor: '#eee' },
+   colDate: { flex: 1, fontSize: 8 },
+-  colWorkOrder: { flex: 1.4, fontSize: 8 },
+-  colTime: { flex: 1, fontSize: 8, textAlign: 'right' },
++  colWorkOrder: { flex: 1.2, fontSize: 8 },
++  colTime: { flex: 0.9, fontSize: 8, textAlign: 'right' },
+   tableHeaderText: { fontSize: 7, textTransform: 'uppercase', color: '#666', fontFamily: 'Helvetica-Bold' },
+   grandTotalRow: {
+     flexDirection: 'row',
+@@ -89,6 +89,8 @@ export interface SubcontractorStatementEntryData {
+   startedAt: Date;
+   endedAt: Date;
+   pausedSeconds: number;
++  normalHours: number;
++  overtimeHours: number;
+ }
+ 
+ export interface SubcontractorStatementProjectData {
+@@ -187,7 +189,6 @@ function buildParty({ View, Text }: PdfKit, data: SubcontractorStatementData) {
+ 
+ function buildProject({ View, Text }: PdfKit, project: SubcontractorStatementProjectData, index: number) {
+   const rows = project.entries.map((entry, entryIndex) => {
+-    const seconds = workedSeconds(entry);
+     return h(
+       View,
+       { key: String(entryIndex), style: styles.tableRow },
+@@ -196,7 +197,8 @@ function buildProject({ View, Text }: PdfKit, project: SubcontractorStatementPro
+       h(Text, { style: styles.colTime }, formatTime(entry.startedAt)),
+       h(Text, { style: styles.colTime }, formatTime(entry.endedAt)),
+       h(Text, { style: styles.colTime }, formatHm(entry.pausedSeconds)),
+-      h(Text, { style: styles.colTime }, formatHm(seconds)),
++      h(Text, { style: styles.colTime }, formatHours(entry.normalHours)),
++      h(Text, { style: styles.colTime }, formatHours(entry.overtimeHours)),
+     );
+   });
+ 
+@@ -229,7 +231,8 @@ function buildProject({ View, Text }: PdfKit, project: SubcontractorStatementPro
+         h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Van'),
+         h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Tot'),
+         h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Pauze'),
+-        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Uren'),
++        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Normaal'),
++        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Overuren'),
+       ),
+       ...rows,
+     ),
+@@ -249,11 +252,6 @@ function buildFooter({ Text }: PdfKit, legalText: string) {
+   return h(Text, { style: styles.footer, fixed: true }, legalText);
+ }
+ 
+-function workedSeconds(entry: { startedAt: Date; endedAt: Date; pausedSeconds: number }): number {
+-  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
+-  return Math.max(0, raw);
+-}
+-
+ function formatHm(totalSeconds: number): string {
+   const totalMinutes = Math.round(totalSeconds / 60);
+   const hours = Math.floor(totalMinutes / 60);
+@@ -261,6 +259,10 @@ function formatHm(totalSeconds: number): string {
+   return `${hours}:${String(minutes).padStart(2, '0')}`;
+ }
+ 
++function formatHours(hours: number): string {
++  return hours.toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++}
++
+ function formatTime(date: Date): string {
+   return date.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
+ }
+diff --git a/apps/api/src/modules/payroll/payroll-statement-document.ts b/apps/api/src/modules/payroll/payroll-statement-document.ts
+new file mode 100644
+index 0000000..aa15759
+--- /dev/null
++++ b/apps/api/src/modules/payroll/payroll-statement-document.ts
+@@ -0,0 +1,282 @@
++import { createElement as h } from 'react';
++import type { PayrollBatchRecord } from '../payroll/payroll.service';
++
++/**
++ * Personeelsuitbetaling — totalisatie-met-detail-document per medewerker/
++ * onderaannemer/periode (op vraag, 1/9/2026: "mooie tabel met per dag
++ * beginuur, einduur, pauze en totaal gewerkte uren + overuren"). Grotendeels
++ * dezelfde opbouw/stijl als subcontractor-statement-document.ts (bewust
++ * lokaal gehouden i.p.v. gedeeld, zie de toelichting daar) — hier bewust
++ * NIET gebaseerd op een verse herberekening, maar op de al BEVROREN
++ * PayrollBatch-data (business rule 3-analoog: een afgesloten uitbetaling
++ * verandert niet met terugwerkende kracht als een tarief later wijzigt).
++ */
++type ReactPdfModule = typeof import('@react-pdf/renderer', { with: { 'resolution-mode': 'import' } });
++
++let reactPdfModulePromise: Promise<ReactPdfModule> | null = null;
++function loadReactPdf(): Promise<ReactPdfModule> {
++  if (!reactPdfModulePromise) {
++    reactPdfModulePromise = import('@react-pdf/renderer');
++  }
++  return reactPdfModulePromise;
++}
++
++interface PdfKit {
++  View: ReactPdfModule['View'];
++  Text: ReactPdfModule['Text'];
++  Image: ReactPdfModule['Image'];
++}
++
++const GOLD = '#f0b90b';
++const BLACK = '#0a0a0a';
++
++/** Zelfde stijl als subcontractor-statement-document.ts (bewust — zelfde huisstijl/lay-out), bewust lokaal gehouden. */
++const styles = {
++  page: { paddingTop: 28, paddingBottom: 42, paddingHorizontal: 32, fontSize: 9, fontFamily: 'Helvetica', color: '#1a1a1a' },
++  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 },
++  logoBadge: { backgroundColor: BLACK, borderRadius: 6, paddingVertical: 8, paddingHorizontal: 14, alignSelf: 'flex-start' },
++  logoImage: { width: 110, height: 48, objectFit: 'contain' },
++  logoText: { color: GOLD, fontSize: 16, fontFamily: 'Helvetica-Bold', letterSpacing: 2 },
++  companyBlock: { marginTop: 6, fontSize: 8, color: '#444' },
++  titleBlock: { alignItems: 'flex-end' },
++  titleText: { fontSize: 18, fontFamily: 'Helvetica-Bold', color: BLACK },
++  subtitleText: { fontSize: 11, color: GOLD, fontFamily: 'Helvetica-Bold', marginTop: 2 },
++  dateText: { fontSize: 8, color: '#666', marginTop: 2 },
++  partyBlock: { borderWidth: 1, borderColor: '#e5e5e5', borderRadius: 4, padding: 10, marginBottom: 14 },
++  partyLabel: { fontSize: 7, textTransform: 'uppercase', color: GOLD, marginBottom: 4, fontFamily: 'Helvetica-Bold' },
++  partyName: { fontSize: 10, fontFamily: 'Helvetica-Bold', color: BLACK },
++  projectBlock: { marginBottom: 14 },
++  projectHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
++  projectName: { fontSize: 10, fontFamily: 'Helvetica-Bold', color: BLACK },
++  projectTotal: { fontSize: 10, fontFamily: 'Helvetica-Bold', color: GOLD },
++  table: { borderWidth: 1, borderColor: '#e5e5e5', borderRadius: 4 },
++  tableHeaderRow: { flexDirection: 'row', backgroundColor: '#f5f5f5', paddingVertical: 5, paddingHorizontal: 8 },
++  tableRow: { flexDirection: 'row', paddingVertical: 5, paddingHorizontal: 8, borderTopWidth: 1, borderTopColor: '#eee' },
++  colDate: { flex: 1.1, fontSize: 8 },
++  colWorkOrder: { flex: 1.3, fontSize: 8 },
++  colTime: { flex: 0.8, fontSize: 8, textAlign: 'right' },
++  colPremium: { flex: 1, fontSize: 8, textAlign: 'right' },
++  colAmount: { flex: 1, fontSize: 8, textAlign: 'right' },
++  tableHeaderText: { fontSize: 7, textTransform: 'uppercase', color: '#666', fontFamily: 'Helvetica-Bold' },
++  grandTotalRow: {
++    flexDirection: 'row',
++    justifyContent: 'space-between',
++    marginTop: 8,
++    paddingTop: 10,
++    borderTopWidth: 1,
++    borderTopColor: BLACK,
++  },
++  grandTotalLabel: { fontSize: 11, fontFamily: 'Helvetica-Bold', color: BLACK },
++  grandTotalValue: { fontSize: 11, fontFamily: 'Helvetica-Bold', color: GOLD },
++  footer: {
++    position: 'absolute',
++    bottom: 20,
++    left: 32,
++    right: 32,
++    fontSize: 7,
++    color: '#888',
++    textAlign: 'center',
++    borderTopWidth: 1,
++    borderTopColor: '#eee',
++    paddingTop: 6,
++  },
++} as const;
++
++export interface PayrollStatementCompanyData {
++  companyName: string;
++  addressLine: string | null;
++  vatNumber: string | null;
++  contactEmail: string | null;
++  contactPhone: string | null;
++  logo: { data: Buffer; mimeType: string } | null;
++}
++
++interface ProjectGroup {
++  projectName: string;
++  lines: PayrollBatchRecord['lines'];
++  normalHours: number;
++  overtimeHours: number;
++  amountCents: number;
++}
++
++export async function renderPayrollStatementPdf(batch: PayrollBatchRecord, company: PayrollStatementCompanyData): Promise<Buffer> {
++  const { Document, Page, View, Text, Image, renderToBuffer } = await loadReactPdf();
++  const kit: PdfKit = { View, Text, Image };
++  const groups = groupByProject(batch);
++
++  const buffer = await renderToBuffer(
++    h(
++      Document,
++      null,
++      h(
++        Page,
++        { size: 'A4', style: styles.page },
++        buildHeader(kit, batch, company),
++        buildParty(kit, batch),
++        ...groups.map((group, index) => buildProject(kit, group, index)),
++        buildGrandTotal(kit, batch.totalAmountCents),
++        buildFooter(
++          kit,
++          'Dit overzicht toont het bevroren, effectief uitbetaalde bedrag per tijdregistratie op het moment van afsluiten — een latere wijziging van tarief of toeslagregeling heeft hier geen invloed meer op.',
++        ),
++      ),
++    ),
++  );
++  return Buffer.from(buffer);
++}
++
++function groupByProject(batch: PayrollBatchRecord): ProjectGroup[] {
++  const byProject = new Map<string, ProjectGroup>();
++  for (const line of batch.lines) {
++    const existing = byProject.get(line.projectName);
++    if (existing) {
++      existing.lines.push(line);
++      existing.normalHours += line.normalHours;
++      existing.overtimeHours += line.overtimeHours;
++      existing.amountCents += line.amountCents;
++    } else {
++      byProject.set(line.projectName, {
++        projectName: line.projectName,
++        lines: [line],
++        normalHours: line.normalHours,
++        overtimeHours: line.overtimeHours,
++        amountCents: line.amountCents,
++      });
++    }
++  }
++  return Array.from(byProject.values()).sort((a, b) => a.projectName.localeCompare(b.projectName));
++}
++
++function buildHeader({ View, Text, Image }: PdfKit, batch: PayrollBatchRecord, company: PayrollStatementCompanyData) {
++  return h(
++    View,
++    { style: styles.headerRow },
++    h(
++      View,
++      null,
++      company.logo
++        ? h(Image, { src: company.logo.data, style: styles.logoImage })
++        : h(View, { style: styles.logoBadge }, h(Text, { style: styles.logoText }, 'UURIVO')),
++      h(
++        View,
++        { style: styles.companyBlock },
++        h(Text, null, company.companyName),
++        ...(company.addressLine ? [h(Text, { key: 'addr' }, company.addressLine)] : []),
++        ...(company.vatNumber ? [h(Text, { key: 'vat' }, `BTW ${company.vatNumber}`)] : []),
++        ...(company.contactEmail || company.contactPhone
++          ? [h(Text, { key: 'contact' }, [company.contactEmail, company.contactPhone].filter(Boolean).join(' · '))]
++          : []),
++      ),
++    ),
++    h(
++      View,
++      { style: styles.titleBlock },
++      h(Text, { style: styles.titleText }, 'PERSONEELSUITBETALING'),
++      h(Text, { style: styles.subtitleText }, formatPeriodLabel(batch.periodLabel)),
++      h(Text, { style: styles.dateText }, `Afgesloten op ${formatDate(batch.closedAt ?? batch.createdAt)}`),
++    ),
++  );
++}
++
++function buildParty({ View, Text }: PdfKit, batch: PayrollBatchRecord) {
++  return h(
++    View,
++    { style: styles.partyBlock },
++    h(Text, { style: styles.partyLabel }, 'Medewerker / onderaannemer'),
++    h(Text, { style: styles.partyName }, batch.employeeDisplayName),
++  );
++}
++
++function buildProject({ View, Text }: PdfKit, group: ProjectGroup, index: number) {
++  const rows = group.lines.map((line, lineIndex) =>
++    h(
++      View,
++      { key: String(lineIndex), style: styles.tableRow },
++      h(Text, { style: styles.colDate }, formatDate(line.startedAt)),
++      h(Text, { style: styles.colWorkOrder }, line.workOrderNumber),
++      h(Text, { style: styles.colTime }, formatTime(line.startedAt)),
++      h(Text, { style: styles.colTime }, formatTime(line.endedAt)),
++      h(Text, { style: styles.colTime }, formatHm(line.pausedSeconds)),
++      h(Text, { style: styles.colTime }, formatHours(line.normalHours)),
++      h(Text, { style: styles.colTime }, formatHours(line.overtimeHours)),
++      h(Text, { style: styles.colPremium }, premiumLabel(line.premiumType)),
++      h(Text, { style: styles.colAmount }, formatEuro(line.amountCents)),
++    ),
++  );
++
++  return h(
++    View,
++    { key: String(index), style: styles.projectBlock, wrap: false },
++    h(
++      View,
++      { style: styles.projectHeaderRow },
++      h(Text, { style: styles.projectName }, group.projectName),
++      h(Text, { style: styles.projectTotal }, formatEuro(group.amountCents)),
++    ),
++    h(
++      View,
++      { style: styles.table },
++      h(
++        View,
++        { style: styles.tableHeaderRow },
++        h(Text, { style: [styles.colDate, styles.tableHeaderText] }, 'Datum'),
++        h(Text, { style: [styles.colWorkOrder, styles.tableHeaderText] }, 'Werkbon'),
++        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Van'),
++        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Tot'),
++        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Pauze'),
++        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Normaal'),
++        h(Text, { style: [styles.colTime, styles.tableHeaderText] }, 'Overuren'),
++        h(Text, { style: [styles.colPremium, styles.tableHeaderText] }, 'Toeslag'),
++        h(Text, { style: [styles.colAmount, styles.tableHeaderText] }, 'Bedrag'),
++      ),
++      ...rows,
++    ),
++  );
++}
++
++function buildGrandTotal({ View, Text }: PdfKit, totalAmountCents: number) {
++  return h(
++    View,
++    { style: styles.grandTotalRow },
++    h(Text, { style: styles.grandTotalLabel }, 'Totaal uit te betalen'),
++    h(Text, { style: styles.grandTotalValue }, formatEuro(totalAmountCents)),
++  );
++}
++
++function buildFooter({ Text }: PdfKit, legalText: string) {
++  return h(Text, { style: styles.footer, fixed: true }, legalText);
++}
++
++function premiumLabel(premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK'): string {
++  return premiumType === 'NONE' ? '—' : premiumType === 'SHIFT_WORK' ? 'Ploegenwerk' : 'Nachtwerk';
++}
++
++function formatHm(totalSeconds: number): string {
++  const totalMinutes = Math.round(totalSeconds / 60);
++  const hours = Math.floor(totalMinutes / 60);
++  const minutes = totalMinutes % 60;
++  return `${hours}:${String(minutes).padStart(2, '0')}`;
++}
++
++function formatHours(hours: number): string {
++  return hours.toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++}
++
++function formatEuro(cents: number): string {
++  return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
++}
++
++function formatTime(date: Date): string {
++  return date.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
++}
++
++function formatDate(date: Date): string {
++  return date.toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
++}
++
++function formatPeriodLabel(periodLabel: string): string {
++  const [year, month] = periodLabel.split('-');
++  if (!year || !month) return periodLabel;
++  const date = new Date(Number(year), Number(month) - 1, 1);
++  return date.toLocaleDateString('nl-BE', { month: 'long', year: 'numeric' });
++}
+diff --git a/apps/api/src/modules/payroll/payroll-statement-workbook.ts b/apps/api/src/modules/payroll/payroll-statement-workbook.ts
+new file mode 100644
+index 0000000..a8a0541
+--- /dev/null
++++ b/apps/api/src/modules/payroll/payroll-statement-workbook.ts
+@@ -0,0 +1,118 @@
++import ExcelJS from 'exceljs';
++import type { PayrollBatchRecord } from './payroll.service';
++
++/**
++ * Excel-variant van de personeelsuitbetaling — spiegelt
++ * payroll-statement-document.ts (PDF): gegroepeerd per project, per regel
++ * datum/werkbon/van/tot/pauze/normale uren/overuren/toeslag/bedrag, met een
++ * subtotaal per project en een eindtotaal. Gebaseerd op de al bevroren
++ * PayrollBatch-data, niet op een verse herberekening.
++ */
++export async function buildPayrollStatementWorkbook(batch: PayrollBatchRecord): Promise<Buffer> {
++  const workbook = new ExcelJS.Workbook();
++  workbook.creator = 'Uurivo';
++  workbook.created = new Date();
++  workbook.subject = `Personeelsuitbetaling ${batch.employeeDisplayName} — ${batch.periodLabel}`;
++  workbook.title = `Personeelsuitbetaling ${batch.employeeDisplayName} — ${batch.periodLabel}`;
++
++  const sheet = workbook.addWorksheet('Personeelsuitbetaling');
++  sheet.columns = [
++    { key: 'a', width: 12 },
++    { key: 'b', width: 16 },
++    { key: 'c', width: 10 },
++    { key: 'd', width: 10 },
++    { key: 'e', width: 10 },
++    { key: 'f', width: 10 },
++    { key: 'g', width: 10 },
++    { key: 'h', width: 14 },
++    { key: 'i', width: 12 },
++  ];
++
++  const titleRow = sheet.addRow([`Personeelsuitbetaling — ${batch.employeeDisplayName}`]);
++  titleRow.font = { bold: true, size: 14 };
++  sheet.addRow([`Periode: ${formatPeriodLabel(batch.periodLabel)}`]).font = { italic: true, color: { argb: 'FF666666' } };
++  sheet.addRow([`Afgesloten op: ${formatDate(batch.closedAt ?? batch.createdAt)}`]).font = { italic: true, color: { argb: 'FF666666' } };
++  sheet.addRow([]);
++
++  const groups = groupByProject(batch);
++  for (const group of groups) {
++    const projectHeaderRow = sheet.addRow([group.projectName]);
++    projectHeaderRow.font = { bold: true, size: 11 };
++    sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 9);
++
++    const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Van', 'Tot', 'Pauze (min)', 'Normaal (u)', 'Overuren (u)', 'Toeslag', 'Bedrag']);
++    styleColumnHeaderRow(columnHeaderRow);
++
++    for (const line of group.lines) {
++      sheet.addRow([
++        formatDate(line.startedAt),
++        line.workOrderNumber,
++        formatTime(line.startedAt),
++        formatTime(line.endedAt),
++        Math.round(line.pausedSeconds / 60),
++        Number(line.normalHours.toFixed(2)),
++        Number(line.overtimeHours.toFixed(2)),
++        premiumLabel(line.premiumType),
++        Number((line.amountCents / 100).toFixed(2)),
++      ]);
++    }
++
++    const subtotalRow = sheet.addRow(['', '', '', '', '', '', '', 'Subtotaal', Number((group.amountCents / 100).toFixed(2))]);
++    subtotalRow.font = { bold: true };
++    sheet.addRow([]);
++  }
++
++  const totalRow = sheet.addRow(['', '', '', '', '', '', '', 'Totaal uit te betalen', Number((batch.totalAmountCents / 100).toFixed(2))]);
++  totalRow.font = { bold: true, size: 12 };
++  totalRow.getCell(8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
++  totalRow.getCell(9).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
++
++  const buffer = await workbook.xlsx.writeBuffer();
++  return Buffer.from(buffer);
++}
++
++interface ProjectGroup {
++  projectName: string;
++  lines: PayrollBatchRecord['lines'];
++  amountCents: number;
++}
++
++function groupByProject(batch: PayrollBatchRecord): ProjectGroup[] {
++  const byProject = new Map<string, ProjectGroup>();
++  for (const line of batch.lines) {
++    const existing = byProject.get(line.projectName);
++    if (existing) {
++      existing.lines.push(line);
++      existing.amountCents += line.amountCents;
++    } else {
++      byProject.set(line.projectName, { projectName: line.projectName, lines: [line], amountCents: line.amountCents });
++    }
++  }
++  return Array.from(byProject.values()).sort((a, b) => a.projectName.localeCompare(b.projectName));
++}
++
++function styleColumnHeaderRow(row: ExcelJS.Row): void {
++  row.font = { bold: true };
++  row.eachCell((cell) => {
++    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
++  });
++}
++
++function premiumLabel(premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK'): string {
++  return premiumType === 'NONE' ? '—' : premiumType === 'SHIFT_WORK' ? 'Ploegenwerk' : 'Nachtwerk';
++}
++
++function formatDate(date: Date): string {
++  return date.toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
++}
++
++function formatTime(date: Date): string {
++  return date.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
++}
++
++function formatPeriodLabel(periodLabel: string): string {
++  const [year, month] = periodLabel.split('-');
++  if (!year || !month) return periodLabel;
++  const date = new Date(Number(year), Number(month) - 1, 1);
++  return date.toLocaleDateString('nl-BE', { month: 'long', year: 'numeric' });
++}
+diff --git a/apps/api/src/modules/payroll/payroll.routes.ts b/apps/api/src/modules/payroll/payroll.routes.ts
+index ea9b6de..605a9f5 100644
+--- a/apps/api/src/modules/payroll/payroll.routes.ts
++++ b/apps/api/src/modules/payroll/payroll.routes.ts
+@@ -7,7 +7,11 @@ import type {
+ } from '@swatt/shared-types';
+ import type { FastifyInstance } from 'fastify';
+ import { AuthErrors } from '../../errors';
++import { CompanySettingsService } from '../company-settings/company-settings.service';
+ import { requireRole } from '../rbac/rbac.middleware';
++import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
++import { renderPayrollStatementPdf } from './payroll-statement-document';
++import { buildPayrollStatementWorkbook } from './payroll-statement-workbook';
+ import type { PayrollBatchRecord } from './payroll.service';
+ import { PayrollService } from './payroll.service';
+ import { createPayrollBatchBodySchema, listPayableSummaryQuerySchema, listPayrollBatchesQuerySchema, payrollBatchIdParamsSchema } from './payroll.schemas';
+@@ -20,6 +24,8 @@ import { createPayrollBatchBodySchema, listPayableSummaryQuerySchema, listPayrol
+  */
+ export default async function payrollRoutes(app: FastifyInstance): Promise<void> {
+   const service = new PayrollService(app.prisma);
++  const companySettings = new CompanySettingsService(app.prisma);
++  const storage: StorageService = new DatabaseStorageService(app.prisma);
+ 
+   app.get(
+     '/admin/payroll/payable',
+@@ -66,6 +72,65 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
+       return null;
+     },
+   );
++
++  // Downloadbaar overzichtsdocument (PDF) — op vraag, 1/9/2026: "mooie tabel
++  // met per dag beginuur, einduur, pauze en totaal gewerkte uren + overuren".
++  // Gebaseerd op de al bevroren batch-data, geen verse herberekening.
++  app.get(
++    '/admin/payroll/batches/:id/pdf',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request, reply) => {
++      const params = payrollBatchIdParamsSchema.parse(request.params);
++      const batch = await service.getById(params.id);
++
++      const settings = await companySettings.get();
++      const logo = settings.logoFileKey ? await storage.read(settings.logoFileKey) : null;
++
++      const buffer = await renderPayrollStatementPdf(batch, {
++        companyName: settings.companyName,
++        addressLine: settings.addressLine,
++        vatNumber: settings.vatNumber,
++        contactEmail: settings.contactEmail,
++        contactPhone: settings.contactPhone,
++        logo,
++      });
++
++      reply.header('Content-Type', 'application/pdf');
++      reply.header(
++        'Content-Disposition',
++        `attachment; filename="personeelsuitbetaling-${slugify(batch.employeeDisplayName)}-${batch.periodLabel}.pdf"`,
++      );
++      return reply.send(buffer);
++    },
++  );
++
++  // Zelfde totalisatie-met-detail als hierboven, als Excel-bestand.
++  app.get(
++    '/admin/payroll/batches/:id/excel',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request, reply) => {
++      const params = payrollBatchIdParamsSchema.parse(request.params);
++      const batch = await service.getById(params.id);
++
++      const buffer = await buildPayrollStatementWorkbook(batch);
++      reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
++      reply.header(
++        'Content-Disposition',
++        `attachment; filename="personeelsuitbetaling-${slugify(batch.employeeDisplayName)}-${batch.periodLabel}.xlsx"`,
++      );
++      return reply.send(buffer);
++    },
++  );
++}
++
++/** Zelfde aanpak als slugify() in work-order-pdf.service.ts/hours-export.routes.ts. */
++function slugify(value: string): string {
++  return value
++    .normalize('NFKD')
++    .replace(/[\u0300-\u036f]/g, '') // accenten weg (bv. é → e)
++    .replace(/[^A-Za-z0-9]+/g, '-')
++    .replace(/^-+|-+$/g, '')
++    .slice(0, 60);
+ }
+ 
+ function toBatchSummary(batch: PayrollBatchRecord): PayrollBatchSummary {
+diff --git a/apps/api/src/modules/payroll/payroll.service.ts b/apps/api/src/modules/payroll/payroll.service.ts
+index cc1440e..39d101b 100644
+--- a/apps/api/src/modules/payroll/payroll.service.ts
++++ b/apps/api/src/modules/payroll/payroll.service.ts
+@@ -69,6 +69,10 @@ export interface PayrollBatchLineRecord {
+   id: string;
+   timeEntryId: string;
+   projectName: string;
++  workOrderNumber: string;
++  startedAt: Date;
++  endedAt: Date;
++  pausedSeconds: number;
+   normalHours: number;
+   overtimeHours: number;
+   premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+@@ -90,7 +94,16 @@ export interface PayrollBatchRecord {
+ const WITH_LINES_DETAILS = {
+   include: {
+     employee: true,
+-    lines: { include: { timeEntry: { include: { project: true } } } },
++    lines: {
++      include: {
++        timeEntry: {
++          include: {
++            project: true,
++            workOrderLink: { include: { workOrder: { select: { workOrderNumber: true } } } },
++          },
++        },
++      },
++    },
+   },
+ } as const;
+ 
+@@ -190,6 +203,15 @@ export class PayrollService {
+     return batches.map(toBatchRecord);
+   }
+ 
++  /** Eén batch met volledig detail, voor het downloadbare document (PDF/Excel — zie payroll.routes.ts). */
++  async getById(id: string): Promise<PayrollBatchRecord> {
++    const batch = await this.prisma.payrollBatch.findUnique({ where: { id }, ...WITH_LINES_DETAILS });
++    if (!batch) {
++      throw PayrollErrors.notFound();
++    }
++    return toBatchRecord(batch);
++  }
++
+   /** Enkel op DRAFT (nog niet CLOSED) — zelfde regel als InvoiceBatchService.remove(). Cascade geeft de tijdregistraties meteen weer vrij. */
+   async remove(id: string): Promise<void> {
+     const batch = await this.prisma.payrollBatch.findUnique({ where: { id } });
+@@ -301,7 +323,13 @@ function toBatchRecord(batch: {
+     overtimeHours: Prisma.Decimal | number;
+     premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+     amountCents: number;
+-    timeEntry: { project: { name: string } };
++    timeEntry: {
++      project: { name: string };
++      startedAt: Date;
++      endedAt: Date | null;
++      pausedSeconds: number;
++      workOrderLink: { workOrder: { workOrderNumber: string } } | null;
++    };
+   }>;
+ }): PayrollBatchRecord {
+   return {
+@@ -313,15 +341,26 @@ function toBatchRecord(batch: {
+     totalAmountCents: batch.totalAmountCents,
+     createdAt: batch.createdAt,
+     closedAt: batch.closedAt,
+-    lines: batch.lines.map((line) => ({
+-      id: line.id,
+-      timeEntryId: line.timeEntryId,
+-      projectName: line.timeEntry.project.name,
+-      normalHours: Number(line.normalHours),
+-      overtimeHours: Number(line.overtimeHours),
+-      premiumType: line.premiumType,
+-      amountCents: line.amountCents,
+-    })),
++    lines: batch.lines
++      .sort((a, b) => a.timeEntry.startedAt.getTime() - b.timeEntry.startedAt.getTime())
++      .map((line) => ({
++        id: line.id,
++        timeEntryId: line.timeEntryId,
++        projectName: line.timeEntry.project.name,
++        // workOrderLink kan in theorie ontbreken (defensief) — in de praktijk
++        // niet mogelijk: enkel ondertekende (dus aan een werkbon gekoppelde)
++        // tijdregistraties zijn ooit "betaalbaar" geweest, zie fetchPayableEntries().
++        workOrderNumber: line.timeEntry.workOrderLink?.workOrder.workOrderNumber ?? '—',
++        startedAt: line.timeEntry.startedAt,
++        // endedAt is gegarandeerd niet-null: enkel gestopte registraties konden
++        // ooit betaalbaar zijn (zie computeWorkedSeconds()/fetchPayableEntries()).
++        endedAt: line.timeEntry.endedAt!,
++        pausedSeconds: line.timeEntry.pausedSeconds,
++        normalHours: Number(line.normalHours),
++        overtimeHours: Number(line.overtimeHours),
++        premiumType: line.premiumType,
++        amountCents: line.amountCents,
++      })),
+   };
+ }
+ 
+diff --git a/apps/api/test/hours-export.service.test.ts b/apps/api/test/hours-export.service.test.ts
+index 1e932ce..dd63618 100644
+--- a/apps/api/test/hours-export.service.test.ts
++++ b/apps/api/test/hours-export.service.test.ts
+@@ -17,7 +17,15 @@ interface FakeTimeEntry {
+     workOrder: {
+       id: string;
+       workOrderNumber: string;
+-      project: { name: string; projectNumber: string | null; customer: { name: string } };
++      project: {
++        id: string;
++        name: string;
++        projectNumber: string | null;
++        customer: { name: string };
++        overtimeApplies: boolean;
++        overtimeThresholdType: 'DAILY' | 'WEEKLY';
++        overtimeWeeklyThresholdHours: number | null;
++      };
+       signature: { signedAt: Date } | null;
+     };
+   } | null;
+@@ -44,7 +52,16 @@ function createFakePrisma(employees: FakeEmployee[]) {
+   } as unknown as PrismaClient;
+ }
+ 
+-function signedTimeEntry(overrides: Partial<FakeTimeEntry> & { workOrderId?: string; signedAt?: Date | null }): FakeTimeEntry {
++function signedTimeEntry(
++  overrides: Partial<FakeTimeEntry> & {
++    workOrderId?: string;
++    signedAt?: Date | null;
++    projectId?: string;
++    overtimeApplies?: boolean;
++    overtimeThresholdType?: 'DAILY' | 'WEEKLY';
++    overtimeWeeklyThresholdHours?: number | null;
++  },
++): FakeTimeEntry {
+   const workOrderId = overrides.workOrderId ?? 'wo-1';
+   const signedAt = overrides.signedAt === undefined ? new Date('2026-08-15T12:00:00Z') : overrides.signedAt;
+   return {
+@@ -59,7 +76,15 @@ function signedTimeEntry(overrides: Partial<FakeTimeEntry> & { workOrderId?: str
+           workOrder: {
+             id: workOrderId,
+             workOrderNumber: `WB-${workOrderId}`,
+-            project: { name: 'Onderhoud warmtepomp', projectNumber: 'P-1', customer: { name: 'Janssens BV' } },
++            project: {
++              id: overrides.projectId ?? 'proj-1',
++              name: 'Onderhoud warmtepomp',
++              projectNumber: 'P-1',
++              customer: { name: 'Janssens BV' },
++              overtimeApplies: overrides.overtimeApplies ?? false,
++              overtimeThresholdType: overrides.overtimeThresholdType ?? 'DAILY',
++              overtimeWeeklyThresholdHours: overrides.overtimeWeeklyThresholdHours ?? null,
++            },
+             signature: { signedAt },
+           },
+         }
+@@ -133,6 +158,57 @@ describe('HoursExportService', () => {
+     });
+   });
+ 
++  it('getSubcontractorDetail() splitst normale uren/overuren per project (DAILY-drempel, 9u30 → 8u normaal + 1u30 overuren)', async () => {
++    const subcontractor: FakeEmployee = {
++      id: 'sub-1',
++      displayName: 'Aannemer BV',
++      employmentType: 'SUBCONTRACTOR',
++      timeEntries: [
++        signedTimeEntry({
++          workOrderId: 'wo-1',
++          startedAt: new Date('2026-08-20T07:00:00Z'),
++          endedAt: new Date('2026-08-20T16:30:00Z'), // 9u30
++          pausedSeconds: 0,
++          overtimeApplies: true,
++          overtimeThresholdType: 'DAILY',
++        }),
++      ],
++    };
++    const service = new HoursExportService(createFakePrisma([subcontractor]));
++
++    const detail = await service.getSubcontractorDetail('sub-1', '2026-08');
++
++    expect(detail.projects[0]!.entries[0]).toMatchObject({ normalHours: 8, overtimeHours: 1.5 });
++    expect(detail.totalNormalHours).toBe(8);
++    expect(detail.totalOvertimeHours).toBe(1.5);
++  });
++
++  it('getSubcontractorDetail() bucket overuren over meerdere werkbonnen heen bij een WEEKLY-drempel', async () => {
++    const dayEntry = (day: string, workOrderId: string) =>
++      signedTimeEntry({
++        workOrderId,
++        startedAt: new Date(`2026-08-${day}T06:00:00Z`),
++        endedAt: new Date(`2026-08-${day}T20:00:00Z`), // 14u
++        pausedSeconds: 0,
++        overtimeApplies: true,
++        overtimeThresholdType: 'WEEKLY',
++        overtimeWeeklyThresholdHours: 39,
++      });
++    const subcontractor: FakeEmployee = {
++      id: 'sub-1',
++      displayName: 'Aannemer BV',
++      employmentType: 'SUBCONTRACTOR',
++      timeEntries: [dayEntry('17', 'wo-1'), dayEntry('18', 'wo-2'), dayEntry('19', 'wo-3')], // 3×14u = 42u
++    };
++    const service = new HoursExportService(createFakePrisma([subcontractor]));
++
++    const detail = await service.getSubcontractorDetail('sub-1', '2026-08');
++
++    // Exact hetzelfde acceptatiecriterium als bij de klantfactuur/personeelsuitbetaling: 39u normaal + 3u overuren.
++    expect(detail.totalNormalHours).toBe(39);
++    expect(detail.totalOvertimeHours).toBe(3);
++  });
++
+   it('weigert een ongeldig periode-formaat', async () => {
+     const service = new HoursExportService(createFakePrisma([]));
+     await expect(service.listOverview('augustus-2026')).rejects.toMatchObject({ code: 'HOURS_EXPORT_INVALID_PERIOD' });
+diff --git a/apps/api/test/payroll-statement-document.test.ts b/apps/api/test/payroll-statement-document.test.ts
+new file mode 100644
+index 0000000..5e6159f
+--- /dev/null
++++ b/apps/api/test/payroll-statement-document.test.ts
+@@ -0,0 +1,86 @@
++import ExcelJS from 'exceljs';
++import { describe, expect, it } from 'vitest';
++import { renderPayrollStatementPdf } from '../src/modules/payroll/payroll-statement-document';
++import { buildPayrollStatementWorkbook } from '../src/modules/payroll/payroll-statement-workbook';
++import type { PayrollBatchRecord } from '../src/modules/payroll/payroll.service';
++
++const batch: PayrollBatchRecord = {
++  id: 'batch-1',
++  employeeId: 'emp-1',
++  employeeDisplayName: 'Peter Janssens',
++  periodLabel: '2026-08',
++  status: 'CLOSED',
++  totalAmountCents: 8 * 6500 * 1.5 + 2 * 6500 * 2.0, // zelfde scenario als het acceptatiecriterium uit het ontwerp
++  createdAt: new Date('2026-09-01T08:00:00Z'),
++  closedAt: new Date('2026-09-01T08:05:00Z'),
++  lines: [
++    {
++      id: 'line-1',
++      timeEntryId: 'te-1',
++      projectName: 'Onderhoud HVAC',
++      workOrderNumber: 'WB-2026-000123',
++      startedAt: new Date('2026-08-10T06:00:00Z'),
++      endedAt: new Date('2026-08-10T14:00:00Z'),
++      pausedSeconds: 1800,
++      normalHours: 8,
++      overtimeHours: 0,
++      premiumType: 'NIGHT_WORK',
++      amountCents: Math.round(8 * 6500 * 1.5),
++    },
++    {
++      id: 'line-2',
++      timeEntryId: 'te-2',
++      projectName: 'Onderhoud HVAC',
++      workOrderNumber: 'WB-2026-000124',
++      startedAt: new Date('2026-08-11T06:00:00Z'),
++      endedAt: new Date('2026-08-11T08:00:00Z'),
++      pausedSeconds: 0,
++      normalHours: 0,
++      overtimeHours: 2,
++      premiumType: 'NIGHT_WORK',
++      amountCents: Math.round(2 * 6500 * 2.0),
++    },
++  ],
++};
++
++describe('renderPayrollStatementPdf()', () => {
++  it('genereert een geldig, niet-leeg PDF-bestand', async () => {
++    const buffer = await renderPayrollStatementPdf(batch, {
++      companyName: 'Uurivo',
++      addressLine: null,
++      vatNumber: null,
++      contactEmail: null,
++      contactPhone: null,
++      logo: null,
++    });
++    expect(buffer.length).toBeGreaterThan(0);
++    // PDF-bestanden beginnen altijd met de "%PDF-"-signatuur.
++    expect(buffer.subarray(0, 5).toString('ascii')).toBe('%PDF-');
++  });
++});
++
++describe('buildPayrollStatementWorkbook()', () => {
++  it('genereert een geldig .xlsx-bestand met de juiste totalen en kolommen', async () => {
++    const buffer = await buildPayrollStatementWorkbook(batch);
++    expect(buffer.length).toBeGreaterThan(0);
++
++    const workbook = new ExcelJS.Workbook();
++    // eslint-disable-next-line @typescript-eslint/no-explicit-any
++    await workbook.xlsx.load(buffer as any);
++    const sheet = workbook.getWorksheet('Personeelsuitbetaling');
++    expect(sheet).toBeDefined();
++
++    const allValues = sheet!
++      .getSheetValues()
++      .flatMap((row) => (Array.isArray(row) ? row : []))
++      .filter((v) => v !== undefined && v !== null);
++
++    expect(allValues).toContain('Onderhoud HVAC');
++    expect(allValues).toContain('WB-2026-000123');
++    expect(allValues).toContain('WB-2026-000124');
++    expect(allValues).toContain('Nachtwerk');
++    expect(allValues).toContain(8); // normale uren, regel 1
++    expect(allValues).toContain(2); // overuren, regel 2
++    expect(allValues).toContain(Number((batch.totalAmountCents / 100).toFixed(2)));
++  });
++});
+diff --git a/apps/api/test/payroll.service.test.ts b/apps/api/test/payroll.service.test.ts
+index a525266..184ce48 100644
+--- a/apps/api/test/payroll.service.test.ts
++++ b/apps/api/test/payroll.service.test.ts
+@@ -67,7 +67,16 @@ function createFakePrisma(opts: { employees: FakeEmployee[]; projects: FakeProje
+       lines: batchLines.map((l) => {
+         const entry = entries.find((e) => e.id === l.timeEntryId)!;
+         const project = projects.find((p) => p.id === entry.projectId)!;
+-        return { ...l, timeEntry: { project: { name: project.name } } };
++        return {
++          ...l,
++          timeEntry: {
++            project: { name: project.name },
++            startedAt: entry.startedAt,
++            endedAt: entry.endedAt,
++            pausedSeconds: entry.pausedSeconds,
++            workOrderLink: { workOrder: { workOrderNumber: `WB-${entry.id}` } },
++          },
++        };
+       }),
+     };
+   }
+@@ -191,6 +200,26 @@ describe('PayrollService', () => {
+     expect(batch.lines[0]?.projectName).toBe(project.name);
+   });
+ 
++  it('createBatch() met meerdere regels: sorteert chronologisch en vult per regel werkbon/tijden correct in (dekt een eerder stil scenario waarbij sort() met 1 regel de vergelijkingsfunctie nooit aanriep)', async () => {
++    const entries: FakeTimeEntry[] = [
++      { id: 'te-2', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-12T08:00:00Z'), endedAt: new Date('2026-08-12T10:00:00Z'), pausedSeconds: 0, signed: true },
++      { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 900, signed: true },
++    ];
++    const { prisma } = createFakePrisma({ employees: [peter], projects: [projectNormal], entries });
++    const service = new PayrollService(prisma);
++
++    const batch = await service.createBatch(peter.id, '2026-08', 'user-admin');
++
++    expect(batch.lines).toHaveLength(2);
++    // Chronologisch gesorteerd, ondanks dat te-2 (12/8) vóór te-1 (10/8) werd aangemaakt.
++    expect(batch.lines[0]?.timeEntryId).toBe('te-1');
++    expect(batch.lines[0]?.startedAt).toEqual(new Date('2026-08-10T08:00:00Z'));
++    expect(batch.lines[0]?.endedAt).toEqual(new Date('2026-08-10T10:00:00Z'));
++    expect(batch.lines[0]?.pausedSeconds).toBe(900);
++    expect(batch.lines[0]?.workOrderNumber).toBe('WB-te-1');
++    expect(batch.lines[1]?.timeEntryId).toBe('te-2');
++  });
++
+   it('business rule 12: dezelfde tijdregistratie kan niet tweemaal uitbetaald worden', async () => {
+     const entries: FakeTimeEntry[] = [
+       { id: 'te-1', employeeId: peter.id, projectId: projectNormal.id, startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, signed: true },
+diff --git a/apps/api/test/subcontractor-hours-workbook.test.ts b/apps/api/test/subcontractor-hours-workbook.test.ts
+index 6190d2b..de06e41 100644
+--- a/apps/api/test/subcontractor-hours-workbook.test.ts
++++ b/apps/api/test/subcontractor-hours-workbook.test.ts
+@@ -8,12 +8,16 @@ const detail: HoursExportSubcontractorDetail = {
+   displayName: 'Jan Onderaannemer',
+   periodLabel: '2026-08',
+   totalSeconds: 4 * 3600 + 2 * 3600,
++  totalNormalHours: 5,
++  totalOvertimeHours: 1,
+   projects: [
+     {
+       projectName: 'Onderhoud HVAC',
+       projectNumber: 'PRO-1',
+       customerName: 'Janssens BV',
+       totalSeconds: 4 * 3600,
++      totalNormalHours: 3,
++      totalOvertimeHours: 1,
+       entries: [
+         {
+           workOrderId: 'wo-1',
+@@ -27,6 +31,8 @@ const detail: HoursExportSubcontractorDetail = {
+           pausedSeconds: 0,
+           isManual: false,
+           description: 'Onderhoud uitgevoerd.',
++          normalHours: 3,
++          overtimeHours: 1,
+         },
+       ],
+     },
+@@ -35,6 +41,8 @@ const detail: HoursExportSubcontractorDetail = {
+       projectNumber: null,
+       customerName: 'De Smet NV',
+       totalSeconds: 2 * 3600,
++      totalNormalHours: 2,
++      totalOvertimeHours: 0,
+       entries: [
+         {
+           workOrderId: 'wo-2',
+@@ -48,6 +56,8 @@ const detail: HoursExportSubcontractorDetail = {
+           pausedSeconds: 0,
+           isManual: false,
+           description: null,
++          normalHours: 2,
++          overtimeHours: 0,
+         },
+       ],
+     },
+@@ -55,7 +65,7 @@ const detail: HoursExportSubcontractorDetail = {
+ };
+ 
+ describe('buildSubcontractorHoursWorkbook()', () => {
+-  it('genereert een geldig, niet-leeg .xlsx-bestand met de juiste totalen', async () => {
++  it('genereert een geldig .xlsx-bestand met de juiste normale-uren-/overuren-totalen', async () => {
+     const buffer = await buildSubcontractorHoursWorkbook(detail);
+     expect(buffer.length).toBeGreaterThan(0);
+ 
+@@ -80,8 +90,9 @@ describe('buildSubcontractorHoursWorkbook()', () => {
+     expect(allValues).toContain('Interventie — De Smet NV');
+     expect(allValues).toContain('WB-2026-000123');
+     expect(allValues).toContain('WB-2026-000124');
+-    expect(allValues).toContain(4); // subtotaal project 1 (4u)
+-    expect(allValues).toContain(2); // subtotaal project 2 (2u)
+-    expect(allValues).toContain(6); // eindtotaal (6u)
++    expect(allValues).toContain(3); // normaal, project 1 (regel + subtotaal)
++    expect(allValues).toContain(1); // overuren, project 1 (regel + subtotaal)
++    expect(allValues).toContain(2); // normaal, project 2 (regel + subtotaal)
++    expect(allValues).toContain(5); // eindtotaal normaal
+   });
+ });
+diff --git a/apps/web/src/components/Logo.tsx b/apps/web/src/components/Logo.tsx
+index c01d54c..6521362 100644
+--- a/apps/web/src/components/Logo.tsx
++++ b/apps/web/src/components/Logo.tsx
+@@ -15,11 +15,12 @@ export function Logo({ size = 'lg', className = '' }: { size?: 'lg' | 'md'; clas
+       />
+     );
+   }
+-  return (
+-    <img
+-      src="/logo-uurivo.png"
+-      alt="Uurivo"
+-      className={['h-auto w-64', className].filter(Boolean).join(' ')}
+-    />
+-  );
++  // Bewust GEEN hardcoded w-64 als vaste basisklasse: als de aanroeper een
++  // eigen breedte meegeeft via `className` (bv. de kleinere lockup in de
++  // header van HomePage.tsx), zou een tweede, conflicterende `w-*`-klasse
++  // in dezelfde classlist onvoorspelbaar zijn (Tailwind lost dat op via
++  // stylesheet-volgorde, niet via JSX-volgorde) — vandaar de expliciete
++  // fallback hieronder i.p.v. simpelweg samen te voegen.
++  const widthClassName = className.includes('w-') ? className : ['w-64', className].filter(Boolean).join(' ');
++  return <img src="/logo-uurivo.png" alt="Uurivo" className={['h-auto', widthClassName].join(' ')} />;
+ }
+diff --git a/apps/web/src/pages/HomePage.tsx b/apps/web/src/pages/HomePage.tsx
+index 9ec4a86..ba2628c 100644
+--- a/apps/web/src/pages/HomePage.tsx
++++ b/apps/web/src/pages/HomePage.tsx
+@@ -46,10 +46,16 @@ export function HomePage() {
+ 
+   return (
+     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
+-      <header className="mb-8 flex items-center gap-3">
+-        <Logo size="md" />
++      <header className="mb-8 flex flex-col items-start gap-3">
++        {/* Volledige lockup (icoon + "UURIVO"-woordmerk) zoals op het loginscherm,
++            i.p.v. enkel het compacte icoon — zelfde goudomrande lichte kaart
++            nodig voor zichtbaarheid (donkere tekst/pictogram op transparante
++            achtergrond versmelt anders met bg-swatt-black, zie LoginPage.tsx). */}
++        <div className="rounded-xl border-2 border-swatt-gold bg-neutral-50 p-4">
++          <Logo size="lg" className="w-40" />
++        </div>
+         {branding?.logoDataUrl && (
+-          <img src={branding.logoDataUrl} alt={branding.companyName} className="h-8 w-auto object-contain" />
++          <img src={branding.logoDataUrl} alt={branding.companyName} className="h-10 w-auto object-contain" />
+         )}
+       </header>
+ 
+diff --git a/apps/web/src/pages/admin/PayrollPage.tsx b/apps/web/src/pages/admin/PayrollPage.tsx
+index f22139c..9bf9ecd 100644
+--- a/apps/web/src/pages/admin/PayrollPage.tsx
++++ b/apps/web/src/pages/admin/PayrollPage.tsx
+@@ -228,16 +228,32 @@ export function PayrollPage() {
+                       {formatEuroCents(batch.totalAmountCents)} · afgesloten op {formatDate(batch.createdAt)}
+                     </span>
+                   </div>
+-                  {batch.status === 'DRAFT' && (
+-                    <button
+-                      type="button"
+-                      disabled={removingBatchId === batch.id}
+-                      onClick={() => void handleRemoveBatch(batch.id)}
+-                      className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50"
++                  <div className="flex items-center gap-2">
++                    <a
++                      href={`/admin/payroll/batches/${batch.id}/excel`}
++                      download
++                      className="rounded-lg bg-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-white"
+                     >
+-                      {removingBatchId === batch.id ? 'Bezig...' : 'Verwijderen'}
+-                    </button>
+-                  )}
++                      Excel
++                    </a>
++                    <a
++                      href={`/admin/payroll/batches/${batch.id}/pdf`}
++                      download
++                      className="rounded-lg border border-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-swatt-gold-dark"
++                    >
++                      PDF
++                    </a>
++                    {batch.status === 'DRAFT' && (
++                      <button
++                        type="button"
++                        disabled={removingBatchId === batch.id}
++                        onClick={() => void handleRemoveBatch(batch.id)}
++                        className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50"
++                      >
++                        {removingBatchId === batch.id ? 'Bezig...' : 'Verwijderen'}
++                      </button>
++                    )}
++                  </div>
+                 </div>
+ 
+                 {expandedBatchId === batch.id && (
+diff --git a/apps/web/vercel.json b/apps/web/vercel.json
+index 332f7c7..38fdf79 100644
+--- a/apps/web/vercel.json
++++ b/apps/web/vercel.json
+@@ -6,8 +6,11 @@
+     { "source": "/health", "destination": "https://swatt-api.onrender.com/health" },
+     { "source": "/auth/:path*", "destination": "https://swatt-api.onrender.com/auth/:path*" },
+     { "source": "/admin/:path*", "destination": "https://swatt-api.onrender.com/admin/:path*" },
++    { "source": "/public/:path*", "destination": "https://swatt-api.onrender.com/public/:path*" },
+     { "source": "/projects", "destination": "https://swatt-api.onrender.com/projects" },
+     { "source": "/projects/:path*", "destination": "https://swatt-api.onrender.com/projects/:path*" },
++    { "source": "/weekly-approvals", "destination": "https://swatt-api.onrender.com/weekly-approvals" },
++    { "source": "/weekly-approvals/:path*", "destination": "https://swatt-api.onrender.com/weekly-approvals/:path*" },
+     { "source": "/teamleader/status", "destination": "https://swatt-api.onrender.com/teamleader/status" },
+     {
+       "source": "/teamleader/oauth/prepare-authorize",

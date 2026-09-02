@@ -69,6 +69,10 @@ export interface PayrollBatchLineRecord {
   id: string;
   timeEntryId: string;
   projectName: string;
+  workOrderNumber: string;
+  startedAt: Date;
+  endedAt: Date;
+  pausedSeconds: number;
   normalHours: number;
   overtimeHours: number;
   premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
@@ -90,7 +94,16 @@ export interface PayrollBatchRecord {
 const WITH_LINES_DETAILS = {
   include: {
     employee: true,
-    lines: { include: { timeEntry: { include: { project: true } } } },
+    lines: {
+      include: {
+        timeEntry: {
+          include: {
+            project: true,
+            workOrderLink: { include: { workOrder: { select: { workOrderNumber: true } } } },
+          },
+        },
+      },
+    },
   },
 } as const;
 
@@ -188,6 +201,15 @@ export class PayrollService {
       ...WITH_LINES_DETAILS,
     });
     return batches.map(toBatchRecord);
+  }
+
+  /** Eén batch met volledig detail, voor het downloadbare document (PDF/Excel — zie payroll.routes.ts). */
+  async getById(id: string): Promise<PayrollBatchRecord> {
+    const batch = await this.prisma.payrollBatch.findUnique({ where: { id }, ...WITH_LINES_DETAILS });
+    if (!batch) {
+      throw PayrollErrors.notFound();
+    }
+    return toBatchRecord(batch);
   }
 
   /** Enkel op DRAFT (nog niet CLOSED) — zelfde regel als InvoiceBatchService.remove(). Cascade geeft de tijdregistraties meteen weer vrij. */
@@ -301,7 +323,13 @@ function toBatchRecord(batch: {
     overtimeHours: Prisma.Decimal | number;
     premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
     amountCents: number;
-    timeEntry: { project: { name: string } };
+    timeEntry: {
+      project: { name: string };
+      startedAt: Date;
+      endedAt: Date | null;
+      pausedSeconds: number;
+      workOrderLink: { workOrder: { workOrderNumber: string } } | null;
+    };
   }>;
 }): PayrollBatchRecord {
   return {
@@ -313,15 +341,26 @@ function toBatchRecord(batch: {
     totalAmountCents: batch.totalAmountCents,
     createdAt: batch.createdAt,
     closedAt: batch.closedAt,
-    lines: batch.lines.map((line) => ({
-      id: line.id,
-      timeEntryId: line.timeEntryId,
-      projectName: line.timeEntry.project.name,
-      normalHours: Number(line.normalHours),
-      overtimeHours: Number(line.overtimeHours),
-      premiumType: line.premiumType,
-      amountCents: line.amountCents,
-    })),
+    lines: batch.lines
+      .sort((a, b) => a.timeEntry.startedAt.getTime() - b.timeEntry.startedAt.getTime())
+      .map((line) => ({
+        id: line.id,
+        timeEntryId: line.timeEntryId,
+        projectName: line.timeEntry.project.name,
+        // workOrderLink kan in theorie ontbreken (defensief) — in de praktijk
+        // niet mogelijk: enkel ondertekende (dus aan een werkbon gekoppelde)
+        // tijdregistraties zijn ooit "betaalbaar" geweest, zie fetchPayableEntries().
+        workOrderNumber: line.timeEntry.workOrderLink?.workOrder.workOrderNumber ?? '—',
+        startedAt: line.timeEntry.startedAt,
+        // endedAt is gegarandeerd niet-null: enkel gestopte registraties konden
+        // ooit betaalbaar zijn (zie computeWorkedSeconds()/fetchPayableEntries()).
+        endedAt: line.timeEntry.endedAt!,
+        pausedSeconds: line.timeEntry.pausedSeconds,
+        normalHours: Number(line.normalHours),
+        overtimeHours: Number(line.overtimeHours),
+        premiumType: line.premiumType,
+        amountCents: line.amountCents,
+      })),
   };
 }
 

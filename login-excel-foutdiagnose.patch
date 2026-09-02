@@ -1,0 +1,363 @@
+From 567c854dff15199291cb740c7ae82f68f8ba91f6 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 1 Sep 2026 11:20:12 +0000
+Subject: [PATCH] Loginscherm-logokaart (gelijke padding), Excel-export voor
+ onderaannemers, en betere foutdiagnose bij niet-JSON serverantwoorden
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Loginscherm
+- Logokaart: p-8 (gelijke padding op alle zijden) i.p.v. px-8 py-6, zodat
+  boven/onder evenveel wit is als links/rechts.
+
+Uren-export: Excel voor onderaannemers
+- Nieuwe route GET /admin/hours-export/subcontractors/:employeeId/excel +
+  subcontractor-hours-workbook.ts — zelfde totalisatie-met-detail (gegroepeerd
+  per werf/project, subtotaal + eindtotaal) als de bestaande PDF-export, nu
+  ook als .xlsx. De PDF-optie blijft gewoon bestaan naast Excel.
+- Nieuwe test (subcontractor-hours-workbook.test.ts) laadt het gegenereerde
+  bestand effectief terug in en controleert de totalen.
+
+Diagnose "Kon de handtekening niet opslaan"
+- apps/web/src/api/client.ts: request() ving voorheen een niet-JSON
+  serverantwoord (bv. een ruwe 500-foutpagina) op als een cryptische
+  SyntaxError die geen enkele aanroeper als ApiRequestError herkende — elke
+  aanroeper viel dan terug op zijn generieke fallback-tekst zonder één
+  bruikbare aanwijzing. Nu wordt dit een ApiRequestError met de HTTP-status
+  erin, wat een eerste diagnose mogelijk maakt zonder in de server-logs te
+  kijken. De onderliggende oorzaak van de weekondertekenings-fout zelf kon
+  niet gereproduceerd worden in de sandbox (de backend-logica is grondig
+  nagekeken en bevat geen gevonden fout) — de volgende keer dat dit optreedt
+  toont de app minstens de HTTP-status.
+
+Klantlogo op het homescherm na inloggen: code geverifieerd identiek aan de
+werkende instellingenpagina, geen fout gevonden. Steven controleert of dit
+een cache-/deployprobleem is (zie chat).
+
+Verificatie: backend-testsuite 182 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, sandbox-beperkingen, geen regressies), nieuwe
+Excel-test slaagt, typecheck/lint backend+frontend schoon,
+frontend-productiebuild slaagt.
+---
+ .../hours-export/hours-export.routes.ts       | 19 ++++
+ .../subcontractor-hours-workbook.ts           | 97 +++++++++++++++++++
+ .../test/subcontractor-hours-workbook.test.ts | 80 +++++++++++++++
+ apps/web/src/api/client.ts                    | 19 +++-
+ apps/web/src/pages/LoginPage.tsx              |  2 +-
+ apps/web/src/pages/admin/HoursExportPage.tsx  | 23 +++--
+ 6 files changed, 230 insertions(+), 10 deletions(-)
+ create mode 100644 apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts
+ create mode 100644 apps/api/test/subcontractor-hours-workbook.test.ts
+
+diff --git a/apps/api/src/modules/hours-export/hours-export.routes.ts b/apps/api/src/modules/hours-export/hours-export.routes.ts
+index 68407d5..6233ef6 100644
+--- a/apps/api/src/modules/hours-export/hours-export.routes.ts
++++ b/apps/api/src/modules/hours-export/hours-export.routes.ts
+@@ -6,6 +6,7 @@ import { DatabaseStorageService, type StorageService } from '../storage/storage.
+ import { buildEmployeeHoursWorkbook } from './employee-hours-workbook';
+ import { hoursExportEmployeeParamsSchema, hoursExportPeriodQuerySchema } from './hours-export.schemas';
+ import { HoursExportService } from './hours-export.service';
++import { buildSubcontractorHoursWorkbook } from './subcontractor-hours-workbook';
+ import { renderSubcontractorStatementPdf } from './subcontractor-statement-document';
+ 
+ /**
+@@ -83,6 +84,24 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
+       return reply.send(buffer);
+     },
+   );
++
++  // Zelfde totalisatie-met-detail als hierboven, nu als Excel-bestand i.p.v.
++  // PDF — op uitdrukkelijke vraag naast de bestaande PDF-optie (die blijft
++  // gewoon bestaan), zie subcontractor-hours-workbook.ts.
++  app.get(
++    '/admin/hours-export/subcontractors/:employeeId/excel',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request, reply) => {
++      const params = hoursExportEmployeeParamsSchema.parse(request.params);
++      const query = hoursExportPeriodQuerySchema.parse(request.query);
++      const detail = await service.getSubcontractorDetail(params.employeeId, query.period);
++
++      const buffer = await buildSubcontractorHoursWorkbook(detail);
++      reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
++      reply.header('Content-Disposition', `attachment; filename="urenoverzicht-${slugify(detail.displayName)}-${query.period}.xlsx"`);
++      return reply.send(buffer);
++    },
++  );
+ }
+ 
+ /** Zelfde aanpak als slugify() in work-order-pdf.service.ts. */
+diff --git a/apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts b/apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts
+new file mode 100644
+index 0000000..74767b9
+--- /dev/null
++++ b/apps/api/src/modules/hours-export/subcontractor-hours-workbook.ts
+@@ -0,0 +1,97 @@
++import ExcelJS from 'exceljs';
++import type { HoursExportSubcontractorDetail } from './hours-export.service';
++
++/**
++ * Werknemer vs. Onderaannemer — Excel-variant van de totalisatie-met-detail
++ * voor één onderaannemer/periode (zie subcontractor-statement-document.ts
++ * voor de PDF-versie, die deze Excel-versie inhoudelijk spiegelt: gegroepeerd
++ * per werf/project, met per werf een subtotaal en de onderliggende
++ * tijdregistraties, en een eindtotaal onderaan). Op uitdrukkelijke vraag
++ * (steven, 1/9/2026): "totalisatie downloadbaar in Excel, PDF mag blijven" —
++ * dus bewust een aanvulling naast de bestaande PDF-route, geen vervanging.
++ */
++export async function buildSubcontractorHoursWorkbook(detail: HoursExportSubcontractorDetail): Promise<Buffer> {
++  const workbook = new ExcelJS.Workbook();
++  workbook.creator = 'Uurivo';
++  workbook.created = new Date();
++  workbook.subject = `Urenoverzicht ${detail.displayName} — ${detail.periodLabel}`;
++  workbook.title = `Urenoverzicht ${detail.displayName} — ${detail.periodLabel}`;
++
++  const sheet = workbook.addWorksheet('Urenoverzicht');
++  sheet.columns = [
++    { key: 'a', width: 12 },
++    { key: 'b', width: 16 },
++    { key: 'c', width: 24 },
++    { key: 'd', width: 10 },
++    { key: 'e', width: 10 },
++    { key: 'f', width: 12 },
++    { key: 'g', width: 10 },
++  ];
++
++  const titleRow = sheet.addRow([`Urenoverzicht — ${detail.displayName}`]);
++  titleRow.font = { bold: true, size: 14 };
++  sheet.addRow([`Periode: ${formatPeriodLabel(detail.periodLabel)}`]).font = { italic: true, color: { argb: 'FF666666' } };
++  sheet.addRow([]);
++
++  for (const project of detail.projects) {
++    const projectHeaderRow = sheet.addRow([`${project.projectName} — ${project.customerName}`]);
++    projectHeaderRow.font = { bold: true, size: 11 };
++    sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 7);
++
++    const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Omschrijving', 'Van', 'Tot', 'Pauze (min)', 'Uren']);
++    styleColumnHeaderRow(columnHeaderRow);
++
++    for (const entry of project.entries) {
++      const seconds = workedSeconds(entry);
++      sheet.addRow([
++        formatDate(entry.startedAt),
++        entry.workOrderNumber,
++        entry.description ?? '',
++        formatTime(entry.startedAt),
++        formatTime(entry.endedAt),
++        Math.round(entry.pausedSeconds / 60),
++        Number((seconds / 3600).toFixed(2)),
++      ]);
++    }
++
++    const subtotalRow = sheet.addRow(['', '', '', '', '', 'Subtotaal', Number((project.totalSeconds / 3600).toFixed(2))]);
++    subtotalRow.font = { bold: true };
++    sheet.addRow([]);
++  }
++
++  const totalRow = sheet.addRow(['', '', '', '', '', 'Totaal', Number((detail.totalSeconds / 3600).toFixed(2))]);
++  totalRow.font = { bold: true, size: 12 };
++  totalRow.getCell(6).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
++  totalRow.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
++
++  const buffer = await workbook.xlsx.writeBuffer();
++  return Buffer.from(buffer);
++}
++
++function styleColumnHeaderRow(row: ExcelJS.Row): void {
++  row.font = { bold: true };
++  row.eachCell((cell) => {
++    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
++  });
++}
++
++/** Zelfde formule als hours-export.service.ts — bewust lokaal gehouden, zie de toelichting daar. */
++function workedSeconds(entry: { startedAt: Date; endedAt: Date; pausedSeconds: number }): number {
++  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
++  return Math.max(0, raw);
++}
++
++function formatDate(date: Date): string {
++  return date.toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
++}
++
++function formatTime(date: Date): string {
++  return date.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
++}
++
++function formatPeriodLabel(periodLabel: string): string {
++  const [year, month] = periodLabel.split('-');
++  if (!year || !month) return periodLabel;
++  const date = new Date(Number(year), Number(month) - 1, 1);
++  return date.toLocaleDateString('nl-BE', { month: 'long', year: 'numeric' });
++}
+diff --git a/apps/api/test/subcontractor-hours-workbook.test.ts b/apps/api/test/subcontractor-hours-workbook.test.ts
+new file mode 100644
+index 0000000..ad709d4
+--- /dev/null
++++ b/apps/api/test/subcontractor-hours-workbook.test.ts
+@@ -0,0 +1,80 @@
++import ExcelJS from 'exceljs';
++import { describe, expect, it } from 'vitest';
++import { buildSubcontractorHoursWorkbook } from '../src/modules/hours-export/subcontractor-hours-workbook';
++import type { HoursExportSubcontractorDetail } from '../src/modules/hours-export/hours-export.service';
++
++const detail: HoursExportSubcontractorDetail = {
++  employeeId: 'emp-1',
++  displayName: 'Jan Onderaannemer',
++  periodLabel: '2026-08',
++  totalSeconds: 4 * 3600 + 2 * 3600,
++  projects: [
++    {
++      projectName: 'Onderhoud HVAC',
++      projectNumber: 'PRO-1',
++      customerName: 'Janssens BV',
++      totalSeconds: 4 * 3600,
++      entries: [
++        {
++          workOrderId: 'wo-1',
++          workOrderNumber: 'WB-2026-000123',
++          projectName: 'Onderhoud HVAC',
++          projectNumber: 'PRO-1',
++          customerName: 'Janssens BV',
++          signedAt: new Date('2026-08-10T16:00:00Z'),
++          startedAt: new Date('2026-08-10T08:00:00Z'),
++          endedAt: new Date('2026-08-10T12:00:00Z'),
++          pausedSeconds: 0,
++          isManual: false,
++          description: 'Onderhoud uitgevoerd.',
++        },
++      ],
++    },
++    {
++      projectName: 'Interventie',
++      projectNumber: null,
++      customerName: 'De Smet NV',
++      totalSeconds: 2 * 3600,
++      entries: [
++        {
++          workOrderId: 'wo-2',
++          workOrderNumber: 'WB-2026-000124',
++          projectName: 'Interventie',
++          projectNumber: null,
++          customerName: 'De Smet NV',
++          signedAt: new Date('2026-08-12T14:00:00Z'),
++          startedAt: new Date('2026-08-12T08:00:00Z'),
++          endedAt: new Date('2026-08-12T10:00:00Z'),
++          pausedSeconds: 0,
++          isManual: false,
++          description: null,
++        },
++      ],
++    },
++  ],
++};
++
++describe('buildSubcontractorHoursWorkbook()', () => {
++  it('genereert een geldig, niet-leeg .xlsx-bestand met de juiste totalen', async () => {
++    const buffer = await buildSubcontractorHoursWorkbook(detail);
++    expect(buffer.length).toBeGreaterThan(0);
++
++    const workbook = new ExcelJS.Workbook();
++    await workbook.xlsx.load(buffer);
++    const sheet = workbook.getWorksheet('Urenoverzicht');
++    expect(sheet).toBeDefined();
++
++    const allValues = sheet!
++      .getSheetValues()
++      .flatMap((row) => (Array.isArray(row) ? row : []))
++      .filter((v) => v !== undefined && v !== null);
++
++    expect(allValues).toContain('Onderhoud HVAC — Janssens BV');
++    expect(allValues).toContain('Interventie — De Smet NV');
++    expect(allValues).toContain('WB-2026-000123');
++    expect(allValues).toContain('WB-2026-000124');
++    expect(allValues).toContain(4); // subtotaal project 1 (4u)
++    expect(allValues).toContain(2); // subtotaal project 2 (2u)
++    expect(allValues).toContain(6); // eindtotaal (6u)
++  });
++});
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 37cf0cf..ae46085 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -125,13 +125,28 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+     return undefined as T;
+   }
+ 
+-  const body = (await response.json()) as T | ApiErrorBody;
++  // Sectie 27 ("maak fouten begrijpelijk") — als de server een niet-JSON
++  // antwoord teruggeeft (bv. een ruwe 500-foutpagina van Render zelf, een
++  // proxy-timeout, of een onverwachte crash die de globale JSON-foutafhandeling
++  // omzeilt), gaf `response.json()` voorheen enkel een cryptische
++  // "Unexpected token"-SyntaxError die de aanroeper niet als ApiRequestError
++  // herkende — dan viel elke aanroeper stil terug op zijn generieke
++  // fallback-tekst ("Kon de handtekening niet opslaan.", enz.) zonder één
++  // bruikbare aanwijzing. Nu bevat die fallback minstens de HTTP-status, wat
++  // meteen een eerste diagnose mogelijk maakt zonder in de server-logs te
++  // moeten kijken (bv. 413 = payload te groot, 500 = serverfout, 504 = timeout).
++  let body: T | ApiErrorBody;
++  try {
++    body = (await response.json()) as T | ApiErrorBody;
++  } catch {
++    throw new ApiRequestError('NON_JSON_RESPONSE', `Onverwacht antwoord van de server (HTTP ${response.status}). Probeer het opnieuw.`);
++  }
+ 
+   if (!response.ok) {
+     const errorBody = body as ApiErrorBody;
+     throw new ApiRequestError(
+       errorBody.error?.code ?? 'UNKNOWN_ERROR',
+-      errorBody.error?.message ?? 'Er ging iets mis. Probeer het later opnieuw.',
++      errorBody.error?.message ?? `Er ging iets mis (HTTP ${response.status}). Probeer het later opnieuw.`,
+     );
+   }
+ 
+diff --git a/apps/web/src/pages/LoginPage.tsx b/apps/web/src/pages/LoginPage.tsx
+index bf24a60..4f648cd 100644
+--- a/apps/web/src/pages/LoginPage.tsx
++++ b/apps/web/src/pages/LoginPage.tsx
+@@ -51,7 +51,7 @@ export function LoginPage() {
+               transparante achtergrond) versmelt anders met de zwarte pagina-achtergrond —
+               een lichte kaart met een gouden accentrand (bestaande swatt-gold-kleur) lost dat
+               op en past bij de rest van de huisstijl (knoppen, "Onthou mij", enz.). */}
+-          <div className="rounded-2xl border-2 border-swatt-gold bg-neutral-50 px-8 py-6">
++          <div className="rounded-2xl border-2 border-swatt-gold bg-neutral-50 p-8">
+             <Logo size="lg" />
+           </div>
+           {branding?.logoDataUrl && (
+diff --git a/apps/web/src/pages/admin/HoursExportPage.tsx b/apps/web/src/pages/admin/HoursExportPage.tsx
+index 789c500..d79af0a 100644
+--- a/apps/web/src/pages/admin/HoursExportPage.tsx
++++ b/apps/web/src/pages/admin/HoursExportPage.tsx
+@@ -141,13 +141,22 @@ export function HoursExportPage() {
+                     {formatHm(employee.totalSeconds)} u · {employee.workOrderCount} werkbon(nen)
+                   </span>
+                 </div>
+-                <a
+-                  href={`/admin/hours-export/subcontractors/${employee.employeeId}/pdf?period=${encodeURIComponent(periodLabel)}`}
+-                  download
+-                  className="rounded-lg border border-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-swatt-gold-dark"
+-                >
+-                  Download PDF
+-                </a>
++                <div className="flex items-center gap-2">
++                  <a
++                    href={`/admin/hours-export/subcontractors/${employee.employeeId}/excel?period=${encodeURIComponent(periodLabel)}`}
++                    download
++                    className="rounded-lg bg-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-white"
++                  >
++                    Download Excel
++                  </a>
++                  <a
++                    href={`/admin/hours-export/subcontractors/${employee.employeeId}/pdf?period=${encodeURIComponent(periodLabel)}`}
++                    download
++                    className="rounded-lg border border-swatt-gold-dark px-3 py-1.5 text-xs font-semibold text-swatt-gold-dark"
++                  >
++                    Download PDF
++                  </a>
++                </div>
+               </li>
+             ))}
+           </ul>
+-- 
+2.43.0
+

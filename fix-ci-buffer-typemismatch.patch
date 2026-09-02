@@ -1,0 +1,33 @@
+From 6044f9d671eafb75edf403c1c0904528aa86dbd7 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 1 Sep 2026 11:30:35 +0000
+Subject: [PATCH] Fix: CI-typecheckfout in nieuwe test (Buffer-typemismatch
+ tussen twee @types/node-versies)
+
+---
+ apps/api/test/subcontractor-hours-workbook.test.ts | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/apps/api/test/subcontractor-hours-workbook.test.ts b/apps/api/test/subcontractor-hours-workbook.test.ts
+index ad709d4..6190d2b 100644
+--- a/apps/api/test/subcontractor-hours-workbook.test.ts
++++ b/apps/api/test/subcontractor-hours-workbook.test.ts
+@@ -60,7 +60,14 @@ describe('buildSubcontractorHoursWorkbook()', () => {
+     expect(buffer.length).toBeGreaterThan(0);
+ 
+     const workbook = new ExcelJS.Workbook();
+-    await workbook.xlsx.load(buffer);
++    // Buffer-type-mismatch tussen mogelijk twee verschillende @types/node-
++    // versies in de dependency-boom (ExcelJS' eigen typedefinities vs. de
++    // root-@types/node) — een `unknown`-cast volstond niet (de twee
++    // `Buffer`-declaraties zijn structureel verschillend), dus hier bewust
++    // `any` om dat volledig te omzeilen; enkel in deze test, niet in
++    // productiecode.
++    // eslint-disable-next-line @typescript-eslint/no-explicit-any
++    await workbook.xlsx.load(buffer as any);
+     const sheet = workbook.getWorksheet('Urenoverzicht');
+     expect(sheet).toBeDefined();
+ 
+-- 
+2.43.0
+
