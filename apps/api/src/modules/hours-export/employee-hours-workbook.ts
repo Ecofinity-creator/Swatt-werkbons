@@ -28,15 +28,18 @@ export async function buildEmployeeHoursWorkbook(
   overviewSheet.columns = [
     { header: 'Medewerker', key: 'displayName', width: 32 },
     { header: 'Aantal werkbonnen', key: 'workOrderCount', width: 18 },
-    { header: 'Totaal uren', key: 'totalHours', width: 14 },
+    { header: 'Normaal (u)', key: 'normalHours', width: 14 },
+    { header: 'Overuren (u)', key: 'overtimeHours', width: 14 },
   ];
   styleHeaderRow(overviewSheet);
   for (const employee of employees) {
-    const totalSeconds = employee.entries.reduce((sum, entry) => sum + workedSeconds(entry), 0);
+    const totalNormalHours = employee.entries.reduce((sum, entry) => sum + entry.normalHours, 0);
+    const totalOvertimeHours = employee.entries.reduce((sum, entry) => sum + entry.overtimeHours, 0);
     overviewSheet.addRow({
       displayName: employee.displayName,
       workOrderCount: new Set(employee.entries.map((entry) => entry.workOrderId)).size,
-      totalHours: Number((totalSeconds / 3600).toFixed(2)),
+      normalHours: Number(totalNormalHours.toFixed(2)),
+      overtimeHours: Number(totalOvertimeHours.toFixed(2)),
     });
   }
 
@@ -50,15 +53,17 @@ export async function buildEmployeeHoursWorkbook(
       { header: 'Van', key: 'startTime', width: 8 },
       { header: 'Tot', key: 'endTime', width: 8 },
       { header: 'Pauze (min)', key: 'pauseMinutes', width: 12 },
-      { header: 'Uren', key: 'hours', width: 10 },
+      { header: 'Normaal (u)', key: 'normalHours', width: 12 },
+      { header: 'Overuren (u)', key: 'overtimeHours', width: 12 },
       { header: 'Manueel', key: 'isManual', width: 10 },
     ];
     styleHeaderRow(sheet);
 
-    let totalSeconds = 0;
+    let totalNormalHours = 0;
+    let totalOvertimeHours = 0;
     for (const entry of employee.entries) {
-      const seconds = workedSeconds(entry);
-      totalSeconds += seconds;
+      totalNormalHours += entry.normalHours;
+      totalOvertimeHours += entry.overtimeHours;
       sheet.addRow({
         date: formatDate(entry.startedAt),
         workOrderNumber: entry.workOrderNumber,
@@ -67,12 +72,17 @@ export async function buildEmployeeHoursWorkbook(
         startTime: formatTime(entry.startedAt),
         endTime: formatTime(entry.endedAt),
         pauseMinutes: Math.round(entry.pausedSeconds / 60),
-        hours: Number((seconds / 3600).toFixed(2)),
+        normalHours: Number(entry.normalHours.toFixed(2)),
+        overtimeHours: Number(entry.overtimeHours.toFixed(2)),
         isManual: entry.isManual ? 'Ja' : 'Nee',
       });
     }
 
-    const totalRow = sheet.addRow({ projectName: 'Totaal', hours: Number((totalSeconds / 3600).toFixed(2)) });
+    const totalRow = sheet.addRow({
+      projectName: 'Totaal',
+      normalHours: Number(totalNormalHours.toFixed(2)),
+      overtimeHours: Number(totalOvertimeHours.toFixed(2)),
+    });
     totalRow.font = { bold: true };
   }
 
@@ -96,11 +106,6 @@ function sheetNameFor(displayName: string, workbook: ExcelJS.Workbook): string {
     suffix += 1;
   }
   return candidate;
-}
-
-function workedSeconds(entry: { startedAt: Date; endedAt: Date; pausedSeconds: number }): number {
-  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
-  return Math.max(0, raw);
 }
 
 function formatDate(date: Date): string {
