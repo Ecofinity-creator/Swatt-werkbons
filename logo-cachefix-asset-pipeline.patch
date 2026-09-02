@@ -1,0 +1,72 @@
+From b6f71bd2d3dd686f956cf27fcbcac440db24f3af Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Wed, 2 Sep 2026 06:15:02 +0000
+Subject: [PATCH] Logo-caching structureel opgelost: via Vite's asset-pipeline
+ i.p.v. een vast public/-pad
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Het bijgesneden logo (vorige commit) stond correct op GitHub, maar was bij
+Steven niet zichtbaar — geen coderegressie, maar een cachingprobleem:
+bestanden in Vite's public/-map behouden bij elke build exact dezelfde
+bestandsnaam, waardoor een CDN/browser een gewijzigde versie soms stil
+bleef cachen zonder enig signaal dat er iets veranderd is.
+
+Fix: logo-uurivo.png verplaatst van public/ naar src/assets/ en via een
+ES-import geladen i.p.v. een hardcoded pad. Vite geeft het bestand daardoor
+bij elke build een inhoud-gebaseerde bestandsnaam (bv.
+logo-uurivo-C39UIsQk.png) — bij een volgende logo-wijziging verandert die
+hash automatisch mee, waardoor dit exacte probleem zich structureel niet
+meer kan voordoen, voor eender welke toekomstige aanpassing aan dit bestand.
+
+icon-192.png blijft bewust op zijn vaste public/-pad: dat staat ook los
+gerefereerd in manifest.webmanifest (PWA-icoon) en moet daarom een
+voorspelbaar, stabiel pad behouden.
+
+Verificatie: typecheck/lint schoon, productiebuild bevestigt de nieuwe
+gehashte bestandsnaam (dist/assets/logo-uurivo-C39UIsQk.png).
+---
+ apps/web/{public => src/assets}/logo-uurivo.png | Bin
+ apps/web/src/components/Logo.tsx                |  14 +++++++++++++-
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+ rename apps/web/{public => src/assets}/logo-uurivo.png (100%)
+
+diff --git a/apps/web/public/logo-uurivo.png b/apps/web/src/assets/logo-uurivo.png
+similarity index 100%
+rename from apps/web/public/logo-uurivo.png
+rename to apps/web/src/assets/logo-uurivo.png
+diff --git a/apps/web/src/components/Logo.tsx b/apps/web/src/components/Logo.tsx
+index 6521362..7a540b3 100644
+--- a/apps/web/src/components/Logo.tsx
++++ b/apps/web/src/components/Logo.tsx
+@@ -4,7 +4,19 @@
+  * beeldmerken (aug 2026): de volledige lockup (icoon + wordmark) voor grote
+  * plekken zoals het loginscherm, en enkel het vierkante icoon voor compacte
+  * plekken zoals de header op HomePage.
++ *
++ * `logo-uurivo.png` wordt bewust via een ES-import geladen (i.p.v. een vast
++ * pad naar `public/`, zoals voorheen) zodat Vite er bij elke build een
++ * inhoud-gebaseerde bestandsnaam aan geeft (bv. `logo-uurivo.a1b2c3d4.png`).
++ * Zonder dat behoudt een bestand in `public/` altijd exact dezelfde naam,
++ * waardoor een CDN/browser een gewijzigd logo (zoals de bijsnede van
++ * 1/9/2026) soms stil bleef cachen — met een unieke naam per versie is dat
++ * structureel onmogelijk. `icon-192.png` hieronder blijft wél op zijn vaste
++ * pad, want dat staat ook los in manifest.webmanifest (PWA-icoon) en moet
++ * daarom een voorspelbaar, stabiel pad behouden.
+  */
++import logoUurivo from '../assets/logo-uurivo.png';
++
+ export function Logo({ size = 'lg', className = '' }: { size?: 'lg' | 'md'; className?: string }) {
+   if (size === 'md') {
+     return (
+@@ -22,5 +34,5 @@ export function Logo({ size = 'lg', className = '' }: { size?: 'lg' | 'md'; clas
+   // stylesheet-volgorde, niet via JSX-volgorde) — vandaar de expliciete
+   // fallback hieronder i.p.v. simpelweg samen te voegen.
+   const widthClassName = className.includes('w-') ? className : ['w-64', className].filter(Boolean).join(' ');
+-  return <img src="/logo-uurivo.png" alt="Uurivo" className={['h-auto', widthClassName].join(' ')} />;
++  return <img src={logoUurivo} alt="Uurivo" className={['h-auto', widthClassName].join(' ')} />;
+ }
+-- 
+2.43.0
+
