@@ -21,6 +21,7 @@ import type {
   ListProjectsResponseBody,
   ListTeamleaderUsersResponseBody,
   ListUsersResponseBody,
+  ListWorkOrderDraftsResponseBody,
   ListWorkOrderSyncIssuesResponseBody,
   LinkTeamleaderUserBody,
   LoginResponseBody,
@@ -304,6 +305,15 @@ export const timeEntriesApi = {
 export const workOrdersApi = {
   create: (body: CreateWorkOrderBody) =>
     request<WorkOrderResponseBody>('/work-orders', { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
+   * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — zie
+   * ProjectTimerPage.tsx voor waar dit getoond wordt.
+   */
+  listDrafts: (projectId: string) =>
+    request<ListWorkOrderDraftsResponseBody>(`/work-orders/drafts?projectId=${encodeURIComponent(projectId)}`, {
+      method: 'GET',
+    }),
   get: (workOrderId: string) => request<WorkOrderResponseBody>(`/work-orders/${workOrderId}`, { method: 'GET' }),
   /** Phase 7 — verplichte klanthandtekening (sectie 10). Zet de werkbon DRAFT → SIGNED. */
   sign: (workOrderId: string, body: SignWorkOrderBody) =>

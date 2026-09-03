@@ -1,4 +1,4 @@
-import type { ProjectSummary, TimeEntrySummary } from '@swatt/shared-types';
+import type { ProjectSummary, TimeEntrySummary, WorkOrderDraftSummary } from '@swatt/shared-types';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { projectsApi, timeEntriesApi, workOrdersApi } from '../api/client';
@@ -49,6 +49,12 @@ export function ProjectTimerPage() {
   const [isCreatingWorkOrder, setIsCreatingWorkOrder] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  // Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
+  // werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — bv. op
+  // het einde van de week naar de verantwoordelijke stappen om ze te laten
+  // tekenen. Enkel de eigen (mee-uitgevoerde) DRAFT-werkbonnen van dit project.
+  const [draftWorkOrders, setDraftWorkOrders] = useState<WorkOrderDraftSummary[] | null>(null);
+
   // Sectie 6 — "manueel tijd toevoegen indien toegestaan": alternatief voor
   // START/PAUZE/STOP wanneer een werknemer een vaste periode achteraf wil
   // ingeven (bv. de timer vergeten te starten).
@@ -93,6 +99,25 @@ export function ProjectTimerPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stateProject is een stabiele snapshot uit de navigatie, geen reactieve dependency
   }, [projectId]);
+
+  // Op vraag (3/9/2026) — zie de toelichting bij draftWorkOrders hierboven.
+  // Ook opnieuw ophalen na het aanmaken van een werkbon (stoppedSummary
+  // wijzigt dan), zodat de nieuwe werkbon meteen in de lijst verschijnt.
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    workOrdersApi
+      .listDrafts(projectId)
+      .then((response) => {
+        if (!cancelled) setDraftWorkOrders(response.workOrders);
+      })
+      .catch(() => {
+        if (!cancelled) setDraftWorkOrders(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, stoppedSummary]);
 
   // Tikt elke seconde door zodat een lopende timer live meetelt.
   useEffect(() => {
@@ -563,6 +588,36 @@ export function ProjectTimerPage() {
           )}
         </>
       )}
+
+      {!isLoading && project && draftWorkOrders && draftWorkOrders.length > 0 && (
+        <section className="mt-8 border-t border-neutral-800 pt-6">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-400">
+            Nog niet getekende werkbonnen
+          </h2>
+          <p className="mb-3 text-xs text-neutral-500">
+            Bv. op het einde van de week: ga hiernaartoe om ze door de klant te laten tekenen — zonder een nieuwe aan
+            te maken.
+          </p>
+          <ul className="space-y-2">
+            {draftWorkOrders.map((draft) => (
+              <li key={draft.id}>
+                <Link
+                  to={`/werkbonnen/${draft.id}`}
+                  className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-3 active:bg-neutral-800"
+                >
+                  <span>
+                    <span className="block text-sm font-semibold">{draft.workOrderNumber}</span>
+                    <span className="block text-xs text-neutral-400">
+                      {formatDraftDate(draft.createdAt)} · {formatDraftDuration(draft.totalSeconds)}
+                    </span>
+                  </span>
+                  <span className="text-swatt-gold">›</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </main>
   );
 }
@@ -574,6 +629,16 @@ export function ProjectTimerPage() {
  * backend-kant, maar dan lokaal en "live" (met het huidige moment i.p.v. het
  * moment van een server-call).
  */
+function formatDraftDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function formatDraftDuration(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  return `${hours}u ${String(minutes).padStart(2, '0')}min`;
+}
+
 function computeElapsedSeconds(entry: TimeEntrySummary, nowMs: number): number {
   const startedMs = new Date(entry.startedAt).getTime();
 

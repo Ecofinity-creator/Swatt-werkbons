@@ -81,6 +81,32 @@ function createFakePrisma(options: {
       const found = workOrders.get(where.id);
       return found ? toRecord(found) : null;
     }),
+    findMany: vi.fn(
+      async ({
+        where,
+      }: {
+        where: { projectId: string; status: string; OR: Array<{ createdByEmployeeId?: string; timeEntries?: { some: { timeEntry: { employeeId: string } } } }> };
+      }) => {
+        const requestedEmployeeId =
+          (where.OR.find((clause) => 'createdByEmployeeId' in clause)?.createdByEmployeeId as string | undefined) ??
+          where.OR.find((clause) => 'timeEntries' in clause)?.timeEntries?.some.timeEntry.employeeId;
+        return Array.from(workOrders.values())
+          .filter((wo) => wo.projectId === where.projectId && wo.status === where.status)
+          .filter(
+            (wo) =>
+              wo.createdByEmployeeId === requestedEmployeeId ||
+              wo.timeEntryIds.some((tid) => timeEntries.get(tid)?.employeeId === requestedEmployeeId),
+          )
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+          .map((wo) => ({
+            id: wo.id,
+            workOrderNumber: wo.workOrderNumber,
+            description: wo.description,
+            createdAt: wo.createdAt,
+            timeEntries: wo.timeEntryIds.map((tid) => ({ timeEntry: timeEntries.get(tid)! })),
+          }));
+      },
+    ),
     create: vi.fn(
       async ({
         data,
@@ -156,6 +182,7 @@ function createFakePrisma(options: {
 
   return {
     prisma: { workOrder, project, timeEntry, workOrderCounter } as unknown as PrismaClient,
+    workOrders,
   };
 }
 
@@ -346,5 +373,109 @@ describe('WorkOrderService', () => {
     expect(fetched.id).toBe(created.id);
     expect(fetched.workOrderNumber).toBe(created.workOrderNumber);
     expect(fetched.timeEntries).toHaveLength(1);
+  });
+
+  describe('listDraftsForEmployeeOnProject() — op vraag (3/9/2026): naar niet-getekende werkbonnen kunnen navigeren zonder een nieuwe aan te maken', () => {
+    it('toont enkel DRAFT-werkbonnen van dit project waar de medewerker zelf bij betrokken is, meest recente eerst', async () => {
+      const collega: FakeEmployee = { id: 'employee-2', displayName: 'Wannes' };
+      const anderProject: FakeProject = { id: 'project-2', isArchivedInTl: false, name: 'Interventie', customerName: 'De Smet NV' };
+      const { prisma, workOrders } = createFakePrisma({
+        projects: [PROJECT, anderProject],
+        employees: [EMPLOYEE, collega],
+        timeEntries: [stoppedEntry({ id: 'entry-1' }), stoppedEntry({ id: 'entry-2', employeeId: collega.id })],
+      });
+      // Rechtstreeks in de fake data-laag ingevoegd (i.p.v. via service.create()
+      // tweemaal aan te roepen) — dit test enkel listDraftsForEmployeeOnProject()
+      // zelf, niet de werkbonnummer-allocatie (die heeft al eigen tests hierboven).
+      workOrders.set('wo-eigen', {
+        id: 'wo-eigen',
+        workOrderNumber: 'WB-2026-000001',
+        projectId: PROJECT.id,
+        status: 'DRAFT',
+        description: 'Eigen werkbon',
+        createdByEmployeeId: EMPLOYEE.id,
+        createdAt: new Date('2026-08-20T09:00:00Z'),
+        updatedAt: new Date('2026-08-20T09:00:00Z'),
+        timeEntryIds: ['entry-1'],
+      });
+      workOrders.set('wo-collega', {
+        id: 'wo-collega',
+        workOrderNumber: 'WB-2026-000002',
+        projectId: PROJECT.id,
+        status: 'DRAFT',
+        description: 'Werkbon van collega',
+        createdByEmployeeId: collega.id,
+        createdAt: new Date('2026-08-21T09:00:00Z'), // later dan wo-eigen
+        updatedAt: new Date('2026-08-21T09:00:00Z'),
+        timeEntryIds: ['entry-2'],
+      });
+      const service = new WorkOrderService(prisma);
+
+      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
+
+      expect(drafts.map((d) => d.id)).toEqual(['wo-eigen']);
+      expect(drafts[0]?.description).toBe('Eigen werkbon');
+    });
+
+    it('toont een werkbon ook wanneer de medewerker enkel via een eigen tijdregistratie betrokken is (niet de aanmaker) — bv. twee medewerkers samen op dezelfde werf (sectie 8)', async () => {
+      const collega: FakeEmployee = { id: 'employee-2', displayName: 'Wannes' };
+      const { prisma, workOrders } = createFakePrisma({
+        projects: [PROJECT],
+        employees: [EMPLOYEE, collega],
+        timeEntries: [stoppedEntry({ id: 'entry-1', employeeId: EMPLOYEE.id })],
+      });
+      // Rechtstreeks in de fake data-laag ingevoegd i.p.v. via service.create()
+      // (die terecht valideert dat elke meegegeven tijdregistratie van de
+      // aanmakende medewerker zelf moet zijn) — dit test enkel de leeskant:
+      // een werkbon aangemaakt door de collega, met Peters tijdregistratie
+      // erin gekoppeld.
+      workOrders.set('wo-samen', {
+        id: 'wo-samen',
+        workOrderNumber: 'WB-2026-000999',
+        projectId: PROJECT.id,
+        status: 'DRAFT',
+        description: 'Samen uitgevoerd',
+        createdByEmployeeId: collega.id,
+        createdAt: new Date('2026-08-20T09:00:00Z'),
+        updatedAt: new Date('2026-08-20T09:00:00Z'),
+        timeEntryIds: ['entry-1'],
+      });
+      const service = new WorkOrderService(prisma);
+
+      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
+
+      expect(drafts).toHaveLength(1);
+      expect(drafts[0]?.id).toBe('wo-samen');
+    });
+
+    it('berekent totalSeconds correct op basis van de onderliggende tijdregistraties', async () => {
+      const { prisma } = createFakePrisma({
+        projects: [PROJECT],
+        employees: [EMPLOYEE],
+        timeEntries: [
+          stoppedEntry({
+            id: 'entry-1',
+            startedAt: new Date('2026-08-20T08:00:00Z'),
+            endedAt: new Date('2026-08-20T10:00:00Z'),
+            pausedSeconds: 600,
+          }),
+        ],
+      });
+      const service = new WorkOrderService(prisma);
+      await service.create(EMPLOYEE.id, PROJECT.id, ['entry-1'], 'Test');
+
+      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
+
+      expect(drafts[0]?.totalSeconds).toBe(2 * 3600 - 600); // 2u min 10min pauze
+    });
+
+    it('geeft een lege lijst terug zonder openstaande werkbonnen', async () => {
+      const { prisma } = createFakePrisma({ projects: [PROJECT], employees: [EMPLOYEE] });
+      const service = new WorkOrderService(prisma);
+
+      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
+
+      expect(drafts).toEqual([]);
+    });
   });
 });

@@ -718,6 +718,24 @@ export interface ListWorkOrderSyncIssuesResponseBody {
 }
 
 /**
+ * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
+ * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — lichtgewicht
+ * lijst-item, zie WorkOrderService.listDraftsForEmployeeOnProject().
+ */
+export interface WorkOrderDraftSummary {
+  id: string;
+  workOrderNumber: string;
+  description: string | null;
+  createdAt: string;
+  totalSeconds: number;
+}
+
+/** Response van GET /work-orders/drafts?projectId=... */
+export interface ListWorkOrderDraftsResponseBody {
+  workOrders: WorkOrderDraftSummary[];
+}
+
+/**
  * Response van POST /work-orders/:id/sync/retry — handmatige herstelactie
  * (sectie 13: "Administrator moet handmatig: Opnieuw synchroniseren kunnen
  * kiezen"), herbruikt dezelfde WorkOrderResponseBody-vorm als de rest van de

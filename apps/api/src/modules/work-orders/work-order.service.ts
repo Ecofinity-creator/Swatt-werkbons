@@ -119,6 +119,14 @@ export function deriveTimeTrackingSyncError(timeEntries: WorkOrderRecord['timeEn
  * is datamodel-technisch al mogelijk (zie WorkOrderTimeEntry) maar heeft in
  * deze ronde nog geen UI-flow — dat is bewust uitgesteld tot een latere fase.
  */
+export interface WorkOrderListItemRecord {
+  id: string;
+  workOrderNumber: string;
+  description: string | null;
+  createdAt: Date;
+  totalSeconds: number;
+}
+
 export class WorkOrderService {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -128,6 +136,51 @@ export class WorkOrderService {
       throw WorkOrderErrors.notFound();
     }
     return workOrder;
+  }
+
+  /**
+   * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
+   * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — bv. op
+   * het einde van de week naar de verantwoordelijke stappen om ze te laten
+   * tekenen. Bewust een lichtgewicht lijst (geen foto's/handtekening) i.p.v.
+   * WITH_DETAILS, en enkel DRAFT (nog niet getekend) — een SIGNED/latere
+   * status heeft hier geen betekenis meer, die bekijk je via de werkbon zelf.
+   * Zelfde participant-filter als WorkOrderSignatureService.requireEditableParticipant():
+   * de medewerker moet de werkbon zelf aangemaakt hebben, of er via een eigen
+   * tijdregistratie aan gekoppeld zijn — geen toegang tot andermans werkbonnen
+   * (dat is een SUPERVISOR+-aangelegenheid, zie het bredere werkbonnenoverzicht
+   * uit sectie 20, nog niet gebouwd).
+   */
+  async listDraftsForEmployeeOnProject(employeeId: string, projectId: string): Promise<WorkOrderListItemRecord[]> {
+    const rows = await this.prisma.workOrder.findMany({
+      where: {
+        projectId,
+        status: 'DRAFT',
+        OR: [{ createdByEmployeeId: employeeId }, { timeEntries: { some: { timeEntry: { employeeId } } } }],
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        workOrderNumber: true,
+        description: true,
+        createdAt: true,
+        timeEntries: { select: { timeEntry: { select: { startedAt: true, endedAt: true, pausedSeconds: true } } } },
+      },
+    });
+
+    return (rows as unknown as Array<{
+      id: string;
+      workOrderNumber: string;
+      description: string | null;
+      createdAt: Date;
+      timeEntries: Array<{ timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number } }>;
+    }>).map((row) => ({
+      id: row.id,
+      workOrderNumber: row.workOrderNumber,
+      description: row.description,
+      createdAt: row.createdAt,
+      totalSeconds: row.timeEntries.reduce((sum, link) => sum + computeWorkedSeconds(link.timeEntry), 0),
+    }));
   }
 
   /**
@@ -242,4 +295,11 @@ export class WorkOrderService {
     }
     return `WB-${year}-${String(lastNumber).padStart(6, '0')}`;
   }
+}
+
+/** Zelfde formule als elders in de codebase (invoice-batch.service.ts, hours-export.service.ts, ...) — bewust lokaal gehouden, zie de toelichting daar. */
+function computeWorkedSeconds(entry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number }): number {
+  if (!entry.endedAt) return 0;
+  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
+  return Math.max(0, raw);
 }

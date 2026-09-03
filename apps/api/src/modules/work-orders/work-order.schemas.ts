@@ -12,6 +12,11 @@ export const createWorkOrderBodySchema = z.object({
 
 export type CreateWorkOrderBody = z.infer<typeof createWorkOrderBodySchema>;
 
+/** Op vraag (3/9/2026) — zie WorkOrderService.listDraftsForEmployeeOnProject(). */
+export const listWorkOrderDraftsQuerySchema = z.object({
+  projectId: z.string().uuid(),
+});
+
 /**
  * Phase 6/7 — foto's en handtekening komen als base64 mee in de gewone JSON-
  * body (geen `multipart/form-data`) — zelfde reden als de rest van de app:

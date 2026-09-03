@@ -1,5 +1,6 @@
 import {
   roleAtLeast,
+  type ListWorkOrderDraftsResponseBody,
   type ListWorkOrderSyncIssuesResponseBody,
   type WorkOrderPhotoSummary,
   type WorkOrderResponseBody,
@@ -18,6 +19,7 @@ import { WorkOrderSignatureService } from './work-order-signature.service';
 import {
   addWorkOrderPhotoBodySchema,
   createWorkOrderBodySchema,
+  listWorkOrderDraftsQuerySchema,
   signWorkOrderBodySchema,
   workOrderIdParamsSchema,
   workOrderPhotoParamsSchema,
@@ -46,6 +48,32 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
     reply.code(201);
     return { workOrder: await toSummary(storage, workOrder) };
   });
+
+  /**
+   * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
+   * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — zie
+   * WorkOrderService.listDraftsForEmployeeOnProject() voor de volledige
+   * toelichting. Enkel de eigen (mee-uitgevoerde) DRAFT-werkbonnen van dit
+   * project.
+   */
+  app.get(
+    '/work-orders/drafts',
+    { preHandler: [app.authenticate] },
+    async (request): Promise<ListWorkOrderDraftsResponseBody> => {
+      const employeeId = requireEmployeeId(request);
+      const query = listWorkOrderDraftsQuerySchema.parse(request.query);
+      const drafts = await service.listDraftsForEmployeeOnProject(employeeId, query.projectId);
+      return {
+        workOrders: drafts.map((draft) => ({
+          id: draft.id,
+          workOrderNumber: draft.workOrderNumber,
+          description: draft.description,
+          createdAt: draft.createdAt.toISOString(),
+          totalSeconds: draft.totalSeconds,
+        })),
+      };
+    },
+  );
 
   app.get('/work-orders/:id', { preHandler: [app.authenticate] }, async (request): Promise<WorkOrderResponseBody> => {
     const params = workOrderIdParamsSchema.parse(request.params);

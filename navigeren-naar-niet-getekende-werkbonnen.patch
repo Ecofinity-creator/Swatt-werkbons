@@ -1,0 +1,520 @@
+From c08083d1ae6d59fcd935623eeb3390ab42f8d5b7 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Thu, 3 Sep 2026 12:44:50 +0000
+Subject: [PATCH] Naar niet-getekende werkbonnen kunnen navigeren zonder een
+ nieuwe aan te maken
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Op vraag (3/9/2026): "hoe kan de installateur in de app naar de niet
+getekende werkbons gaan van zijn klant zonder een nieuwe aan te maken? bv op
+het einde van de week gaat hij naar de verantwoordelijke om ze te laten
+tekenen."
+
+Bleek een echt gat in de app: er bestond geen enkele manier om een bestaande
+werkbon te bereiken behalve door er zelf één aan te maken via de timer-flow
+(het geplande "werkbonnenoverzicht" uit het oorspronkelijke ontwerp — sectie
+20 — was nooit gebouwd, expliciet zo genoteerd in een codecommentaar bij
+listSyncIssues()).
+
+Backend
+- WorkOrderService.listDraftsForEmployeeOnProject(): nieuwe, lichtgewicht
+  lijst van DRAFT-werkbonnen op een project waar de medewerker zelf bij
+  betrokken is (als aanmaker, of via een eigen tijdregistratie erin — bv.
+  samen met een collega op dezelfde werf, sectie 8). Zelfde
+  participant-filter als WorkOrderSignatureService.requireEditableParticipant().
+- Nieuwe route GET /work-orders/drafts?projectId=... .
+- shared-types: WorkOrderDraftSummary, ListWorkOrderDraftsResponseBody.
+- 4 nieuwe tests, waaronder een test die specifiek bevestigt dat een
+  werkbon ook via tijdregistratie-betrokkenheid getoond wordt, niet enkel
+  via het aanmaken ervan.
+
+Frontend
+- ProjectTimerPage.tsx (het scherm waar de installateur al naartoe gaat om
+  zijn timer te starten): nieuwe sectie "Nog niet getekende werkbonnen"
+  onderaan, met per werkbon nummer/datum/duur, die rechtstreeks naar
+  /werkbonnen/:id linkt — het bestaande reviewscherm, waar de klant kan
+  tekenen (inclusief de al bestaande weekondertekening-logica). Wordt
+  automatisch herladen na het aanmaken van een nieuwe werkbon.
+
+Verificatie: backend-testsuite 193 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, sandbox-beperkingen, geen regressies),
+typecheck/lint backend+frontend schoon, frontend-productiebuild slaagt.
+---
+ .../modules/work-orders/work-order.routes.ts  |  28 ++++
+ .../modules/work-orders/work-order.schemas.ts |   5 +
+ .../modules/work-orders/work-order.service.ts |  60 ++++++++
+ apps/api/test/work-order.service.test.ts      | 131 ++++++++++++++++++
+ apps/web/src/api/client.ts                    |  10 ++
+ apps/web/src/pages/ProjectTimerPage.tsx       |  67 ++++++++-
+ packages/shared-types/src/index.ts            |  18 +++
+ 7 files changed, 318 insertions(+), 1 deletion(-)
+
+diff --git a/apps/api/src/modules/work-orders/work-order.routes.ts b/apps/api/src/modules/work-orders/work-order.routes.ts
+index 2fd0aa3..c03f6ba 100644
+--- a/apps/api/src/modules/work-orders/work-order.routes.ts
++++ b/apps/api/src/modules/work-orders/work-order.routes.ts
+@@ -1,5 +1,6 @@
+ import {
+   roleAtLeast,
++  type ListWorkOrderDraftsResponseBody,
+   type ListWorkOrderSyncIssuesResponseBody,
+   type WorkOrderPhotoSummary,
+   type WorkOrderResponseBody,
+@@ -18,6 +19,7 @@ import { WorkOrderSignatureService } from './work-order-signature.service';
+ import {
+   addWorkOrderPhotoBodySchema,
+   createWorkOrderBodySchema,
++  listWorkOrderDraftsQuerySchema,
+   signWorkOrderBodySchema,
+   workOrderIdParamsSchema,
+   workOrderPhotoParamsSchema,
+@@ -47,6 +49,32 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+     return { workOrder: await toSummary(storage, workOrder) };
+   });
+ 
++  /**
++   * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
++   * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — zie
++   * WorkOrderService.listDraftsForEmployeeOnProject() voor de volledige
++   * toelichting. Enkel de eigen (mee-uitgevoerde) DRAFT-werkbonnen van dit
++   * project.
++   */
++  app.get(
++    '/work-orders/drafts',
++    { preHandler: [app.authenticate] },
++    async (request): Promise<ListWorkOrderDraftsResponseBody> => {
++      const employeeId = requireEmployeeId(request);
++      const query = listWorkOrderDraftsQuerySchema.parse(request.query);
++      const drafts = await service.listDraftsForEmployeeOnProject(employeeId, query.projectId);
++      return {
++        workOrders: drafts.map((draft) => ({
++          id: draft.id,
++          workOrderNumber: draft.workOrderNumber,
++          description: draft.description,
++          createdAt: draft.createdAt.toISOString(),
++          totalSeconds: draft.totalSeconds,
++        })),
++      };
++    },
++  );
++
+   app.get('/work-orders/:id', { preHandler: [app.authenticate] }, async (request): Promise<WorkOrderResponseBody> => {
+     const params = workOrderIdParamsSchema.parse(request.params);
+     const workOrder = await service.get(params.id);
+diff --git a/apps/api/src/modules/work-orders/work-order.schemas.ts b/apps/api/src/modules/work-orders/work-order.schemas.ts
+index 0f3d1c4..d335de4 100644
+--- a/apps/api/src/modules/work-orders/work-order.schemas.ts
++++ b/apps/api/src/modules/work-orders/work-order.schemas.ts
+@@ -12,6 +12,11 @@ export const createWorkOrderBodySchema = z.object({
+ 
+ export type CreateWorkOrderBody = z.infer<typeof createWorkOrderBodySchema>;
+ 
++/** Op vraag (3/9/2026) — zie WorkOrderService.listDraftsForEmployeeOnProject(). */
++export const listWorkOrderDraftsQuerySchema = z.object({
++  projectId: z.string().uuid(),
++});
++
+ /**
+  * Phase 6/7 — foto's en handtekening komen als base64 mee in de gewone JSON-
+  * body (geen `multipart/form-data`) — zelfde reden als de rest van de app:
+diff --git a/apps/api/src/modules/work-orders/work-order.service.ts b/apps/api/src/modules/work-orders/work-order.service.ts
+index fcfc196..903ad31 100644
+--- a/apps/api/src/modules/work-orders/work-order.service.ts
++++ b/apps/api/src/modules/work-orders/work-order.service.ts
+@@ -119,6 +119,14 @@ export function deriveTimeTrackingSyncError(timeEntries: WorkOrderRecord['timeEn
+  * is datamodel-technisch al mogelijk (zie WorkOrderTimeEntry) maar heeft in
+  * deze ronde nog geen UI-flow — dat is bewust uitgesteld tot een latere fase.
+  */
++export interface WorkOrderListItemRecord {
++  id: string;
++  workOrderNumber: string;
++  description: string | null;
++  createdAt: Date;
++  totalSeconds: number;
++}
++
+ export class WorkOrderService {
+   constructor(private readonly prisma: PrismaClient) {}
+ 
+@@ -130,6 +138,51 @@ export class WorkOrderService {
+     return workOrder;
+   }
+ 
++  /**
++   * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
++   * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — bv. op
++   * het einde van de week naar de verantwoordelijke stappen om ze te laten
++   * tekenen. Bewust een lichtgewicht lijst (geen foto's/handtekening) i.p.v.
++   * WITH_DETAILS, en enkel DRAFT (nog niet getekend) — een SIGNED/latere
++   * status heeft hier geen betekenis meer, die bekijk je via de werkbon zelf.
++   * Zelfde participant-filter als WorkOrderSignatureService.requireEditableParticipant():
++   * de medewerker moet de werkbon zelf aangemaakt hebben, of er via een eigen
++   * tijdregistratie aan gekoppeld zijn — geen toegang tot andermans werkbonnen
++   * (dat is een SUPERVISOR+-aangelegenheid, zie het bredere werkbonnenoverzicht
++   * uit sectie 20, nog niet gebouwd).
++   */
++  async listDraftsForEmployeeOnProject(employeeId: string, projectId: string): Promise<WorkOrderListItemRecord[]> {
++    const rows = await this.prisma.workOrder.findMany({
++      where: {
++        projectId,
++        status: 'DRAFT',
++        OR: [{ createdByEmployeeId: employeeId }, { timeEntries: { some: { timeEntry: { employeeId } } } }],
++      },
++      orderBy: { createdAt: 'desc' },
++      select: {
++        id: true,
++        workOrderNumber: true,
++        description: true,
++        createdAt: true,
++        timeEntries: { select: { timeEntry: { select: { startedAt: true, endedAt: true, pausedSeconds: true } } } },
++      },
++    });
++
++    return (rows as unknown as Array<{
++      id: string;
++      workOrderNumber: string;
++      description: string | null;
++      createdAt: Date;
++      timeEntries: Array<{ timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number } }>;
++    }>).map((row) => ({
++      id: row.id,
++      workOrderNumber: row.workOrderNumber,
++      description: row.description,
++      createdAt: row.createdAt,
++      totalSeconds: row.timeEntries.reduce((sum, link) => sum + computeWorkedSeconds(link.timeEntry), 0),
++    }));
++  }
++
+   /**
+    * Phase 9 — overzicht "Synchronisatiefouten" (sectie 4/13: supervisors
+    * "behandelen synchronisatiefouten"). Bewust een lichtgewicht, gerichte
+@@ -243,3 +296,10 @@ export class WorkOrderService {
+     return `WB-${year}-${String(lastNumber).padStart(6, '0')}`;
+   }
+ }
++
++/** Zelfde formule als elders in de codebase (invoice-batch.service.ts, hours-export.service.ts, ...) — bewust lokaal gehouden, zie de toelichting daar. */
++function computeWorkedSeconds(entry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number }): number {
++  if (!entry.endedAt) return 0;
++  const raw = (entry.endedAt.getTime() - entry.startedAt.getTime()) / 1000 - entry.pausedSeconds;
++  return Math.max(0, raw);
++}
+diff --git a/apps/api/test/work-order.service.test.ts b/apps/api/test/work-order.service.test.ts
+index 0258229..9775bfe 100644
+--- a/apps/api/test/work-order.service.test.ts
++++ b/apps/api/test/work-order.service.test.ts
+@@ -81,6 +81,32 @@ function createFakePrisma(options: {
+       const found = workOrders.get(where.id);
+       return found ? toRecord(found) : null;
+     }),
++    findMany: vi.fn(
++      async ({
++        where,
++      }: {
++        where: { projectId: string; status: string; OR: Array<{ createdByEmployeeId?: string; timeEntries?: { some: { timeEntry: { employeeId: string } } } }> };
++      }) => {
++        const requestedEmployeeId =
++          (where.OR.find((clause) => 'createdByEmployeeId' in clause)?.createdByEmployeeId as string | undefined) ??
++          where.OR.find((clause) => 'timeEntries' in clause)?.timeEntries?.some.timeEntry.employeeId;
++        return Array.from(workOrders.values())
++          .filter((wo) => wo.projectId === where.projectId && wo.status === where.status)
++          .filter(
++            (wo) =>
++              wo.createdByEmployeeId === requestedEmployeeId ||
++              wo.timeEntryIds.some((tid) => timeEntries.get(tid)?.employeeId === requestedEmployeeId),
++          )
++          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
++          .map((wo) => ({
++            id: wo.id,
++            workOrderNumber: wo.workOrderNumber,
++            description: wo.description,
++            createdAt: wo.createdAt,
++            timeEntries: wo.timeEntryIds.map((tid) => ({ timeEntry: timeEntries.get(tid)! })),
++          }));
++      },
++    ),
+     create: vi.fn(
+       async ({
+         data,
+@@ -156,6 +182,7 @@ function createFakePrisma(options: {
+ 
+   return {
+     prisma: { workOrder, project, timeEntry, workOrderCounter } as unknown as PrismaClient,
++    workOrders,
+   };
+ }
+ 
+@@ -347,4 +374,108 @@ describe('WorkOrderService', () => {
+     expect(fetched.workOrderNumber).toBe(created.workOrderNumber);
+     expect(fetched.timeEntries).toHaveLength(1);
+   });
++
++  describe('listDraftsForEmployeeOnProject() — op vraag (3/9/2026): naar niet-getekende werkbonnen kunnen navigeren zonder een nieuwe aan te maken', () => {
++    it('toont enkel DRAFT-werkbonnen van dit project waar de medewerker zelf bij betrokken is, meest recente eerst', async () => {
++      const collega: FakeEmployee = { id: 'employee-2', displayName: 'Wannes' };
++      const anderProject: FakeProject = { id: 'project-2', isArchivedInTl: false, name: 'Interventie', customerName: 'De Smet NV' };
++      const { prisma, workOrders } = createFakePrisma({
++        projects: [PROJECT, anderProject],
++        employees: [EMPLOYEE, collega],
++        timeEntries: [stoppedEntry({ id: 'entry-1' }), stoppedEntry({ id: 'entry-2', employeeId: collega.id })],
++      });
++      // Rechtstreeks in de fake data-laag ingevoegd (i.p.v. via service.create()
++      // tweemaal aan te roepen) — dit test enkel listDraftsForEmployeeOnProject()
++      // zelf, niet de werkbonnummer-allocatie (die heeft al eigen tests hierboven).
++      workOrders.set('wo-eigen', {
++        id: 'wo-eigen',
++        workOrderNumber: 'WB-2026-000001',
++        projectId: PROJECT.id,
++        status: 'DRAFT',
++        description: 'Eigen werkbon',
++        createdByEmployeeId: EMPLOYEE.id,
++        createdAt: new Date('2026-08-20T09:00:00Z'),
++        updatedAt: new Date('2026-08-20T09:00:00Z'),
++        timeEntryIds: ['entry-1'],
++      });
++      workOrders.set('wo-collega', {
++        id: 'wo-collega',
++        workOrderNumber: 'WB-2026-000002',
++        projectId: PROJECT.id,
++        status: 'DRAFT',
++        description: 'Werkbon van collega',
++        createdByEmployeeId: collega.id,
++        createdAt: new Date('2026-08-21T09:00:00Z'), // later dan wo-eigen
++        updatedAt: new Date('2026-08-21T09:00:00Z'),
++        timeEntryIds: ['entry-2'],
++      });
++      const service = new WorkOrderService(prisma);
++
++      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
++
++      expect(drafts.map((d) => d.id)).toEqual(['wo-eigen']);
++      expect(drafts[0]?.description).toBe('Eigen werkbon');
++    });
++
++    it('toont een werkbon ook wanneer de medewerker enkel via een eigen tijdregistratie betrokken is (niet de aanmaker) — bv. twee medewerkers samen op dezelfde werf (sectie 8)', async () => {
++      const collega: FakeEmployee = { id: 'employee-2', displayName: 'Wannes' };
++      const { prisma, workOrders } = createFakePrisma({
++        projects: [PROJECT],
++        employees: [EMPLOYEE, collega],
++        timeEntries: [stoppedEntry({ id: 'entry-1', employeeId: EMPLOYEE.id })],
++      });
++      // Rechtstreeks in de fake data-laag ingevoegd i.p.v. via service.create()
++      // (die terecht valideert dat elke meegegeven tijdregistratie van de
++      // aanmakende medewerker zelf moet zijn) — dit test enkel de leeskant:
++      // een werkbon aangemaakt door de collega, met Peters tijdregistratie
++      // erin gekoppeld.
++      workOrders.set('wo-samen', {
++        id: 'wo-samen',
++        workOrderNumber: 'WB-2026-000999',
++        projectId: PROJECT.id,
++        status: 'DRAFT',
++        description: 'Samen uitgevoerd',
++        createdByEmployeeId: collega.id,
++        createdAt: new Date('2026-08-20T09:00:00Z'),
++        updatedAt: new Date('2026-08-20T09:00:00Z'),
++        timeEntryIds: ['entry-1'],
++      });
++      const service = new WorkOrderService(prisma);
++
++      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
++
++      expect(drafts).toHaveLength(1);
++      expect(drafts[0]?.id).toBe('wo-samen');
++    });
++
++    it('berekent totalSeconds correct op basis van de onderliggende tijdregistraties', async () => {
++      const { prisma } = createFakePrisma({
++        projects: [PROJECT],
++        employees: [EMPLOYEE],
++        timeEntries: [
++          stoppedEntry({
++            id: 'entry-1',
++            startedAt: new Date('2026-08-20T08:00:00Z'),
++            endedAt: new Date('2026-08-20T10:00:00Z'),
++            pausedSeconds: 600,
++          }),
++        ],
++      });
++      const service = new WorkOrderService(prisma);
++      await service.create(EMPLOYEE.id, PROJECT.id, ['entry-1'], 'Test');
++
++      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
++
++      expect(drafts[0]?.totalSeconds).toBe(2 * 3600 - 600); // 2u min 10min pauze
++    });
++
++    it('geeft een lege lijst terug zonder openstaande werkbonnen', async () => {
++      const { prisma } = createFakePrisma({ projects: [PROJECT], employees: [EMPLOYEE] });
++      const service = new WorkOrderService(prisma);
++
++      const drafts = await service.listDraftsForEmployeeOnProject(EMPLOYEE.id, PROJECT.id);
++
++      expect(drafts).toEqual([]);
++    });
++  });
+ });
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index ae46085..d910c30 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -21,6 +21,7 @@ import type {
+   ListProjectsResponseBody,
+   ListTeamleaderUsersResponseBody,
+   ListUsersResponseBody,
++  ListWorkOrderDraftsResponseBody,
+   ListWorkOrderSyncIssuesResponseBody,
+   LinkTeamleaderUserBody,
+   LoginResponseBody,
+@@ -304,6 +305,15 @@ export const timeEntriesApi = {
+ export const workOrdersApi = {
+   create: (body: CreateWorkOrderBody) =>
+     request<WorkOrderResponseBody>('/work-orders', { method: 'POST', body: JSON.stringify(body) }),
++  /**
++   * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
++   * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — zie
++   * ProjectTimerPage.tsx voor waar dit getoond wordt.
++   */
++  listDrafts: (projectId: string) =>
++    request<ListWorkOrderDraftsResponseBody>(`/work-orders/drafts?projectId=${encodeURIComponent(projectId)}`, {
++      method: 'GET',
++    }),
+   get: (workOrderId: string) => request<WorkOrderResponseBody>(`/work-orders/${workOrderId}`, { method: 'GET' }),
+   /** Phase 7 — verplichte klanthandtekening (sectie 10). Zet de werkbon DRAFT → SIGNED. */
+   sign: (workOrderId: string, body: SignWorkOrderBody) =>
+diff --git a/apps/web/src/pages/ProjectTimerPage.tsx b/apps/web/src/pages/ProjectTimerPage.tsx
+index c28508f..cf2e5a5 100644
+--- a/apps/web/src/pages/ProjectTimerPage.tsx
++++ b/apps/web/src/pages/ProjectTimerPage.tsx
+@@ -1,4 +1,4 @@
+-import type { ProjectSummary, TimeEntrySummary } from '@swatt/shared-types';
++import type { ProjectSummary, TimeEntrySummary, WorkOrderDraftSummary } from '@swatt/shared-types';
+ import { useEffect, useMemo, useState } from 'react';
+ import { Link, useLocation, useParams } from 'react-router-dom';
+ import { projectsApi, timeEntriesApi, workOrdersApi } from '../api/client';
+@@ -49,6 +49,12 @@ export function ProjectTimerPage() {
+   const [isCreatingWorkOrder, setIsCreatingWorkOrder] = useState(false);
+   const [nowMs, setNowMs] = useState(() => Date.now());
+ 
++  // Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
++  // werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — bv. op
++  // het einde van de week naar de verantwoordelijke stappen om ze te laten
++  // tekenen. Enkel de eigen (mee-uitgevoerde) DRAFT-werkbonnen van dit project.
++  const [draftWorkOrders, setDraftWorkOrders] = useState<WorkOrderDraftSummary[] | null>(null);
++
+   // Sectie 6 — "manueel tijd toevoegen indien toegestaan": alternatief voor
+   // START/PAUZE/STOP wanneer een werknemer een vaste periode achteraf wil
+   // ingeven (bv. de timer vergeten te starten).
+@@ -94,6 +100,25 @@ export function ProjectTimerPage() {
+     // eslint-disable-next-line react-hooks/exhaustive-deps -- stateProject is een stabiele snapshot uit de navigatie, geen reactieve dependency
+   }, [projectId]);
+ 
++  // Op vraag (3/9/2026) — zie de toelichting bij draftWorkOrders hierboven.
++  // Ook opnieuw ophalen na het aanmaken van een werkbon (stoppedSummary
++  // wijzigt dan), zodat de nieuwe werkbon meteen in de lijst verschijnt.
++  useEffect(() => {
++    if (!projectId) return;
++    let cancelled = false;
++    workOrdersApi
++      .listDrafts(projectId)
++      .then((response) => {
++        if (!cancelled) setDraftWorkOrders(response.workOrders);
++      })
++      .catch(() => {
++        if (!cancelled) setDraftWorkOrders(null);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [projectId, stoppedSummary]);
++
+   // Tikt elke seconde door zodat een lopende timer live meetelt.
+   useEffect(() => {
+     if (activeEntry?.status !== 'RUNNING') return;
+@@ -563,6 +588,36 @@ export function ProjectTimerPage() {
+           )}
+         </>
+       )}
++
++      {!isLoading && project && draftWorkOrders && draftWorkOrders.length > 0 && (
++        <section className="mt-8 border-t border-neutral-800 pt-6">
++          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-400">
++            Nog niet getekende werkbonnen
++          </h2>
++          <p className="mb-3 text-xs text-neutral-500">
++            Bv. op het einde van de week: ga hiernaartoe om ze door de klant te laten tekenen — zonder een nieuwe aan
++            te maken.
++          </p>
++          <ul className="space-y-2">
++            {draftWorkOrders.map((draft) => (
++              <li key={draft.id}>
++                <Link
++                  to={`/werkbonnen/${draft.id}`}
++                  className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-3 active:bg-neutral-800"
++                >
++                  <span>
++                    <span className="block text-sm font-semibold">{draft.workOrderNumber}</span>
++                    <span className="block text-xs text-neutral-400">
++                      {formatDraftDate(draft.createdAt)} · {formatDraftDuration(draft.totalSeconds)}
++                    </span>
++                  </span>
++                  <span className="text-swatt-gold">›</span>
++                </Link>
++              </li>
++            ))}
++          </ul>
++        </section>
++      )}
+     </main>
+   );
+ }
+@@ -574,6 +629,16 @@ export function ProjectTimerPage() {
+  * backend-kant, maar dan lokaal en "live" (met het huidige moment i.p.v. het
+  * moment van een server-call).
+  */
++function formatDraftDate(iso: string): string {
++  return new Date(iso).toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
++}
++
++function formatDraftDuration(totalSeconds: number): string {
++  const hours = Math.floor(totalSeconds / 3600);
++  const minutes = Math.floor((totalSeconds % 3600) / 60);
++  return `${hours}u ${String(minutes).padStart(2, '0')}min`;
++}
++
+ function computeElapsedSeconds(entry: TimeEntrySummary, nowMs: number): number {
+   const startedMs = new Date(entry.startedAt).getTime();
+ 
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 313f20e..7e519d6 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -717,6 +717,24 @@ export interface ListWorkOrderSyncIssuesResponseBody {
+   workOrders: WorkOrderSyncIssueSummary[];
+ }
+ 
++/**
++ * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
++ * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — lichtgewicht
++ * lijst-item, zie WorkOrderService.listDraftsForEmployeeOnProject().
++ */
++export interface WorkOrderDraftSummary {
++  id: string;
++  workOrderNumber: string;
++  description: string | null;
++  createdAt: string;
++  totalSeconds: number;
++}
++
++/** Response van GET /work-orders/drafts?projectId=... */
++export interface ListWorkOrderDraftsResponseBody {
++  workOrders: WorkOrderDraftSummary[];
++}
++
+ /**
+  * Response van POST /work-orders/:id/sync/retry — handmatige herstelactie
+  * (sectie 13: "Administrator moet handmatig: Opnieuw synchroniseren kunnen
+-- 
+2.43.0
+
