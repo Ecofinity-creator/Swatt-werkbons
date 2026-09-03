@@ -9,6 +9,7 @@ const employees: HoursExportEmployeeDetail[] = [
     displayName: 'Peter Janssens',
     entries: [
       {
+        timeEntryId: 'te-wo-1',
         workOrderId: 'wo-1',
         workOrderNumber: 'WB-2026-000123',
         projectName: 'Onderhoud HVAC',
@@ -22,6 +23,22 @@ const employees: HoursExportEmployeeDetail[] = [
         description: null,
         normalHours: 8,
         overtimeHours: 1.5,
+      },
+      {
+        timeEntryId: 'te-wo-2',
+        workOrderId: 'wo-2',
+        workOrderNumber: 'WB-2026-000124',
+        projectName: 'Interventie',
+        projectNumber: null,
+        customerName: 'De Smet NV',
+        signedAt: new Date('2026-08-12T14:00:00Z'),
+        startedAt: new Date('2026-08-12T08:00:00Z'),
+        endedAt: new Date('2026-08-12T10:00:00Z'),
+        pausedSeconds: 0,
+        isManual: false,
+        description: null,
+        normalHours: 2,
+        overtimeHours: 0,
       },
     ],
   },
@@ -44,7 +61,7 @@ describe('buildEmployeeHoursWorkbook()', () => {
       .filter((v) => v !== undefined && v !== null);
     expect(overviewValues).toContain('Normaal (u)');
     expect(overviewValues).toContain('Overuren (u)');
-    expect(overviewValues).toContain(8);
+    expect(overviewValues).toContain(10); // 8 + 2 uur normaal, over beide projecten heen
     expect(overviewValues).toContain(1.5);
 
     const employeeSheet = workbook.getWorksheet('Peter Janssens');
@@ -57,5 +74,27 @@ describe('buildEmployeeHoursWorkbook()', () => {
     expect(employeeValues).toContain(8);
     expect(employeeValues).toContain(1.5);
     expect(employeeValues).toContain('Totaal');
+  });
+
+  it('groepeert het detailblad per project met een subtotaal per project — "in dezelfde zin als de tabel onderaannemers" (3/9/2026)', async () => {
+    const buffer = await buildEmployeeHoursWorkbook('2026-08', employees);
+    const workbook = new ExcelJS.Workbook();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await workbook.xlsx.load(buffer as any);
+
+    const sheet = workbook.getWorksheet('Peter Janssens')!;
+    const values = sheet
+      .getSheetValues()
+      .flatMap((row) => (Array.isArray(row) ? row : []))
+      .filter((v) => v !== undefined && v !== null);
+
+    // Beide projecten met hun klant als groepskop, exact zoals bij onderaannemers.
+    expect(values).toContain('Onderhoud HVAC — Janssens BV');
+    expect(values).toContain('Interventie — De Smet NV');
+    expect(values).toContain('WB-2026-000124');
+    // Subtotaal per project (8/1,5 voor project 1, 2/0 voor project 2) + eindtotaal (10/1,5).
+    expect(values).toContain('Subtotaal');
+    expect(values.filter((v) => v === 'Totaal')).toHaveLength(1); // enkel het eindtotaal, niet per project
+    expect(values).toContain(10); // eindtotaal normale uren (8+2)
   });
 });

@@ -702,6 +702,21 @@ model TimeEntry {
   /// dezelfde werkbon-/Teamleader-sync-flow als een gestopte timer.
   isManual Boolean @default(false) @map("is_manual")
 
+  /// Werknemer vs. Onderaannemer — uren-export (op vraag, 3/9/2026): "eens de
+  /// export is gebeurd zou ervoor gezorgd moeten worden dat die werkbonnen als
+  /// geëxporteerd gemarkeerd staan en niet meer meegeteld worden in een
+  /// volgende export, om dubbele facturatie tegen te gaan". Analoog aan hoe
+  /// InvoiceBatch/PayrollBatch een tijdregistratie "opgebruikt" markeren
+  /// (business rule 5/12), maar hier bewust een simpele timestamp i.p.v. een
+  /// volwaardig batch-model — de uren-export zelf genereert geen document dat
+  /// nadien nog geraadpleegd moet worden zoals een factuur/uitbetaling dat
+  /// wel doet. `null` = nog niet geëxporteerd. Gezet via een expliciete
+  /// "Markeer als geëxporteerd"-actie (HoursExportService.markExported()),
+  /// nooit automatisch bij het enkel downloaden van het document zelf (een
+  /// GET-download mag geen blijvend neveneffect hebben — bv. een browser die
+  /// per ongeluk tweemaal ophaalt).
+  hoursExportedAt DateTime? @map("hours_exported_at") @db.Timestamptz
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 

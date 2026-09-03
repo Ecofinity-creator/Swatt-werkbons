@@ -1,10 +1,10 @@
-import type { HoursExportOverviewResponseBody } from '@swatt/shared-types';
+import type { HoursExportOverviewResponseBody, MarkHoursExportedResponseBody } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
 import { requireRole } from '../rbac/rbac.middleware';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
 import { buildEmployeeHoursWorkbook } from './employee-hours-workbook';
-import { hoursExportEmployeeParamsSchema, hoursExportPeriodQuerySchema } from './hours-export.schemas';
+import { hoursExportEmployeeParamsSchema, hoursExportPeriodQuerySchema, markHoursExportedBodySchema } from './hours-export.schemas';
 import { HoursExportService } from './hours-export.service';
 import { buildSubcontractorHoursWorkbook } from './subcontractor-hours-workbook';
 import { renderSubcontractorStatementPdf } from './subcontractor-statement-document';
@@ -28,6 +28,23 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
       const query = hoursExportPeriodQuerySchema.parse(request.query);
       const employees = await service.listOverview(query.period);
       return { periodLabel: query.period, employees };
+    },
+  );
+
+  /**
+   * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
+   * worden dat die werkbonnen als geëxporteerd gemarkeerd staan... om dubbele
+   * facturatie tegen te gaan" — zie HoursExportService.markExported(). Werkt
+   * voor zowel EMPLOYEE als SUBCONTRACTOR (de service maakt geen onderscheid,
+   * enkel het downloadformaat verschilt tussen beide).
+   */
+  app.post(
+    '/admin/hours-export/mark-exported',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<MarkHoursExportedResponseBody> => {
+      const body = markHoursExportedBodySchema.parse(request.body);
+      const markedCount = await service.markExported(body.employeeId, body.period);
+      return { markedCount };
     },
   );
 

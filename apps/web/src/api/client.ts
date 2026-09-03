@@ -11,6 +11,8 @@ import type {
   CreateUserBody,
   CreateUserResponseBody,
   HoursExportOverviewResponseBody,
+  MarkHoursExportedBody,
+  MarkHoursExportedResponseBody,
   ListPayableSummaryResponseBody,
   ListPayrollBatchesResponseBody,
   CreatePayrollBatchBody,
@@ -403,6 +405,17 @@ export const hoursExportApi = {
   overview: (periodLabel: string) =>
     request<HoursExportOverviewResponseBody>(`/admin/hours-export/overview?period=${encodeURIComponent(periodLabel)}`, {
       method: 'GET',
+    }),
+  /**
+   * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
+   * worden dat die werkbonnen als geëxporteerd gemarkeerd staan... om
+   * dubbele facturatie tegen te gaan". Bewust een aparte, expliciete actie
+   * i.p.v. automatisch bij het downloaden zelf — zie HoursExportPage.tsx.
+   */
+  markExported: (body: MarkHoursExportedBody) =>
+    request<MarkHoursExportedResponseBody>('/admin/hours-export/mark-exported', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 };
 

@@ -20,7 +20,8 @@ const detail: HoursExportSubcontractorDetail = {
       totalOvertimeHours: 1,
       entries: [
         {
-          workOrderId: 'wo-1',
+          timeEntryId: 'te-wo-1',
+        workOrderId: 'wo-1',
           workOrderNumber: 'WB-2026-000123',
           projectName: 'Onderhoud HVAC',
           projectNumber: 'PRO-1',
@@ -45,7 +46,8 @@ const detail: HoursExportSubcontractorDetail = {
       totalOvertimeHours: 0,
       entries: [
         {
-          workOrderId: 'wo-2',
+          timeEntryId: 'te-wo-2',
+        workOrderId: 'wo-2',
           workOrderNumber: 'WB-2026-000124',
           projectName: 'Interventie',
           projectNumber: null,

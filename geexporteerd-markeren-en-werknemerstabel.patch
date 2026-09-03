@@ -1,0 +1,797 @@
+From efc02065842ebbd4896be8c7129faf2a209477ba Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Thu, 3 Sep 2026 13:18:29 +0000
+Subject: [PATCH] =?UTF-8?q?Als=20ge=C3=ABxporteerd=20markeren=20(dubbele?=
+ =?UTF-8?q?=20facturatie=20voorkomen)=20+=20werknemerstabel=20gelijkgetrok?=
+ =?UTF-8?q?ken=20met=20onderaannemerstabel?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
+worden dat die werkbonnen als geëxporteerd gemarkeerd staan en niet meer
+meegeteld worden in een volgende export, om dubbele facturatie tegen te
+gaan. Dezelfde tabel zou ook voor de werknemers downloadbaar moeten zijn."
+
+Als geëxporteerd markeren
+- Nieuw veld TimeEntry.hoursExportedAt (migratie 20260903120000).
+- HoursExportService: alle drie de exports (overzicht, onderaannemer-detail,
+  werknemerslijst) sluiten al-geëxporteerde tijdregistraties nu standaard
+  uit — niet pas achteraf gefilterd, al op databankniveau.
+- Nieuwe HoursExportService.markExported(employeeId, period): herberekent
+  zelf welke tijdregistraties "in deze export zaten" i.p.v. een lijst IDs
+  van de cliënt te vertrouwen (voorkomt dat een verouderd verzoek toevallig
+  andere registraties zou markeren).
+- Nieuwe route POST /admin/hours-export/mark-exported.
+- Bewust een APARTE, expliciete actie — niet automatisch bij het downloaden
+  zelf: een GET-download mag geen blijvend neveneffect hebben (bv. een
+  browser die per ongeluk tweemaal ophaalt zou anders alles stilzwijgend
+  markeren).
+- Frontend (HoursExportPage.tsx): "Markeer als geëxporteerd"-knop per
+  medewerker/onderaannemer, met een bevestigingsdialoog (moeilijk terug te
+  draaien actie) die expliciet vermeldt dat het document al gedownload en
+  gecontroleerd moet zijn.
+- 4 nieuwe tests (markeren telt correct, verdwijnt uit een volgende export
+  van dezelfde periode, 0 zonder te falen, nette fout bij onbestaande
+  medewerker).
+
+Werknemerstabel gelijkgetrokken met onderaannemerstabel
+- employee-hours-workbook.ts: het detailblad per medewerker is nu
+  gegroepeerd per project/werf (subtotaal per project + eindtotaal), exact
+  dezelfde opbouw als subcontractor-hours-workbook.ts, i.p.v. één platte
+  lijst. Het "Overzicht"-blad (alle medewerkers samen) blijft ongewijzigd.
+- Test uitgebreid met een tweede project + een nieuwe test die de
+  groepering/subtotalen specifiek controleert.
+
+Verificatie: 22 migraties op verse Postgres 16, backend-testsuite 198
+slagen (dezelfde 16 pre-existente mislukkingen als voordien,
+sandbox-beperkingen, geen regressies), typecheck/lint backend+frontend
+schoon, frontend-productiebuild slaagt.
+---
+ .../migration.sql                             |   5 +
+ apps/api/prisma/schema.prisma                 |  15 ++
+ .../hours-export/employee-hours-workbook.ts   | 159 +++++++++++++-----
+ .../hours-export/hours-export.routes.ts       |  21 ++-
+ .../hours-export/hours-export.schemas.ts      |   6 +
+ .../hours-export/hours-export.service.ts      |  39 ++++-
+ apps/api/test/employee-hours-workbook.test.ts |  41 ++++-
+ apps/api/test/hours-export.service.test.ts    |  81 ++++++++-
+ .../test/subcontractor-hours-workbook.test.ts |   6 +-
+ apps/web/src/api/client.ts                    |  13 ++
+ apps/web/src/pages/admin/HoursExportPage.tsx  |  48 +++++-
+ packages/shared-types/src/index.ts            |  17 ++
+ 12 files changed, 395 insertions(+), 56 deletions(-)
+ create mode 100644 apps/api/prisma/migrations/20260903120000_hours_exported_at/migration.sql
+
+diff --git a/apps/api/prisma/migrations/20260903120000_hours_exported_at/migration.sql b/apps/api/prisma/migrations/20260903120000_hours_exported_at/migration.sql
+new file mode 100644
+index 0000000..a5b96d6
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260903120000_hours_exported_at/migration.sql
+@@ -0,0 +1,5 @@
++-- Werknemer vs. Onderaannemer — uren-export (sectie 3/9/2026): "als
++-- geëxporteerd markeren zodat een tijdregistratie niet dubbel meetelt in een
++-- volgende export". Nullable, geen default nodig — alle bestaande
++-- tijdregistraties starten terecht als "nog niet geëxporteerd".
++ALTER TABLE "time_entry" ADD COLUMN "hours_exported_at" TIMESTAMPTZ;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 2d3b371..0ad3875 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -702,6 +702,21 @@ model TimeEntry {
+   /// dezelfde werkbon-/Teamleader-sync-flow als een gestopte timer.
+   isManual Boolean @default(false) @map("is_manual")
+ 
++  /// Werknemer vs. Onderaannemer — uren-export (op vraag, 3/9/2026): "eens de
++  /// export is gebeurd zou ervoor gezorgd moeten worden dat die werkbonnen als
++  /// geëxporteerd gemarkeerd staan en niet meer meegeteld worden in een
++  /// volgende export, om dubbele facturatie tegen te gaan". Analoog aan hoe
++  /// InvoiceBatch/PayrollBatch een tijdregistratie "opgebruikt" markeren
++  /// (business rule 5/12), maar hier bewust een simpele timestamp i.p.v. een
++  /// volwaardig batch-model — de uren-export zelf genereert geen document dat
++  /// nadien nog geraadpleegd moet worden zoals een factuur/uitbetaling dat
++  /// wel doet. `null` = nog niet geëxporteerd. Gezet via een expliciete
++  /// "Markeer als geëxporteerd"-actie (HoursExportService.markExported()),
++  /// nooit automatisch bij het enkel downloaden van het document zelf (een
++  /// GET-download mag geen blijvend neveneffect hebben — bv. een browser die
++  /// per ongeluk tweemaal ophaalt).
++  hoursExportedAt DateTime? @map("hours_exported_at") @db.Timestamptz
++
+   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+ 
+diff --git a/apps/api/src/modules/hours-export/employee-hours-workbook.ts b/apps/api/src/modules/hours-export/employee-hours-workbook.ts
+index 52291e0..96ca242 100644
+--- a/apps/api/src/modules/hours-export/employee-hours-workbook.ts
++++ b/apps/api/src/modules/hours-export/employee-hours-workbook.ts
+@@ -1,25 +1,25 @@
+ import ExcelJS from 'exceljs';
+-import type { HoursExportEmployeeDetail } from './hours-export.service';
++import type { HoursExportEmployeeDetail, HoursExportEntryRecord } from './hours-export.service';
+ 
+ /**
+  * Werknemer vs. Onderaannemer — Excel-urenexport voor eigen medewerkers
+  * (EmploymentType.EMPLOYEE), sectie "Nieuw: Werknemer vs. Onderaannemer" in
+  * claude/projectoverdracht-samenvatting_2.md: "uren-export naar Excel".
+- * Bewust een ruwe urenlijst (één rij per tijdregistratie) — dit is het
+- * tegenovergestelde van de totalisatie-met-detail-PDF voor onderaannemers
+- * (zie subcontractor-statement-document.ts), bedoeld als brondata voor de
+- * eigen loonverwerking i.p.v. een document dat naar een derde gestuurd wordt.
+  *
+- * Eén werkblad per medewerker (naast een "Overzicht"-blad met de totalen) —
+- * zo kan de admin het bestand rechtstreeks doorsturen of per medewerker
+- * kopiëren zonder eerst zelf te moeten filteren/sorteren.
++ * Fase 12-herziening (3/9/2026): "pas de tabel werknemers aan in dezelfde
++ * zin als de tabel onderaannemers" — het detailblad per medewerker is nu
++ * gegroepeerd per project/werf (met subtotaal per project + eindtotaal),
++ * exact dezelfde opbouw als subcontractor-hours-workbook.ts, i.p.v. één
++ * platte lijst. Het "Overzicht"-blad (alle medewerkers samen, met
++ * kruistotalen) blijft ongewijzigd — dat heeft geen tegenhanger bij
++ * onderaannemers, die worden altijd één-voor-één gedownload.
+  */
+ export async function buildEmployeeHoursWorkbook(
+   periodLabel: string,
+   employees: HoursExportEmployeeDetail[],
+ ): Promise<Buffer> {
+   const workbook = new ExcelJS.Workbook();
+-  workbook.creator = 'Swatt Werkbon-app';
++  workbook.creator = 'Uurivo';
+   workbook.created = new Date();
+   workbook.subject = `Urenexport ${periodLabel}`;
+   workbook.title = `Urenexport ${periodLabel}`;
+@@ -46,56 +46,120 @@ export async function buildEmployeeHoursWorkbook(
+   for (const employee of employees) {
+     const sheet = workbook.addWorksheet(sheetNameFor(employee.displayName, workbook));
+     sheet.columns = [
+-      { header: 'Datum', key: 'date', width: 12 },
+-      { header: 'Werkbon', key: 'workOrderNumber', width: 16 },
+-      { header: 'Klant', key: 'customerName', width: 24 },
+-      { header: 'Project', key: 'projectName', width: 28 },
+-      { header: 'Van', key: 'startTime', width: 8 },
+-      { header: 'Tot', key: 'endTime', width: 8 },
+-      { header: 'Pauze (min)', key: 'pauseMinutes', width: 12 },
+-      { header: 'Normaal (u)', key: 'normalHours', width: 12 },
+-      { header: 'Overuren (u)', key: 'overtimeHours', width: 12 },
+-      { header: 'Manueel', key: 'isManual', width: 10 },
++      { key: 'a', width: 12 },
++      { key: 'b', width: 16 },
++      { key: 'c', width: 24 },
++      { key: 'd', width: 10 },
++      { key: 'e', width: 10 },
++      { key: 'f', width: 12 },
++      { key: 'g', width: 12 },
++      { key: 'h', width: 12 },
+     ];
+-    styleHeaderRow(sheet);
+-
+-    let totalNormalHours = 0;
+-    let totalOvertimeHours = 0;
+-    for (const entry of employee.entries) {
+-      totalNormalHours += entry.normalHours;
+-      totalOvertimeHours += entry.overtimeHours;
+-      sheet.addRow({
+-        date: formatDate(entry.startedAt),
+-        workOrderNumber: entry.workOrderNumber,
+-        customerName: entry.customerName,
+-        projectName: entry.projectName,
+-        startTime: formatTime(entry.startedAt),
+-        endTime: formatTime(entry.endedAt),
+-        pauseMinutes: Math.round(entry.pausedSeconds / 60),
+-        normalHours: Number(entry.normalHours.toFixed(2)),
+-        overtimeHours: Number(entry.overtimeHours.toFixed(2)),
+-        isManual: entry.isManual ? 'Ja' : 'Nee',
+-      });
++
++    const titleRow = sheet.addRow([`Urenoverzicht — ${employee.displayName}`]);
++    titleRow.font = { bold: true, size: 14 };
++    sheet.addRow([`Periode: ${formatPeriodLabel(periodLabel)}`]).font = { italic: true, color: { argb: 'FF666666' } };
++    sheet.addRow([]);
++
++    let employeeTotalNormalHours = 0;
++    let employeeTotalOvertimeHours = 0;
++    for (const project of groupByProject(employee.entries)) {
++      employeeTotalNormalHours += project.totalNormalHours;
++      employeeTotalOvertimeHours += project.totalOvertimeHours;
++
++      const projectHeaderRow = sheet.addRow([`${project.projectName} — ${project.customerName}`]);
++      projectHeaderRow.font = { bold: true, size: 11 };
++      sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 8);
++
++      const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Omschrijving', 'Van', 'Tot', 'Pauze (min)', 'Normaal (u)', 'Overuren (u)']);
++      styleColumnHeaderRow(columnHeaderRow);
++
++      for (const entry of project.entries) {
++        sheet.addRow([
++          formatDate(entry.startedAt),
++          entry.workOrderNumber,
++          entry.description ?? '',
++          formatTime(entry.startedAt),
++          formatTime(entry.endedAt),
++          Math.round(entry.pausedSeconds / 60),
++          Number(entry.normalHours.toFixed(2)),
++          Number(entry.overtimeHours.toFixed(2)),
++        ]);
++      }
++
++      const subtotalRow = sheet.addRow([
++        '',
++        '',
++        '',
++        '',
++        '',
++        'Subtotaal',
++        Number(project.totalNormalHours.toFixed(2)),
++        Number(project.totalOvertimeHours.toFixed(2)),
++      ]);
++      subtotalRow.font = { bold: true };
++      sheet.addRow([]);
+     }
+ 
+-    const totalRow = sheet.addRow({
+-      projectName: 'Totaal',
+-      normalHours: Number(totalNormalHours.toFixed(2)),
+-      overtimeHours: Number(totalOvertimeHours.toFixed(2)),
+-    });
+-    totalRow.font = { bold: true };
++    const totalRow = sheet.addRow(['', '', '', '', '', 'Totaal', Number(employeeTotalNormalHours.toFixed(2)), Number(employeeTotalOvertimeHours.toFixed(2))]);
++    totalRow.font = { bold: true, size: 12 };
++    totalRow.getCell(6).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
++    totalRow.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
++    totalRow.getCell(8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+   }
+ 
+   const buffer = await workbook.xlsx.writeBuffer();
+   return Buffer.from(buffer);
+ }
+ 
++interface ProjectGroup {
++  projectName: string;
++  customerName: string;
++  entries: HoursExportEntryRecord[];
++  totalNormalHours: number;
++  totalOvertimeHours: number;
++}
++
++/** Zelfde groeperingslogica als HoursExportService.getSubcontractorDetail() (bewust lokaal gehouden, zie de toelichting daar). */
++function groupByProject(entries: HoursExportEntryRecord[]): ProjectGroup[] {
++  const byProject = new Map<string, ProjectGroup>();
++  for (const entry of entries) {
++    const key = `${entry.projectName}::${entry.projectNumber ?? ''}`;
++    const existing = byProject.get(key);
++    if (existing) {
++      existing.entries.push(entry);
++      existing.totalNormalHours += entry.normalHours;
++      existing.totalOvertimeHours += entry.overtimeHours;
++    } else {
++      byProject.set(key, {
++        projectName: entry.projectName,
++        customerName: entry.customerName,
++        entries: [entry],
++        totalNormalHours: entry.normalHours,
++        totalOvertimeHours: entry.overtimeHours,
++      });
++    }
++  }
++  const groups = Array.from(byProject.values()).sort((a, b) => a.projectName.localeCompare(b.projectName));
++  for (const group of groups) {
++    group.entries.sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
++  }
++  return groups;
++}
++
+ function styleHeaderRow(sheet: ExcelJS.Worksheet): void {
+   const headerRow = sheet.getRow(1);
+   headerRow.font = { bold: true };
+   headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+ }
+ 
++function styleColumnHeaderRow(row: ExcelJS.Row): void {
++  row.font = { bold: true };
++  row.eachCell((cell) => {
++    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
++  });
++}
++
+ /** Excel-werkbladnamen zijn max. 31 tekens en mogen geen `: \ / ? * [ ]` bevatten, en moeten uniek zijn binnen de workbook. */
+ function sheetNameFor(displayName: string, workbook: ExcelJS.Workbook): string {
+   const base = displayName.replace(/[:\\/?*[\]]/g, ' ').slice(0, 28).trim() || 'Medewerker';
+@@ -115,3 +179,10 @@ function formatDate(date: Date): string {
+ function formatTime(date: Date): string {
+   return date.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
+ }
++
++function formatPeriodLabel(periodLabel: string): string {
++  const [year, month] = periodLabel.split('-');
++  if (!year || !month) return periodLabel;
++  const date = new Date(Number(year), Number(month) - 1, 1);
++  return date.toLocaleDateString('nl-BE', { month: 'long', year: 'numeric' });
++}
+diff --git a/apps/api/src/modules/hours-export/hours-export.routes.ts b/apps/api/src/modules/hours-export/hours-export.routes.ts
+index 6233ef6..4eb61cd 100644
+--- a/apps/api/src/modules/hours-export/hours-export.routes.ts
++++ b/apps/api/src/modules/hours-export/hours-export.routes.ts
+@@ -1,10 +1,10 @@
+-import type { HoursExportOverviewResponseBody } from '@swatt/shared-types';
++import type { HoursExportOverviewResponseBody, MarkHoursExportedResponseBody } from '@swatt/shared-types';
+ import type { FastifyInstance } from 'fastify';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+ import { requireRole } from '../rbac/rbac.middleware';
+ import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+ import { buildEmployeeHoursWorkbook } from './employee-hours-workbook';
+-import { hoursExportEmployeeParamsSchema, hoursExportPeriodQuerySchema } from './hours-export.schemas';
++import { hoursExportEmployeeParamsSchema, hoursExportPeriodQuerySchema, markHoursExportedBodySchema } from './hours-export.schemas';
+ import { HoursExportService } from './hours-export.service';
+ import { buildSubcontractorHoursWorkbook } from './subcontractor-hours-workbook';
+ import { renderSubcontractorStatementPdf } from './subcontractor-statement-document';
+@@ -31,6 +31,23 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
+     },
+   );
+ 
++  /**
++   * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
++   * worden dat die werkbonnen als geëxporteerd gemarkeerd staan... om dubbele
++   * facturatie tegen te gaan" — zie HoursExportService.markExported(). Werkt
++   * voor zowel EMPLOYEE als SUBCONTRACTOR (de service maakt geen onderscheid,
++   * enkel het downloadformaat verschilt tussen beide).
++   */
++  app.post(
++    '/admin/hours-export/mark-exported',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request): Promise<MarkHoursExportedResponseBody> => {
++      const body = markHoursExportedBodySchema.parse(request.body);
++      const markedCount = await service.markExported(body.employeeId, body.period);
++      return { markedCount };
++    },
++  );
++
+   // Gedeelde Excel-urenexport voor alle EMPLOYEE-type medewerkers deze periode
+   // (ruwe urenlijst, bedoeld voor eigen loonverwerking — zie
+   // employee-hours-workbook.ts). Combinée i.p.v. per medewerker: dit is één
+diff --git a/apps/api/src/modules/hours-export/hours-export.schemas.ts b/apps/api/src/modules/hours-export/hours-export.schemas.ts
+index 9818a09..aa2584c 100644
+--- a/apps/api/src/modules/hours-export/hours-export.schemas.ts
++++ b/apps/api/src/modules/hours-export/hours-export.schemas.ts
+@@ -8,3 +8,9 @@ export const hoursExportPeriodQuerySchema = z.object({
+ export const hoursExportEmployeeParamsSchema = z.object({
+   employeeId: z.string().uuid(),
+ });
++
++/** Op vraag (3/9/2026) — zie HoursExportService.markExported(). */
++export const markHoursExportedBodySchema = z.object({
++  employeeId: z.string().uuid(),
++  period: z.string().trim().min(1, 'Periode is verplicht (bv. 2026-08).'),
++});
+diff --git a/apps/api/src/modules/hours-export/hours-export.service.ts b/apps/api/src/modules/hours-export/hours-export.service.ts
+index 94c58e9..06ed937 100644
+--- a/apps/api/src/modules/hours-export/hours-export.service.ts
++++ b/apps/api/src/modules/hours-export/hours-export.service.ts
+@@ -54,6 +54,35 @@ export class HoursExportService {
+       .sort((a, b) => a.displayName.localeCompare(b.displayName));
+   }
+ 
++  /**
++   * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
++   * worden dat die werkbonnen als geëxporteerd gemarkeerd staan en niet meer
++   * meegeteld worden in een volgende export, om dubbele facturatie tegen te
++   * gaan". Bewust een expliciete, aparte actie (niet automatisch bij het
++   * downloaden zelf — zie de toelichting bij TimeEntry.hoursExportedAt in
++   * schema.prisma). Herberekent zelf welke tijdregistraties precies
++   * "in deze export zaten" (dezelfde voorwaarden als hierboven), i.p.v. een
++   * lijst IDs van de cliënt te vertrouwen — dat voorkomt dat een verouderd/
++   * gemanipuleerd verzoek toevallig andere registraties zou markeren dan wat
++   * de admin effectief net gedownload heeft.
++   */
++  async markExported(employeeId: string, periodLabel: string): Promise<number> {
++    assertValidPeriod(periodLabel);
++    const employees = await this.loadEmployeesWithSignedEntries(periodLabel, employeeId);
++    const employee = employees[0];
++    if (!employee) {
++      throw HoursExportErrors.employeeNotFound();
++    }
++    if (employee.entries.length === 0) {
++      return 0;
++    }
++    const result = await this.prisma.timeEntry.updateMany({
++      where: { id: { in: employee.entries.map((entry) => entry.id) } },
++      data: { hoursExportedAt: new Date() },
++    });
++    return result.count;
++  }
++
+   /** Totalisatie-met-detail (gegroepeerd per project/werf) voor het PDF-document van één onderaannemer. */
+   async getSubcontractorDetail(employeeId: string, periodLabel: string): Promise<HoursExportSubcontractorDetail> {
+     assertValidPeriod(periodLabel);
+@@ -172,8 +201,13 @@ export class HoursExportService {
+         displayName: true,
+         employmentType: true,
+         timeEntries: {
+-          where: { endedAt: { not: null } },
++          // Al geëxporteerd (business rule-analoog: nooit dubbel factureren)
++          // wordt hier al uitgesloten, niet pas achteraf gefilterd — zo kan
++          // een uitgeprinte export nooit stiekem een al-geëxporteerde
++          // registratie tonen die er per ongeluk toch nog bij zou hangen.
++          where: { endedAt: { not: null }, hoursExportedAt: null },
+           select: {
++            id: true,
+             startedAt: true,
+             endedAt: true,
+             pausedSeconds: true,
+@@ -225,6 +259,7 @@ export interface HoursExportEmployeeRecord {
+ }
+ 
+ export interface HoursExportEntryRecord {
++  timeEntryId: string;
+   workOrderId: string;
+   workOrderNumber: string;
+   projectName: string;
+@@ -285,6 +320,7 @@ interface WorkOrderLinkRow {
+ }
+ 
+ interface TimeEntryRow {
++  id: string;
+   startedAt: Date;
+   endedAt: Date | null;
+   pausedSeconds: number;
+@@ -316,6 +352,7 @@ interface EmployeeWithSignedEntriesRow {
+ function toEntryRecord(entry: SignedEntryRowWithSplit): HoursExportEntryRecord {
+   const workOrder = entry.workOrderLink.workOrder;
+   return {
++    timeEntryId: entry.id,
+     workOrderId: workOrder.id,
+     workOrderNumber: workOrder.workOrderNumber,
+     projectName: workOrder.project.name,
+diff --git a/apps/api/test/employee-hours-workbook.test.ts b/apps/api/test/employee-hours-workbook.test.ts
+index 772222c..040abaf 100644
+--- a/apps/api/test/employee-hours-workbook.test.ts
++++ b/apps/api/test/employee-hours-workbook.test.ts
+@@ -9,6 +9,7 @@ const employees: HoursExportEmployeeDetail[] = [
+     displayName: 'Peter Janssens',
+     entries: [
+       {
++        timeEntryId: 'te-wo-1',
+         workOrderId: 'wo-1',
+         workOrderNumber: 'WB-2026-000123',
+         projectName: 'Onderhoud HVAC',
+@@ -23,6 +24,22 @@ const employees: HoursExportEmployeeDetail[] = [
+         normalHours: 8,
+         overtimeHours: 1.5,
+       },
++      {
++        timeEntryId: 'te-wo-2',
++        workOrderId: 'wo-2',
++        workOrderNumber: 'WB-2026-000124',
++        projectName: 'Interventie',
++        projectNumber: null,
++        customerName: 'De Smet NV',
++        signedAt: new Date('2026-08-12T14:00:00Z'),
++        startedAt: new Date('2026-08-12T08:00:00Z'),
++        endedAt: new Date('2026-08-12T10:00:00Z'),
++        pausedSeconds: 0,
++        isManual: false,
++        description: null,
++        normalHours: 2,
++        overtimeHours: 0,
++      },
+     ],
+   },
+ ];
+@@ -44,7 +61,7 @@ describe('buildEmployeeHoursWorkbook()', () => {
+       .filter((v) => v !== undefined && v !== null);
+     expect(overviewValues).toContain('Normaal (u)');
+     expect(overviewValues).toContain('Overuren (u)');
+-    expect(overviewValues).toContain(8);
++    expect(overviewValues).toContain(10); // 8 + 2 uur normaal, over beide projecten heen
+     expect(overviewValues).toContain(1.5);
+ 
+     const employeeSheet = workbook.getWorksheet('Peter Janssens');
+@@ -58,4 +75,26 @@ describe('buildEmployeeHoursWorkbook()', () => {
+     expect(employeeValues).toContain(1.5);
+     expect(employeeValues).toContain('Totaal');
+   });
++
++  it('groepeert het detailblad per project met een subtotaal per project — "in dezelfde zin als de tabel onderaannemers" (3/9/2026)', async () => {
++    const buffer = await buildEmployeeHoursWorkbook('2026-08', employees);
++    const workbook = new ExcelJS.Workbook();
++    // eslint-disable-next-line @typescript-eslint/no-explicit-any
++    await workbook.xlsx.load(buffer as any);
++
++    const sheet = workbook.getWorksheet('Peter Janssens')!;
++    const values = sheet
++      .getSheetValues()
++      .flatMap((row) => (Array.isArray(row) ? row : []))
++      .filter((v) => v !== undefined && v !== null);
++
++    // Beide projecten met hun klant als groepskop, exact zoals bij onderaannemers.
++    expect(values).toContain('Onderhoud HVAC — Janssens BV');
++    expect(values).toContain('Interventie — De Smet NV');
++    expect(values).toContain('WB-2026-000124');
++    // Subtotaal per project (8/1,5 voor project 1, 2/0 voor project 2) + eindtotaal (10/1,5).
++    expect(values).toContain('Subtotaal');
++    expect(values.filter((v) => v === 'Totaal')).toHaveLength(1); // enkel het eindtotaal, niet per project
++    expect(values).toContain(10); // eindtotaal normale uren (8+2)
++  });
+ });
+diff --git a/apps/api/test/hours-export.service.test.ts b/apps/api/test/hours-export.service.test.ts
+index dd63618..4edc281 100644
+--- a/apps/api/test/hours-export.service.test.ts
++++ b/apps/api/test/hours-export.service.test.ts
+@@ -8,11 +8,14 @@ import { HoursExportService } from '../src/modules/hours-export/hours-export.ser
+  * HoursExportService gebruikt), zelfde patroon als invoice-batch.service.test.ts.
+  */
+ interface FakeTimeEntry {
++  id: string;
+   startedAt: Date;
+   endedAt: Date | null;
+   pausedSeconds: number;
+   isManual: boolean;
+   description: string | null;
++  /** Op vraag (3/9/2026) — zie TimeEntry.hoursExportedAt in schema.prisma. */
++  hoursExportedAt: Date | null;
+   workOrderLink: {
+     workOrder: {
+       id: string;
+@@ -44,9 +47,27 @@ function createFakePrisma(employees: FakeEmployee[]) {
+       findMany: async ({ where }: { where: { id?: string } }) => {
+         return employees
+           .filter((employee) => (where.id ? employee.id === where.id : true))
+-          // Bootst de `where: { endedAt: { not: null } }` uit HoursExportService.loadEmployeesWithSignedEntries()
+-          // na — in de echte query gebeurt dit filter al op databankniveau, niet in-memory.
+-          .map((employee) => ({ ...employee, timeEntries: employee.timeEntries.filter((entry) => entry.endedAt !== null) }));
++          // Bootst de `where: { endedAt: { not: null }, hoursExportedAt: null }`
++          // uit HoursExportService.loadEmployeesWithSignedEntries() na — in de
++          // echte query gebeurt dit filter al op databankniveau, niet in-memory.
++          .map((employee) => ({
++            ...employee,
++            timeEntries: employee.timeEntries.filter((entry) => entry.endedAt !== null && entry.hoursExportedAt === null),
++          }));
++      },
++    },
++    timeEntry: {
++      updateMany: async ({ where, data }: { where: { id: { in: string[] } }; data: { hoursExportedAt: Date } }) => {
++        let count = 0;
++        for (const employee of employees) {
++          for (const entry of employee.timeEntries) {
++            if (where.id.in.includes(entry.id)) {
++              entry.hoursExportedAt = data.hoursExportedAt;
++              count += 1;
++            }
++          }
++        }
++        return { count };
+       },
+     },
+   } as unknown as PrismaClient;
+@@ -65,11 +86,13 @@ function signedTimeEntry(
+   const workOrderId = overrides.workOrderId ?? 'wo-1';
+   const signedAt = overrides.signedAt === undefined ? new Date('2026-08-15T12:00:00Z') : overrides.signedAt;
+   return {
++    id: `te-${workOrderId}`,
+     startedAt: new Date('2026-08-15T08:00:00Z'),
+     endedAt: new Date('2026-08-15T16:00:00Z'),
+     pausedSeconds: 1800,
+     isManual: false,
+     description: null,
++    hoursExportedAt: null,
+     ...overrides,
+     workOrderLink: signedAt
+       ? {
+@@ -220,4 +243,56 @@ describe('HoursExportService', () => {
+       code: 'HOURS_EXPORT_EMPLOYEE_NOT_FOUND',
+     });
+   });
++
++  describe('markExported() — op vraag (3/9/2026): "niet meer meetellen in een volgende export, om dubbele facturatie tegen te gaan"', () => {
++    it('markeert exact de tijdregistraties die in de export van deze periode zaten, en telt hoeveel dat er zijn', async () => {
++      const employee: FakeEmployee = {
++        id: 'emp-1',
++        displayName: 'Peter Janssens',
++        employmentType: 'EMPLOYEE',
++        timeEntries: [signedTimeEntry({ id: 'te-1', workOrderId: 'wo-1' }), signedTimeEntry({ id: 'te-2', workOrderId: 'wo-2' })],
++      };
++      const service = new HoursExportService(createFakePrisma([employee]));
++
++      const markedCount = await service.markExported('emp-1', '2026-08');
++
++      expect(markedCount).toBe(2);
++      expect(employee.timeEntries.every((entry) => entry.hoursExportedAt !== null)).toBe(true);
++    });
++
++    it('een al-geëxporteerde tijdregistratie verdwijnt uit een volgende export van dezelfde periode', async () => {
++      const employee: FakeEmployee = {
++        id: 'emp-1',
++        displayName: 'Peter Janssens',
++        employmentType: 'EMPLOYEE',
++        timeEntries: [signedTimeEntry({ id: 'te-1', workOrderId: 'wo-1' })],
++      };
++      const service = new HoursExportService(createFakePrisma([employee]));
++
++      const before = await service.listOverview('2026-08');
++      expect(before[0]?.totalSeconds).toBeGreaterThan(0);
++
++      await service.markExported('emp-1', '2026-08');
++
++      const after = await service.listOverview('2026-08');
++      expect(after[0]?.totalSeconds).toBe(0); // geen openstaande uren meer voor deze medewerker deze periode
++      expect(after[0]?.workOrderCount).toBe(0);
++    });
++
++    it('geeft 0 terug zonder te falen wanneer er niets te markeren valt', async () => {
++      const employee: FakeEmployee = { id: 'emp-1', displayName: 'Peter Janssens', employmentType: 'EMPLOYEE', timeEntries: [] };
++      const service = new HoursExportService(createFakePrisma([employee]));
++
++      const markedCount = await service.markExported('emp-1', '2026-08');
++
++      expect(markedCount).toBe(0);
++    });
++
++    it('gooit HOURS_EXPORT_EMPLOYEE_NOT_FOUND voor een onbestaande medewerker', async () => {
++      const service = new HoursExportService(createFakePrisma([]));
++      await expect(service.markExported('does-not-exist', '2026-08')).rejects.toMatchObject({
++        code: 'HOURS_EXPORT_EMPLOYEE_NOT_FOUND',
++      });
++    });
++  });
+ });
+diff --git a/apps/api/test/subcontractor-hours-workbook.test.ts b/apps/api/test/subcontractor-hours-workbook.test.ts
+index de06e41..5e30a61 100644
+--- a/apps/api/test/subcontractor-hours-workbook.test.ts
++++ b/apps/api/test/subcontractor-hours-workbook.test.ts
+@@ -20,7 +20,8 @@ const detail: HoursExportSubcontractorDetail = {
+       totalOvertimeHours: 1,
+       entries: [
+         {
+-          workOrderId: 'wo-1',
++          timeEntryId: 'te-wo-1',
++        workOrderId: 'wo-1',
+           workOrderNumber: 'WB-2026-000123',
+           projectName: 'Onderhoud HVAC',
+           projectNumber: 'PRO-1',
+@@ -45,7 +46,8 @@ const detail: HoursExportSubcontractorDetail = {
+       totalOvertimeHours: 0,
+       entries: [
+         {
+-          workOrderId: 'wo-2',
++          timeEntryId: 'te-wo-2',
++        workOrderId: 'wo-2',
+           workOrderNumber: 'WB-2026-000124',
+           projectName: 'Interventie',
+           projectNumber: null,
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index d910c30..2389a75 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -11,6 +11,8 @@ import type {
+   CreateUserBody,
+   CreateUserResponseBody,
+   HoursExportOverviewResponseBody,
++  MarkHoursExportedBody,
++  MarkHoursExportedResponseBody,
+   ListPayableSummaryResponseBody,
+   ListPayrollBatchesResponseBody,
+   CreatePayrollBatchBody,
+@@ -404,6 +406,17 @@ export const hoursExportApi = {
+     request<HoursExportOverviewResponseBody>(`/admin/hours-export/overview?period=${encodeURIComponent(periodLabel)}`, {
+       method: 'GET',
+     }),
++  /**
++   * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
++   * worden dat die werkbonnen als geëxporteerd gemarkeerd staan... om
++   * dubbele facturatie tegen te gaan". Bewust een aparte, expliciete actie
++   * i.p.v. automatisch bij het downloaden zelf — zie HoursExportPage.tsx.
++   */
++  markExported: (body: MarkHoursExportedBody) =>
++    request<MarkHoursExportedResponseBody>('/admin/hours-export/mark-exported', {
++      method: 'POST',
++      body: JSON.stringify(body),
++    }),
+ };
+ 
+ /**
+diff --git a/apps/web/src/pages/admin/HoursExportPage.tsx b/apps/web/src/pages/admin/HoursExportPage.tsx
+index d79af0a..3ea0c12 100644
+--- a/apps/web/src/pages/admin/HoursExportPage.tsx
++++ b/apps/web/src/pages/admin/HoursExportPage.tsx
+@@ -38,6 +38,11 @@ export function HoursExportPage() {
+   const [periodLabel, setPeriodLabel] = useState(currentPeriodLabel());
+   const [employees, setEmployees] = useState<HoursExportEmployeeSummary[] | null>(null);
+   const [errorMessage, setErrorMessage] = useState<string | null>(null);
++  // Op vraag (3/9/2026): "eens de export is gebeurd... als geëxporteerd
++  // gemarkeerd... om dubbele facturatie tegen te gaan" — bewust een aparte,
++  // expliciete actie ná het downloaden, niet automatisch daarbij (zie
++  // hoursExportApi.markExported()).
++  const [markingEmployeeId, setMarkingEmployeeId] = useState<string | null>(null);
+ 
+   const load = useCallback(async (period: string) => {
+     setErrorMessage(null);
+@@ -54,6 +59,25 @@ export function HoursExportPage() {
+     void load(periodLabel);
+   }, [periodLabel, load]);
+ 
++  async function handleMarkExported(employee: HoursExportEmployeeSummary) {
++    // eslint-disable-next-line no-alert
++    const confirmed = window.confirm(
++      `De ${employee.workOrderCount} werkbon(nen) van ${employee.displayName} voor ${formatPeriodLabel(periodLabel)} markeren als geëxporteerd?\n\nDeze uren verdwijnen dan uit elke volgende export van deze medewerker (om dubbele facturatie te vermijden). Zorg dat je het document al gedownload en gecontroleerd hebt.`,
++    );
++    if (!confirmed) return;
++
++    setMarkingEmployeeId(employee.employeeId);
++    setErrorMessage(null);
++    try {
++      await hoursExportApi.markExported({ employeeId: employee.employeeId, period: periodLabel });
++      await load(periodLabel);
++    } catch (err) {
++      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Markeren als geëxporteerd is mislukt.');
++    } finally {
++      setMarkingEmployeeId(null);
++    }
++  }
++
+   const werknemers = employees?.filter((e) => e.employmentType === 'EMPLOYEE') ?? [];
+   const onderaannemers = employees?.filter((e) => e.employmentType === 'SUBCONTRACTOR') ?? [];
+ 
+@@ -115,9 +139,19 @@ export function HoursExportPage() {
+             {werknemers.map((employee) => (
+               <li key={employee.employeeId} className="flex items-center justify-between py-2 text-sm">
+                 <span className="font-medium">{employee.displayName}</span>
+-                <span className="text-neutral-500">
+-                  {formatHm(employee.totalSeconds)} u · {employee.workOrderCount} werkbon(nen)
+-                </span>
++                <div className="flex items-center gap-3">
++                  <span className="text-neutral-500">
++                    {formatHm(employee.totalSeconds)} u · {employee.workOrderCount} werkbon(nen)
++                  </span>
++                  <button
++                    type="button"
++                    disabled={employee.totalSeconds === 0 || markingEmployeeId === employee.employeeId}
++                    onClick={() => void handleMarkExported(employee)}
++                    className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-semibold text-neutral-600 disabled:opacity-40"
++                  >
++                    {markingEmployeeId === employee.employeeId ? 'Bezig...' : 'Markeer als geëxporteerd'}
++                  </button>
++                </div>
+               </li>
+             ))}
+           </ul>
+@@ -156,6 +190,14 @@ export function HoursExportPage() {
+                   >
+                     Download PDF
+                   </a>
++                  <button
++                    type="button"
++                    disabled={employee.totalSeconds === 0 || markingEmployeeId === employee.employeeId}
++                    onClick={() => void handleMarkExported(employee)}
++                    className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-semibold text-neutral-600 disabled:opacity-40"
++                  >
++                    {markingEmployeeId === employee.employeeId ? 'Bezig...' : 'Markeer als geëxporteerd'}
++                  </button>
+                 </div>
+               </li>
+             ))}
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 7e519d6..e6d459b 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -985,3 +985,20 @@ export interface HoursExportOverviewResponseBody {
+   periodLabel: string;
+   employees: HoursExportEmployeeSummary[];
+ }
++
++/**
++ * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
++ * worden dat die werkbonnen als geëxporteerd gemarkeerd staan... om dubbele
++ * facturatie tegen te gaan." Body/response van
++ * POST /admin/hours-export/mark-exported.
++ */
++export interface MarkHoursExportedBody {
++  employeeId: string;
++  /** bv. "2026-08". */
++  period: string;
++}
++
++export interface MarkHoursExportedResponseBody {
++  /** Aantal tijdregistraties dat effectief als geëxporteerd gemarkeerd werd. */
++  markedCount: number;
++}
+-- 
+2.43.0
+

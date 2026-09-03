@@ -8,11 +8,14 @@ import { HoursExportService } from '../src/modules/hours-export/hours-export.ser
  * HoursExportService gebruikt), zelfde patroon als invoice-batch.service.test.ts.
  */
 interface FakeTimeEntry {
+  id: string;
   startedAt: Date;
   endedAt: Date | null;
   pausedSeconds: number;
   isManual: boolean;
   description: string | null;
+  /** Op vraag (3/9/2026) — zie TimeEntry.hoursExportedAt in schema.prisma. */
+  hoursExportedAt: Date | null;
   workOrderLink: {
     workOrder: {
       id: string;
@@ -44,9 +47,27 @@ function createFakePrisma(employees: FakeEmployee[]) {
       findMany: async ({ where }: { where: { id?: string } }) => {
         return employees
           .filter((employee) => (where.id ? employee.id === where.id : true))
-          // Bootst de `where: { endedAt: { not: null } }` uit HoursExportService.loadEmployeesWithSignedEntries()
-          // na — in de echte query gebeurt dit filter al op databankniveau, niet in-memory.
-          .map((employee) => ({ ...employee, timeEntries: employee.timeEntries.filter((entry) => entry.endedAt !== null) }));
+          // Bootst de `where: { endedAt: { not: null }, hoursExportedAt: null }`
+          // uit HoursExportService.loadEmployeesWithSignedEntries() na — in de
+          // echte query gebeurt dit filter al op databankniveau, niet in-memory.
+          .map((employee) => ({
+            ...employee,
+            timeEntries: employee.timeEntries.filter((entry) => entry.endedAt !== null && entry.hoursExportedAt === null),
+          }));
+      },
+    },
+    timeEntry: {
+      updateMany: async ({ where, data }: { where: { id: { in: string[] } }; data: { hoursExportedAt: Date } }) => {
+        let count = 0;
+        for (const employee of employees) {
+          for (const entry of employee.timeEntries) {
+            if (where.id.in.includes(entry.id)) {
+              entry.hoursExportedAt = data.hoursExportedAt;
+              count += 1;
+            }
+          }
+        }
+        return { count };
       },
     },
   } as unknown as PrismaClient;
@@ -65,11 +86,13 @@ function signedTimeEntry(
   const workOrderId = overrides.workOrderId ?? 'wo-1';
   const signedAt = overrides.signedAt === undefined ? new Date('2026-08-15T12:00:00Z') : overrides.signedAt;
   return {
+    id: `te-${workOrderId}`,
     startedAt: new Date('2026-08-15T08:00:00Z'),
     endedAt: new Date('2026-08-15T16:00:00Z'),
     pausedSeconds: 1800,
     isManual: false,
     description: null,
+    hoursExportedAt: null,
     ...overrides,
     workOrderLink: signedAt
       ? {
@@ -218,6 +241,58 @@ describe('HoursExportService', () => {
     const service = new HoursExportService(createFakePrisma([]));
     await expect(service.getSubcontractorDetail('does-not-exist', '2026-08')).rejects.toMatchObject({
       code: 'HOURS_EXPORT_EMPLOYEE_NOT_FOUND',
+    });
+  });
+
+  describe('markExported() — op vraag (3/9/2026): "niet meer meetellen in een volgende export, om dubbele facturatie tegen te gaan"', () => {
+    it('markeert exact de tijdregistraties die in de export van deze periode zaten, en telt hoeveel dat er zijn', async () => {
+      const employee: FakeEmployee = {
+        id: 'emp-1',
+        displayName: 'Peter Janssens',
+        employmentType: 'EMPLOYEE',
+        timeEntries: [signedTimeEntry({ id: 'te-1', workOrderId: 'wo-1' }), signedTimeEntry({ id: 'te-2', workOrderId: 'wo-2' })],
+      };
+      const service = new HoursExportService(createFakePrisma([employee]));
+
+      const markedCount = await service.markExported('emp-1', '2026-08');
+
+      expect(markedCount).toBe(2);
+      expect(employee.timeEntries.every((entry) => entry.hoursExportedAt !== null)).toBe(true);
+    });
+
+    it('een al-geëxporteerde tijdregistratie verdwijnt uit een volgende export van dezelfde periode', async () => {
+      const employee: FakeEmployee = {
+        id: 'emp-1',
+        displayName: 'Peter Janssens',
+        employmentType: 'EMPLOYEE',
+        timeEntries: [signedTimeEntry({ id: 'te-1', workOrderId: 'wo-1' })],
+      };
+      const service = new HoursExportService(createFakePrisma([employee]));
+
+      const before = await service.listOverview('2026-08');
+      expect(before[0]?.totalSeconds).toBeGreaterThan(0);
+
+      await service.markExported('emp-1', '2026-08');
+
+      const after = await service.listOverview('2026-08');
+      expect(after[0]?.totalSeconds).toBe(0); // geen openstaande uren meer voor deze medewerker deze periode
+      expect(after[0]?.workOrderCount).toBe(0);
+    });
+
+    it('geeft 0 terug zonder te falen wanneer er niets te markeren valt', async () => {
+      const employee: FakeEmployee = { id: 'emp-1', displayName: 'Peter Janssens', employmentType: 'EMPLOYEE', timeEntries: [] };
+      const service = new HoursExportService(createFakePrisma([employee]));
+
+      const markedCount = await service.markExported('emp-1', '2026-08');
+
+      expect(markedCount).toBe(0);
+    });
+
+    it('gooit HOURS_EXPORT_EMPLOYEE_NOT_FOUND voor een onbestaande medewerker', async () => {
+      const service = new HoursExportService(createFakePrisma([]));
+      await expect(service.markExported('does-not-exist', '2026-08')).rejects.toMatchObject({
+        code: 'HOURS_EXPORT_EMPLOYEE_NOT_FOUND',
+      });
     });
   });
 });

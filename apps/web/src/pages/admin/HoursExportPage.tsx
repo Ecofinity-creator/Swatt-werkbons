@@ -38,6 +38,11 @@ export function HoursExportPage() {
   const [periodLabel, setPeriodLabel] = useState(currentPeriodLabel());
   const [employees, setEmployees] = useState<HoursExportEmployeeSummary[] | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Op vraag (3/9/2026): "eens de export is gebeurd... als geëxporteerd
+  // gemarkeerd... om dubbele facturatie tegen te gaan" — bewust een aparte,
+  // expliciete actie ná het downloaden, niet automatisch daarbij (zie
+  // hoursExportApi.markExported()).
+  const [markingEmployeeId, setMarkingEmployeeId] = useState<string | null>(null);
 
   const load = useCallback(async (period: string) => {
     setErrorMessage(null);
@@ -53,6 +58,25 @@ export function HoursExportPage() {
   useEffect(() => {
     void load(periodLabel);
   }, [periodLabel, load]);
+
+  async function handleMarkExported(employee: HoursExportEmployeeSummary) {
+    // eslint-disable-next-line no-alert
+    const confirmed = window.confirm(
+      `De ${employee.workOrderCount} werkbon(nen) van ${employee.displayName} voor ${formatPeriodLabel(periodLabel)} markeren als geëxporteerd?\n\nDeze uren verdwijnen dan uit elke volgende export van deze medewerker (om dubbele facturatie te vermijden). Zorg dat je het document al gedownload en gecontroleerd hebt.`,
+    );
+    if (!confirmed) return;
+
+    setMarkingEmployeeId(employee.employeeId);
+    setErrorMessage(null);
+    try {
+      await hoursExportApi.markExported({ employeeId: employee.employeeId, period: periodLabel });
+      await load(periodLabel);
+    } catch (err) {
+      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Markeren als geëxporteerd is mislukt.');
+    } finally {
+      setMarkingEmployeeId(null);
+    }
+  }
 
   const werknemers = employees?.filter((e) => e.employmentType === 'EMPLOYEE') ?? [];
   const onderaannemers = employees?.filter((e) => e.employmentType === 'SUBCONTRACTOR') ?? [];
@@ -115,9 +139,19 @@ export function HoursExportPage() {
             {werknemers.map((employee) => (
               <li key={employee.employeeId} className="flex items-center justify-between py-2 text-sm">
                 <span className="font-medium">{employee.displayName}</span>
-                <span className="text-neutral-500">
-                  {formatHm(employee.totalSeconds)} u · {employee.workOrderCount} werkbon(nen)
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="text-neutral-500">
+                    {formatHm(employee.totalSeconds)} u · {employee.workOrderCount} werkbon(nen)
+                  </span>
+                  <button
+                    type="button"
+                    disabled={employee.totalSeconds === 0 || markingEmployeeId === employee.employeeId}
+                    onClick={() => void handleMarkExported(employee)}
+                    className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-semibold text-neutral-600 disabled:opacity-40"
+                  >
+                    {markingEmployeeId === employee.employeeId ? 'Bezig...' : 'Markeer als geëxporteerd'}
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -156,6 +190,14 @@ export function HoursExportPage() {
                   >
                     Download PDF
                   </a>
+                  <button
+                    type="button"
+                    disabled={employee.totalSeconds === 0 || markingEmployeeId === employee.employeeId}
+                    onClick={() => void handleMarkExported(employee)}
+                    className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-semibold text-neutral-600 disabled:opacity-40"
+                  >
+                    {markingEmployeeId === employee.employeeId ? 'Bezig...' : 'Markeer als geëxporteerd'}
+                  </button>
                 </div>
               </li>
             ))}

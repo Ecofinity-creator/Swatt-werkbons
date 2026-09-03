@@ -985,3 +985,20 @@ export interface HoursExportOverviewResponseBody {
   periodLabel: string;
   employees: HoursExportEmployeeSummary[];
 }
+
+/**
+ * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
+ * worden dat die werkbonnen als geëxporteerd gemarkeerd staan... om dubbele
+ * facturatie tegen te gaan." Body/response van
+ * POST /admin/hours-export/mark-exported.
+ */
+export interface MarkHoursExportedBody {
+  employeeId: string;
+  /** bv. "2026-08". */
+  period: string;
+}
+
+export interface MarkHoursExportedResponseBody {
+  /** Aantal tijdregistraties dat effectief als geëxporteerd gemarkeerd werd. */
+  markedCount: number;
+}

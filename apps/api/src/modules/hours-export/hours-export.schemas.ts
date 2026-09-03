@@ -8,3 +8,9 @@ export const hoursExportPeriodQuerySchema = z.object({
 export const hoursExportEmployeeParamsSchema = z.object({
   employeeId: z.string().uuid(),
 });
+
+/** Op vraag (3/9/2026) — zie HoursExportService.markExported(). */
+export const markHoursExportedBodySchema = z.object({
+  employeeId: z.string().uuid(),
+  period: z.string().trim().min(1, 'Periode is verplicht (bv. 2026-08).'),
+});

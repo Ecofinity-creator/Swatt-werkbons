@@ -54,6 +54,35 @@ export class HoursExportService {
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
+  /**
+   * Op vraag (3/9/2026): "eens de export is gebeurd zou ervoor gezorgd moeten
+   * worden dat die werkbonnen als geëxporteerd gemarkeerd staan en niet meer
+   * meegeteld worden in een volgende export, om dubbele facturatie tegen te
+   * gaan". Bewust een expliciete, aparte actie (niet automatisch bij het
+   * downloaden zelf — zie de toelichting bij TimeEntry.hoursExportedAt in
+   * schema.prisma). Herberekent zelf welke tijdregistraties precies
+   * "in deze export zaten" (dezelfde voorwaarden als hierboven), i.p.v. een
+   * lijst IDs van de cliënt te vertrouwen — dat voorkomt dat een verouderd/
+   * gemanipuleerd verzoek toevallig andere registraties zou markeren dan wat
+   * de admin effectief net gedownload heeft.
+   */
+  async markExported(employeeId: string, periodLabel: string): Promise<number> {
+    assertValidPeriod(periodLabel);
+    const employees = await this.loadEmployeesWithSignedEntries(periodLabel, employeeId);
+    const employee = employees[0];
+    if (!employee) {
+      throw HoursExportErrors.employeeNotFound();
+    }
+    if (employee.entries.length === 0) {
+      return 0;
+    }
+    const result = await this.prisma.timeEntry.updateMany({
+      where: { id: { in: employee.entries.map((entry) => entry.id) } },
+      data: { hoursExportedAt: new Date() },
+    });
+    return result.count;
+  }
+
   /** Totalisatie-met-detail (gegroepeerd per project/werf) voor het PDF-document van één onderaannemer. */
   async getSubcontractorDetail(employeeId: string, periodLabel: string): Promise<HoursExportSubcontractorDetail> {
     assertValidPeriod(periodLabel);
@@ -172,8 +201,13 @@ export class HoursExportService {
         displayName: true,
         employmentType: true,
         timeEntries: {
-          where: { endedAt: { not: null } },
+          // Al geëxporteerd (business rule-analoog: nooit dubbel factureren)
+          // wordt hier al uitgesloten, niet pas achteraf gefilterd — zo kan
+          // een uitgeprinte export nooit stiekem een al-geëxporteerde
+          // registratie tonen die er per ongeluk toch nog bij zou hangen.
+          where: { endedAt: { not: null }, hoursExportedAt: null },
           select: {
+            id: true,
             startedAt: true,
             endedAt: true,
             pausedSeconds: true,
@@ -225,6 +259,7 @@ export interface HoursExportEmployeeRecord {
 }
 
 export interface HoursExportEntryRecord {
+  timeEntryId: string;
   workOrderId: string;
   workOrderNumber: string;
   projectName: string;
@@ -285,6 +320,7 @@ interface WorkOrderLinkRow {
 }
 
 interface TimeEntryRow {
+  id: string;
   startedAt: Date;
   endedAt: Date | null;
   pausedSeconds: number;
@@ -316,6 +352,7 @@ interface EmployeeWithSignedEntriesRow {
 function toEntryRecord(entry: SignedEntryRowWithSplit): HoursExportEntryRecord {
   const workOrder = entry.workOrderLink.workOrder;
   return {
+    timeEntryId: entry.id,
     workOrderId: workOrder.id,
     workOrderNumber: workOrder.workOrderNumber,
     projectName: workOrder.project.name,

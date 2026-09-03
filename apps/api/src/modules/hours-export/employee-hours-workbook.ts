@@ -1,25 +1,25 @@
 import ExcelJS from 'exceljs';
-import type { HoursExportEmployeeDetail } from './hours-export.service';
+import type { HoursExportEmployeeDetail, HoursExportEntryRecord } from './hours-export.service';
 
 /**
  * Werknemer vs. Onderaannemer — Excel-urenexport voor eigen medewerkers
  * (EmploymentType.EMPLOYEE), sectie "Nieuw: Werknemer vs. Onderaannemer" in
  * claude/projectoverdracht-samenvatting_2.md: "uren-export naar Excel".
- * Bewust een ruwe urenlijst (één rij per tijdregistratie) — dit is het
- * tegenovergestelde van de totalisatie-met-detail-PDF voor onderaannemers
- * (zie subcontractor-statement-document.ts), bedoeld als brondata voor de
- * eigen loonverwerking i.p.v. een document dat naar een derde gestuurd wordt.
  *
- * Eén werkblad per medewerker (naast een "Overzicht"-blad met de totalen) —
- * zo kan de admin het bestand rechtstreeks doorsturen of per medewerker
- * kopiëren zonder eerst zelf te moeten filteren/sorteren.
+ * Fase 12-herziening (3/9/2026): "pas de tabel werknemers aan in dezelfde
+ * zin als de tabel onderaannemers" — het detailblad per medewerker is nu
+ * gegroepeerd per project/werf (met subtotaal per project + eindtotaal),
+ * exact dezelfde opbouw als subcontractor-hours-workbook.ts, i.p.v. één
+ * platte lijst. Het "Overzicht"-blad (alle medewerkers samen, met
+ * kruistotalen) blijft ongewijzigd — dat heeft geen tegenhanger bij
+ * onderaannemers, die worden altijd één-voor-één gedownload.
  */
 export async function buildEmployeeHoursWorkbook(
   periodLabel: string,
   employees: HoursExportEmployeeDetail[],
 ): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'Swatt Werkbon-app';
+  workbook.creator = 'Uurivo';
   workbook.created = new Date();
   workbook.subject = `Urenexport ${periodLabel}`;
   workbook.title = `Urenexport ${periodLabel}`;
@@ -46,54 +46,118 @@ export async function buildEmployeeHoursWorkbook(
   for (const employee of employees) {
     const sheet = workbook.addWorksheet(sheetNameFor(employee.displayName, workbook));
     sheet.columns = [
-      { header: 'Datum', key: 'date', width: 12 },
-      { header: 'Werkbon', key: 'workOrderNumber', width: 16 },
-      { header: 'Klant', key: 'customerName', width: 24 },
-      { header: 'Project', key: 'projectName', width: 28 },
-      { header: 'Van', key: 'startTime', width: 8 },
-      { header: 'Tot', key: 'endTime', width: 8 },
-      { header: 'Pauze (min)', key: 'pauseMinutes', width: 12 },
-      { header: 'Normaal (u)', key: 'normalHours', width: 12 },
-      { header: 'Overuren (u)', key: 'overtimeHours', width: 12 },
-      { header: 'Manueel', key: 'isManual', width: 10 },
+      { key: 'a', width: 12 },
+      { key: 'b', width: 16 },
+      { key: 'c', width: 24 },
+      { key: 'd', width: 10 },
+      { key: 'e', width: 10 },
+      { key: 'f', width: 12 },
+      { key: 'g', width: 12 },
+      { key: 'h', width: 12 },
     ];
-    styleHeaderRow(sheet);
 
-    let totalNormalHours = 0;
-    let totalOvertimeHours = 0;
-    for (const entry of employee.entries) {
-      totalNormalHours += entry.normalHours;
-      totalOvertimeHours += entry.overtimeHours;
-      sheet.addRow({
-        date: formatDate(entry.startedAt),
-        workOrderNumber: entry.workOrderNumber,
-        customerName: entry.customerName,
-        projectName: entry.projectName,
-        startTime: formatTime(entry.startedAt),
-        endTime: formatTime(entry.endedAt),
-        pauseMinutes: Math.round(entry.pausedSeconds / 60),
-        normalHours: Number(entry.normalHours.toFixed(2)),
-        overtimeHours: Number(entry.overtimeHours.toFixed(2)),
-        isManual: entry.isManual ? 'Ja' : 'Nee',
-      });
+    const titleRow = sheet.addRow([`Urenoverzicht — ${employee.displayName}`]);
+    titleRow.font = { bold: true, size: 14 };
+    sheet.addRow([`Periode: ${formatPeriodLabel(periodLabel)}`]).font = { italic: true, color: { argb: 'FF666666' } };
+    sheet.addRow([]);
+
+    let employeeTotalNormalHours = 0;
+    let employeeTotalOvertimeHours = 0;
+    for (const project of groupByProject(employee.entries)) {
+      employeeTotalNormalHours += project.totalNormalHours;
+      employeeTotalOvertimeHours += project.totalOvertimeHours;
+
+      const projectHeaderRow = sheet.addRow([`${project.projectName} — ${project.customerName}`]);
+      projectHeaderRow.font = { bold: true, size: 11 };
+      sheet.mergeCells(projectHeaderRow.number, 1, projectHeaderRow.number, 8);
+
+      const columnHeaderRow = sheet.addRow(['Datum', 'Werkbon', 'Omschrijving', 'Van', 'Tot', 'Pauze (min)', 'Normaal (u)', 'Overuren (u)']);
+      styleColumnHeaderRow(columnHeaderRow);
+
+      for (const entry of project.entries) {
+        sheet.addRow([
+          formatDate(entry.startedAt),
+          entry.workOrderNumber,
+          entry.description ?? '',
+          formatTime(entry.startedAt),
+          formatTime(entry.endedAt),
+          Math.round(entry.pausedSeconds / 60),
+          Number(entry.normalHours.toFixed(2)),
+          Number(entry.overtimeHours.toFixed(2)),
+        ]);
+      }
+
+      const subtotalRow = sheet.addRow([
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Subtotaal',
+        Number(project.totalNormalHours.toFixed(2)),
+        Number(project.totalOvertimeHours.toFixed(2)),
+      ]);
+      subtotalRow.font = { bold: true };
+      sheet.addRow([]);
     }
 
-    const totalRow = sheet.addRow({
-      projectName: 'Totaal',
-      normalHours: Number(totalNormalHours.toFixed(2)),
-      overtimeHours: Number(totalOvertimeHours.toFixed(2)),
-    });
-    totalRow.font = { bold: true };
+    const totalRow = sheet.addRow(['', '', '', '', '', 'Totaal', Number(employeeTotalNormalHours.toFixed(2)), Number(employeeTotalOvertimeHours.toFixed(2))]);
+    totalRow.font = { bold: true, size: 12 };
+    totalRow.getCell(6).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+    totalRow.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+    totalRow.getCell(8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
   }
 
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);
 }
 
+interface ProjectGroup {
+  projectName: string;
+  customerName: string;
+  entries: HoursExportEntryRecord[];
+  totalNormalHours: number;
+  totalOvertimeHours: number;
+}
+
+/** Zelfde groeperingslogica als HoursExportService.getSubcontractorDetail() (bewust lokaal gehouden, zie de toelichting daar). */
+function groupByProject(entries: HoursExportEntryRecord[]): ProjectGroup[] {
+  const byProject = new Map<string, ProjectGroup>();
+  for (const entry of entries) {
+    const key = `${entry.projectName}::${entry.projectNumber ?? ''}`;
+    const existing = byProject.get(key);
+    if (existing) {
+      existing.entries.push(entry);
+      existing.totalNormalHours += entry.normalHours;
+      existing.totalOvertimeHours += entry.overtimeHours;
+    } else {
+      byProject.set(key, {
+        projectName: entry.projectName,
+        customerName: entry.customerName,
+        entries: [entry],
+        totalNormalHours: entry.normalHours,
+        totalOvertimeHours: entry.overtimeHours,
+      });
+    }
+  }
+  const groups = Array.from(byProject.values()).sort((a, b) => a.projectName.localeCompare(b.projectName));
+  for (const group of groups) {
+    group.entries.sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+  }
+  return groups;
+}
+
 function styleHeaderRow(sheet: ExcelJS.Worksheet): void {
   const headerRow = sheet.getRow(1);
   headerRow.font = { bold: true };
   headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0B90B' } };
+}
+
+function styleColumnHeaderRow(row: ExcelJS.Row): void {
+  row.font = { bold: true };
+  row.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
+  });
 }
 
 /** Excel-werkbladnamen zijn max. 31 tekens en mogen geen `: \ / ? * [ ]` bevatten, en moeten uniek zijn binnen de workbook. */
@@ -114,4 +178,11 @@ function formatDate(date: Date): string {
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatPeriodLabel(periodLabel: string): string {
+  const [year, month] = periodLabel.split('-');
+  if (!year || !month) return periodLabel;
+  const date = new Date(Number(year), Number(month) - 1, 1);
+  return date.toLocaleDateString('nl-BE', { month: 'long', year: 'numeric' });
 }
