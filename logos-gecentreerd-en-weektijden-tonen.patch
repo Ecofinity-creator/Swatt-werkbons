@@ -1,0 +1,420 @@
+From 29b4c75c7f5e7cf185889e77c78eab80c5c12544 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Thu, 3 Sep 2026 06:39:08 +0000
+Subject: [PATCH] Homescherm-logo's gecentreerd + alle tijden tonen bij
+ weekondertekening
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Homescherm (HomePage.tsx)
+- Header-container: items-start -> items-center, zodat het Uurivo-logo en
+  het klantlogo (verschillende breedtes) nu gecentreerd staan t.o.v. elkaar
+  i.p.v. allebei links uitgelijnd (wat er ongelijk uitzag zodra het
+  klantlogo een andere breedte heeft dan de Uurivo-kaart).
+
+Weekondertekening: alle tijden tonen (op vraag, 2/9/2026)
+"Bij het ondertekenen van de werkbonnen per week zouden alle tijden getoond
+moeten worden zodat de ondertekenaar ook ziet wat hij goedkeurt."
+
+- weekly-approval.service.ts: listPendingForEmployee() geeft naast de
+  bestaande telling (workOrderIds, gefilterd op de aanroepende medewerker)
+  nu ook een volledige detaillijst (entries) terug: medewerker, start-/
+  eindtijd, pauze, werkbonnummer — over ALLE openstaande werkbonnen van de
+  week op dit project heen, niet gefilterd op de aanroepende medewerker,
+  want de handtekening zelf bevestigt sowieso alle collega's se werkbonnen
+  (sectie 2). Chronologisch gesorteerd.
+- weekly-approval.routes.ts: geeft entries mee in de JSON-respons.
+- shared-types: nieuw PendingWeekEntrySummary-type.
+- WorkOrderReviewPage.tsx: toont een tabel (medewerker/datum/van/tot) boven
+  de handtekenstap wanneer projectSigningMode === 'WEEKLY' en er meerdere
+  openstaande werkbonnen zijn — de klant ziet nu exact wat hij goedkeurt
+  vóór hij tekent, i.p.v. enkel een getal.
+- 2 tests bijgewerkt/toegevoegd in weekly-approval.service.test.ts,
+  waaronder een nieuwe test die specifiek controleert dat entries over
+  meerdere medewerkers heen correct en chronologisch gesorteerd zijn.
+
+Verificatie: backend-testsuite 189 slagen (dezelfde 16 pre-existente
+mislukkingen, geen regressies), typecheck/lint backend+frontend schoon,
+frontend-productiebuild slaagt.
+---
+ .../work-orders/weekly-approval.routes.ts     | 16 ++++-
+ .../work-orders/weekly-approval.service.ts    | 65 +++++++++++++++++--
+ apps/api/test/weekly-approval.service.test.ts | 37 ++++++++++-
+ apps/web/src/pages/HomePage.tsx               |  2 +-
+ apps/web/src/pages/WorkOrderReviewPage.tsx    | 61 +++++++++++++++--
+ packages/shared-types/src/index.ts            | 12 ++++
+ 6 files changed, 178 insertions(+), 15 deletions(-)
+
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.routes.ts b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+index ed33b0f..53ca5b8 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.routes.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+@@ -32,8 +32,20 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+     async (request): Promise<PendingWeekResponseBody> => {
+       const employeeId = requireEmployeeId(request);
+       const query = pendingWeekQuerySchema.parse(request.query);
+-      const { weekStartDate, weekEndDate, workOrderIds } = await service.listPendingForEmployee(employeeId, query.projectId);
+-      return { weekStartDate: weekStartDate.toISOString(), weekEndDate: weekEndDate.toISOString(), workOrderIds };
++      const { weekStartDate, weekEndDate, workOrderIds, entries } = await service.listPendingForEmployee(employeeId, query.projectId);
++      return {
++        weekStartDate: weekStartDate.toISOString(),
++        weekEndDate: weekEndDate.toISOString(),
++        workOrderIds,
++        entries: entries.map((entry) => ({
++          workOrderId: entry.workOrderId,
++          workOrderNumber: entry.workOrderNumber,
++          employeeDisplayName: entry.employeeDisplayName,
++          startedAt: entry.startedAt.toISOString(),
++          endedAt: entry.endedAt.toISOString(),
++          pausedSeconds: entry.pausedSeconds,
++        })),
++      };
+     },
+   );
+ 
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.service.ts b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+index 6e08082..c34c1dc 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.service.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+@@ -26,6 +26,16 @@ export interface SignWeekInput {
+   image: { data: Buffer; mimeType: string };
+ }
+ 
++/** Eén tijdregistratie-rij ter review vóór de klant tekent — zie listPendingForEmployee(). */
++export interface PendingWeekEntry {
++  workOrderId: string;
++  workOrderNumber: string;
++  employeeDisplayName: string;
++  startedAt: Date;
++  endedAt: Date;
++  pausedSeconds: number;
++}
++
+ export interface WeeklyApprovalRecord {
+   id: string;
+   projectId: string;
+@@ -40,11 +50,21 @@ export interface WeeklyApprovalRecord {
+ 
+ interface PendingWorkOrderRow {
+   id: string;
++  workOrderNumber: string;
+   status: string;
+   createdByEmployeeId: string;
+   description: string | null;
+   createdAt: Date;
+-  timeEntries: Array<{ timeEntryId: string; timeEntry: { employeeId: string } }>;
++  timeEntries: Array<{
++    timeEntryId: string;
++    timeEntry: {
++      employeeId: string;
++      startedAt: Date;
++      endedAt: Date | null;
++      pausedSeconds: number;
++      employee: { displayName: string };
++    };
++  }>;
+   photos: Array<{ id: string }>;
+ }
+ 
+@@ -72,13 +92,36 @@ export class WeeklyApprovalService {
+    * participant-check als WorkOrderSignatureService — aanmaker of één van de
+    * gekoppelde tijdregistraties).
+    */
+-  async listPendingForEmployee(employeeId: string, projectId: string): Promise<{ weekStartDate: Date; weekEndDate: Date; workOrderIds: string[] }> {
++  async listPendingForEmployee(
++    employeeId: string,
++    projectId: string,
++  ): Promise<{ weekStartDate: Date; weekEndDate: Date; workOrderIds: string[]; entries: PendingWeekEntry[] }> {
+     const { weekStartDate, weekEndDate } = WeeklyApprovalService.weekBoundsOf();
+     const rows = await this.fetchPendingWorkOrders(projectId, weekStartDate, weekEndDate);
+     const mine = rows.filter(
+       (row) => row.createdByEmployeeId === employeeId || row.timeEntries.some((link) => link.timeEntry.employeeId === employeeId),
+     );
+-    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id) };
++
++    // Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat
++    // hij goedkeurt" — bewust over ALLE openstaande werkbonnen van deze week
++    // heen (niet gefilterd op `mine`), want de handtekening zelf bevestigt
++    // ook alle collega's se werkbonnen (sectie 2), niet enkel die van de
++    // medewerker die de onderteken-actie start.
++    const entries: PendingWeekEntry[] = rows.flatMap((row) =>
++      row.timeEntries.map((link) => ({
++        workOrderId: row.id,
++        workOrderNumber: row.workOrderNumber,
++        employeeDisplayName: link.timeEntry.employee.displayName,
++        startedAt: link.timeEntry.startedAt,
++        // endedAt is gegarandeerd niet-null: enkel gestopte tijdregistraties
++        // hangen aan een DRAFT-werkbon die hier al opgehaald wordt.
++        endedAt: link.timeEntry.endedAt!,
++        pausedSeconds: link.timeEntry.pausedSeconds,
++      })),
++    );
++    entries.sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
++
++    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries };
+   }
+ 
+   /**
+@@ -233,11 +276,25 @@ export class WeeklyApprovalService {
+       },
+       select: {
+         id: true,
++        workOrderNumber: true,
+         status: true,
+         createdByEmployeeId: true,
+         description: true,
+         createdAt: true,
+-        timeEntries: { select: { timeEntryId: true, timeEntry: { select: { employeeId: true } } } },
++        timeEntries: {
++          select: {
++            timeEntryId: true,
++            timeEntry: {
++              select: {
++                employeeId: true,
++                startedAt: true,
++                endedAt: true,
++                pausedSeconds: true,
++                employee: { select: { displayName: true } },
++              },
++            },
++          },
++        },
+         photos: { select: { id: true } },
+       },
+     })) as unknown as PendingWorkOrderRow[];
+diff --git a/apps/api/test/weekly-approval.service.test.ts b/apps/api/test/weekly-approval.service.test.ts
+index 538165e..12c76d2 100644
+--- a/apps/api/test/weekly-approval.service.test.ts
++++ b/apps/api/test/weekly-approval.service.test.ts
+@@ -11,6 +11,7 @@ import type { StorageService } from '../src/modules/storage/storage.service';
+ 
+ interface FakeWorkOrder {
+   id: string;
++  workOrderNumber: string;
+   projectId: string;
+   status: string;
+   createdByEmployeeId: string;
+@@ -57,7 +58,22 @@ function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmDistanceO
+               wo.createdAt.getTime() >= where.createdAt.gte.getTime() &&
+               wo.createdAt.getTime() <= where.createdAt.lte.getTime(),
+           )
+-          .map((wo) => ({ ...wo, timeEntries: [{ timeEntryId: `te-${wo.id}`, timeEntry: { employeeId: wo.createdByEmployeeId } }], photos: [] })),
++          .map((wo) => ({
++            ...wo,
++            timeEntries: [
++              {
++                timeEntryId: `te-${wo.id}`,
++                timeEntry: {
++                  employeeId: wo.createdByEmployeeId,
++                  startedAt: wo.createdAt,
++                  endedAt: new Date(wo.createdAt.getTime() + 4 * 60 * 60 * 1000), // 4u na start, willekeurig maar consistent
++                  pausedSeconds: 0,
++                  employee: { displayName: wo.createdByEmployeeId === PETER ? 'Peter Janssens' : 'Wannes Peeters' },
++                },
++              },
++            ],
++            photos: [],
++          })),
+       updateMany: async ({ where, data }: { where: { id: { in: string[] } }; data: Record<string, unknown> }) => {
+         for (const id of where.id.in) {
+           const wo = workOrders.get(id);
+@@ -127,6 +143,7 @@ const NEXT_MONDAY = new Date('2026-08-24T08:00:00.000Z'); // volgende week — m
+ 
+ function workOrder(overrides: Partial<FakeWorkOrder> & { id: string }): FakeWorkOrder {
+   return {
++    workOrderNumber: `WB-${overrides.id}`,
+     projectId: PROJECT_ID,
+     status: 'DRAFT',
+     createdByEmployeeId: PETER,
+@@ -215,6 +232,24 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
+     const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
+     expect(result.workOrderIds).toEqual(['wo-1']);
+   });
++
++  it('geeft "entries" terug over ALLE openstaande werkbonnen van de week heen (niet enkel die van de aanroepende medewerker) — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt"', async () => {
++    const { prisma } = createFakePrisma([
++      workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
++      workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
++    ]);
++    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++
++    vi.setSystemTime(MONDAY);
++    const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
++
++    // workOrderIds blijft gefilterd op Peter, maar entries toont ook Wannes se werkbon.
++    expect(result.entries).toHaveLength(2);
++    expect(result.entries.map((e) => e.employeeDisplayName).sort()).toEqual(['Peter Janssens', 'Wannes Peeters']);
++    expect(result.entries[0]?.startedAt.getTime()).toBeLessThanOrEqual(result.entries[1]!.startedAt.getTime()); // chronologisch gesorteerd
++    expect(result.entries.every((e) => e.endedAt > e.startedAt)).toBe(true);
++    expect(result.entries.map((e) => e.workOrderNumber)).toEqual(expect.arrayContaining(['WB-wo-1', 'WB-wo-2']));
++  });
+ });
+ 
+ describe('WeeklyApprovalService.reopen()', () => {
+diff --git a/apps/web/src/pages/HomePage.tsx b/apps/web/src/pages/HomePage.tsx
+index ba2628c..3d2877a 100644
+--- a/apps/web/src/pages/HomePage.tsx
++++ b/apps/web/src/pages/HomePage.tsx
+@@ -46,7 +46,7 @@ export function HomePage() {
+ 
+   return (
+     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
+-      <header className="mb-8 flex flex-col items-start gap-3">
++      <header className="mb-8 flex flex-col items-center gap-3">
+         {/* Volledige lockup (icoon + "UURIVO"-woordmerk) zoals op het loginscherm,
+             i.p.v. enkel het compacte icoon — zelfde goudomrande lichte kaart
+             nodig voor zichtbaarheid (donkere tekst/pictogram op transparante
+diff --git a/apps/web/src/pages/WorkOrderReviewPage.tsx b/apps/web/src/pages/WorkOrderReviewPage.tsx
+index 452a593..7317123 100644
+--- a/apps/web/src/pages/WorkOrderReviewPage.tsx
++++ b/apps/web/src/pages/WorkOrderReviewPage.tsx
+@@ -1,4 +1,4 @@
+-import type { WorkOrderPhotoCategory, WorkOrderSummary } from '@swatt/shared-types';
++import type { PendingWeekEntrySummary, WorkOrderPhotoCategory, WorkOrderSummary } from '@swatt/shared-types';
+ import {
+   roleAtLeast,
+   WORK_ORDER_PHOTO_CATEGORY_LABELS,
+@@ -54,6 +54,8 @@ export function WorkOrderReviewPage() {
+ 
+   // Phase 12, deel B (sectie 2) — enkel relevant wanneer workOrder.projectSigningMode === 'WEEKLY'.
+   const [pendingWeekCount, setPendingWeekCount] = useState<number | null>(null);
++  // Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt".
++  const [pendingWeekEntries, setPendingWeekEntries] = useState<PendingWeekEntrySummary[] | null>(null);
+ 
+   const load = useCallback(async () => {
+     if (!workOrderId) return;
+@@ -78,12 +80,19 @@ export function WorkOrderReviewPage() {
+   useEffect(() => {
+     if (step !== 'sign' || !workOrder || workOrder.projectSigningMode !== 'WEEKLY') {
+       setPendingWeekCount(null);
++      setPendingWeekEntries(null);
+       return;
+     }
+     weeklyApprovalApi
+       .pendingWeek(workOrder.projectId)
+-      .then((response) => setPendingWeekCount(response.workOrderIds.length))
+-      .catch(() => setPendingWeekCount(null));
++      .then((response) => {
++        setPendingWeekCount(response.workOrderIds.length);
++        setPendingWeekEntries(response.entries);
++      })
++      .catch(() => {
++        setPendingWeekCount(null);
++        setPendingWeekEntries(null);
++      });
+   }, [step, workOrder]);
+ 
+   if (!workOrderId) {
+@@ -270,6 +279,7 @@ export function WorkOrderReviewPage() {
+         <SignStep
+           workOrder={workOrder}
+           pendingWeekCount={pendingWeekCount}
++          pendingWeekEntries={pendingWeekEntries}
+           signerName={signerName}
+           onSignerNameChange={setSignerName}
+           signerFunction={signerFunction}
+@@ -431,6 +441,7 @@ function PhotoInputButton({
+ function SignStep({
+   workOrder,
+   pendingWeekCount,
++  pendingWeekEntries,
+   signerName,
+   onSignerNameChange,
+   signerFunction,
+@@ -448,6 +459,8 @@ function SignStep({
+   workOrder: WorkOrderSummary;
+   /** Phase 12, deel B — aantal werkbonnen dat samen met deze getekend wordt, enkel gezet bij projectSigningMode === 'WEEKLY'. */
+   pendingWeekCount: number | null;
++  /** Detail van alle tijdregistraties die samen met deze week ondertekend worden — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt". */
++  pendingWeekEntries: PendingWeekEntrySummary[] | null;
+   signerName: string;
+   onSignerNameChange: (value: string) => void;
+   signerFunction: string;
+@@ -470,10 +483,36 @@ function SignStep({
+       <WorkOrderSummaryCard workOrder={workOrder} />
+ 
+       {workOrder.projectSigningMode === 'WEEKLY' && pendingWeekCount !== null && pendingWeekCount > 1 && (
+-        <p className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-3 text-sm text-swatt-gold">
+-          Deze klant tekent per week. Deze handtekening bevestigt in één keer alle {pendingWeekCount} openstaande
+-          werkbonnen van deze week op dit project, niet enkel deze ene.
+-        </p>
++        <div className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-3 text-sm text-swatt-gold">
++          <p>
++            Deze klant tekent per week. Deze handtekening bevestigt in één keer alle {pendingWeekCount} openstaande
++            werkbonnen van deze week op dit project, niet enkel deze ene.
++          </p>
++          {pendingWeekEntries && pendingWeekEntries.length > 0 && (
++            <div className="mt-3 overflow-x-auto rounded-md border border-swatt-gold/40">
++              <table className="w-full text-left text-xs text-neutral-200">
++                <thead>
++                  <tr className="border-b border-swatt-gold/40 uppercase tracking-wide text-swatt-gold/80">
++                    <th className="px-2 py-1.5">Medewerker</th>
++                    <th className="px-2 py-1.5">Datum</th>
++                    <th className="px-2 py-1.5">Van</th>
++                    <th className="px-2 py-1.5">Tot</th>
++                  </tr>
++                </thead>
++                <tbody>
++                  {pendingWeekEntries.map((entry, index) => (
++                    <tr key={`${entry.workOrderId}-${index}`} className="border-b border-swatt-gold/10 last:border-0">
++                      <td className="px-2 py-1.5">{entry.employeeDisplayName}</td>
++                      <td className="px-2 py-1.5">{formatWeekEntryDate(entry.startedAt)}</td>
++                      <td className="px-2 py-1.5">{formatWeekEntryTime(entry.startedAt)}</td>
++                      <td className="px-2 py-1.5">{formatWeekEntryTime(entry.endedAt)}</td>
++                    </tr>
++                  ))}
++                </tbody>
++              </table>
++            </div>
++          )}
++        </div>
+       )}
+ 
+       {workOrder.photos.length > 0 && (
+@@ -775,6 +814,14 @@ function formatDuration(totalSeconds: number): string {
+   return `${hours}u ${String(minutes).padStart(2, '0')}min`;
+ }
+ 
++function formatWeekEntryDate(iso: string): string {
++  return new Date(iso).toLocaleDateString('nl-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
++}
++
++function formatWeekEntryTime(iso: string): string {
++  return new Date(iso).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
++}
++
+ function stripDataUrlPrefix(dataUrl: string): string {
+   const commaIndex = dataUrl.indexOf(',');
+   return commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl;
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 7f18b12..313f20e 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -258,11 +258,23 @@ export interface UpdateProjectSigningModeResponseBody {
+ }
+ 
+ /** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */
++/** Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt" — één rij per tijdregistratie, over ALLE openstaande werkbonnen van de week heen (niet enkel die van de medewerker die de onderteken-actie start, zie WeeklyApprovalService.listPendingForEmployee()). */
++export interface PendingWeekEntrySummary {
++  workOrderId: string;
++  workOrderNumber: string;
++  employeeDisplayName: string;
++  startedAt: string;
++  endedAt: string;
++  pausedSeconds: number;
++}
++
+ export interface PendingWeekResponseBody {
+   weekStartDate: string;
+   weekEndDate: string;
+   /** Werkbonnen van DEZE medewerker die deze week nog wachten op weekondertekening. */
+   workOrderIds: string[];
++  /** Detail van ALLE openstaande werkbonnen/tijdregistraties van de week op dit project — voor het overzicht vóór ondertekenen. */
++  entries: PendingWeekEntrySummary[];
+ }
+ 
+ /** Body van POST /weekly-approvals/:projectId/sign — zelfde velden als het bestaande /work-orders/:id/sign, nu voor de hele lopende week. */
+-- 
+2.43.0
+

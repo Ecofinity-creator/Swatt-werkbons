@@ -26,6 +26,16 @@ export interface SignWeekInput {
   image: { data: Buffer; mimeType: string };
 }
 
+/** Eén tijdregistratie-rij ter review vóór de klant tekent — zie listPendingForEmployee(). */
+export interface PendingWeekEntry {
+  workOrderId: string;
+  workOrderNumber: string;
+  employeeDisplayName: string;
+  startedAt: Date;
+  endedAt: Date;
+  pausedSeconds: number;
+}
+
 export interface WeeklyApprovalRecord {
   id: string;
   projectId: string;
@@ -40,11 +50,21 @@ export interface WeeklyApprovalRecord {
 
 interface PendingWorkOrderRow {
   id: string;
+  workOrderNumber: string;
   status: string;
   createdByEmployeeId: string;
   description: string | null;
   createdAt: Date;
-  timeEntries: Array<{ timeEntryId: string; timeEntry: { employeeId: string } }>;
+  timeEntries: Array<{
+    timeEntryId: string;
+    timeEntry: {
+      employeeId: string;
+      startedAt: Date;
+      endedAt: Date | null;
+      pausedSeconds: number;
+      employee: { displayName: string };
+    };
+  }>;
   photos: Array<{ id: string }>;
 }
 
@@ -72,13 +92,36 @@ export class WeeklyApprovalService {
    * participant-check als WorkOrderSignatureService — aanmaker of één van de
    * gekoppelde tijdregistraties).
    */
-  async listPendingForEmployee(employeeId: string, projectId: string): Promise<{ weekStartDate: Date; weekEndDate: Date; workOrderIds: string[] }> {
+  async listPendingForEmployee(
+    employeeId: string,
+    projectId: string,
+  ): Promise<{ weekStartDate: Date; weekEndDate: Date; workOrderIds: string[]; entries: PendingWeekEntry[] }> {
     const { weekStartDate, weekEndDate } = WeeklyApprovalService.weekBoundsOf();
     const rows = await this.fetchPendingWorkOrders(projectId, weekStartDate, weekEndDate);
     const mine = rows.filter(
       (row) => row.createdByEmployeeId === employeeId || row.timeEntries.some((link) => link.timeEntry.employeeId === employeeId),
     );
-    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id) };
+
+    // Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat
+    // hij goedkeurt" — bewust over ALLE openstaande werkbonnen van deze week
+    // heen (niet gefilterd op `mine`), want de handtekening zelf bevestigt
+    // ook alle collega's se werkbonnen (sectie 2), niet enkel die van de
+    // medewerker die de onderteken-actie start.
+    const entries: PendingWeekEntry[] = rows.flatMap((row) =>
+      row.timeEntries.map((link) => ({
+        workOrderId: row.id,
+        workOrderNumber: row.workOrderNumber,
+        employeeDisplayName: link.timeEntry.employee.displayName,
+        startedAt: link.timeEntry.startedAt,
+        // endedAt is gegarandeerd niet-null: enkel gestopte tijdregistraties
+        // hangen aan een DRAFT-werkbon die hier al opgehaald wordt.
+        endedAt: link.timeEntry.endedAt!,
+        pausedSeconds: link.timeEntry.pausedSeconds,
+      })),
+    );
+    entries.sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+
+    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries };
   }
 
   /**
@@ -233,11 +276,25 @@ export class WeeklyApprovalService {
       },
       select: {
         id: true,
+        workOrderNumber: true,
         status: true,
         createdByEmployeeId: true,
         description: true,
         createdAt: true,
-        timeEntries: { select: { timeEntryId: true, timeEntry: { select: { employeeId: true } } } },
+        timeEntries: {
+          select: {
+            timeEntryId: true,
+            timeEntry: {
+              select: {
+                employeeId: true,
+                startedAt: true,
+                endedAt: true,
+                pausedSeconds: true,
+                employee: { select: { displayName: true } },
+              },
+            },
+          },
+        },
         photos: { select: { id: true } },
       },
     })) as unknown as PendingWorkOrderRow[];

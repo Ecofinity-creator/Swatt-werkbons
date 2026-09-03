@@ -11,6 +11,7 @@ import type { StorageService } from '../src/modules/storage/storage.service';
 
 interface FakeWorkOrder {
   id: string;
+  workOrderNumber: string;
   projectId: string;
   status: string;
   createdByEmployeeId: string;
@@ -57,7 +58,22 @@ function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmDistanceO
               wo.createdAt.getTime() >= where.createdAt.gte.getTime() &&
               wo.createdAt.getTime() <= where.createdAt.lte.getTime(),
           )
-          .map((wo) => ({ ...wo, timeEntries: [{ timeEntryId: `te-${wo.id}`, timeEntry: { employeeId: wo.createdByEmployeeId } }], photos: [] })),
+          .map((wo) => ({
+            ...wo,
+            timeEntries: [
+              {
+                timeEntryId: `te-${wo.id}`,
+                timeEntry: {
+                  employeeId: wo.createdByEmployeeId,
+                  startedAt: wo.createdAt,
+                  endedAt: new Date(wo.createdAt.getTime() + 4 * 60 * 60 * 1000), // 4u na start, willekeurig maar consistent
+                  pausedSeconds: 0,
+                  employee: { displayName: wo.createdByEmployeeId === PETER ? 'Peter Janssens' : 'Wannes Peeters' },
+                },
+              },
+            ],
+            photos: [],
+          })),
       updateMany: async ({ where, data }: { where: { id: { in: string[] } }; data: Record<string, unknown> }) => {
         for (const id of where.id.in) {
           const wo = workOrders.get(id);
@@ -127,6 +143,7 @@ const NEXT_MONDAY = new Date('2026-08-24T08:00:00.000Z'); // volgende week — m
 
 function workOrder(overrides: Partial<FakeWorkOrder> & { id: string }): FakeWorkOrder {
   return {
+    workOrderNumber: `WB-${overrides.id}`,
     projectId: PROJECT_ID,
     status: 'DRAFT',
     createdByEmployeeId: PETER,
@@ -214,6 +231,24 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
     vi.setSystemTime(MONDAY);
     const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
     expect(result.workOrderIds).toEqual(['wo-1']);
+  });
+
+  it('geeft "entries" terug over ALLE openstaande werkbonnen van de week heen (niet enkel die van de aanroepende medewerker) — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt"', async () => {
+    const { prisma } = createFakePrisma([
+      workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
+      workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
+    ]);
+    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+
+    vi.setSystemTime(MONDAY);
+    const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
+
+    // workOrderIds blijft gefilterd op Peter, maar entries toont ook Wannes se werkbon.
+    expect(result.entries).toHaveLength(2);
+    expect(result.entries.map((e) => e.employeeDisplayName).sort()).toEqual(['Peter Janssens', 'Wannes Peeters']);
+    expect(result.entries[0]?.startedAt.getTime()).toBeLessThanOrEqual(result.entries[1]!.startedAt.getTime()); // chronologisch gesorteerd
+    expect(result.entries.every((e) => e.endedAt > e.startedAt)).toBe(true);
+    expect(result.entries.map((e) => e.workOrderNumber)).toEqual(expect.arrayContaining(['WB-wo-1', 'WB-wo-2']));
   });
 });
 

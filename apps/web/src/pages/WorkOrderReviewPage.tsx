@@ -1,4 +1,4 @@
-import type { WorkOrderPhotoCategory, WorkOrderSummary } from '@swatt/shared-types';
+import type { PendingWeekEntrySummary, WorkOrderPhotoCategory, WorkOrderSummary } from '@swatt/shared-types';
 import {
   roleAtLeast,
   WORK_ORDER_PHOTO_CATEGORY_LABELS,
@@ -54,6 +54,8 @@ export function WorkOrderReviewPage() {
 
   // Phase 12, deel B (sectie 2) — enkel relevant wanneer workOrder.projectSigningMode === 'WEEKLY'.
   const [pendingWeekCount, setPendingWeekCount] = useState<number | null>(null);
+  // Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt".
+  const [pendingWeekEntries, setPendingWeekEntries] = useState<PendingWeekEntrySummary[] | null>(null);
 
   const load = useCallback(async () => {
     if (!workOrderId) return;
@@ -78,12 +80,19 @@ export function WorkOrderReviewPage() {
   useEffect(() => {
     if (step !== 'sign' || !workOrder || workOrder.projectSigningMode !== 'WEEKLY') {
       setPendingWeekCount(null);
+      setPendingWeekEntries(null);
       return;
     }
     weeklyApprovalApi
       .pendingWeek(workOrder.projectId)
-      .then((response) => setPendingWeekCount(response.workOrderIds.length))
-      .catch(() => setPendingWeekCount(null));
+      .then((response) => {
+        setPendingWeekCount(response.workOrderIds.length);
+        setPendingWeekEntries(response.entries);
+      })
+      .catch(() => {
+        setPendingWeekCount(null);
+        setPendingWeekEntries(null);
+      });
   }, [step, workOrder]);
 
   if (!workOrderId) {
@@ -270,6 +279,7 @@ export function WorkOrderReviewPage() {
         <SignStep
           workOrder={workOrder}
           pendingWeekCount={pendingWeekCount}
+          pendingWeekEntries={pendingWeekEntries}
           signerName={signerName}
           onSignerNameChange={setSignerName}
           signerFunction={signerFunction}
@@ -431,6 +441,7 @@ function PhotoInputButton({
 function SignStep({
   workOrder,
   pendingWeekCount,
+  pendingWeekEntries,
   signerName,
   onSignerNameChange,
   signerFunction,
@@ -448,6 +459,8 @@ function SignStep({
   workOrder: WorkOrderSummary;
   /** Phase 12, deel B — aantal werkbonnen dat samen met deze getekend wordt, enkel gezet bij projectSigningMode === 'WEEKLY'. */
   pendingWeekCount: number | null;
+  /** Detail van alle tijdregistraties die samen met deze week ondertekend worden — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt". */
+  pendingWeekEntries: PendingWeekEntrySummary[] | null;
   signerName: string;
   onSignerNameChange: (value: string) => void;
   signerFunction: string;
@@ -470,10 +483,36 @@ function SignStep({
       <WorkOrderSummaryCard workOrder={workOrder} />
 
       {workOrder.projectSigningMode === 'WEEKLY' && pendingWeekCount !== null && pendingWeekCount > 1 && (
-        <p className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-3 text-sm text-swatt-gold">
-          Deze klant tekent per week. Deze handtekening bevestigt in één keer alle {pendingWeekCount} openstaande
-          werkbonnen van deze week op dit project, niet enkel deze ene.
-        </p>
+        <div className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-3 text-sm text-swatt-gold">
+          <p>
+            Deze klant tekent per week. Deze handtekening bevestigt in één keer alle {pendingWeekCount} openstaande
+            werkbonnen van deze week op dit project, niet enkel deze ene.
+          </p>
+          {pendingWeekEntries && pendingWeekEntries.length > 0 && (
+            <div className="mt-3 overflow-x-auto rounded-md border border-swatt-gold/40">
+              <table className="w-full text-left text-xs text-neutral-200">
+                <thead>
+                  <tr className="border-b border-swatt-gold/40 uppercase tracking-wide text-swatt-gold/80">
+                    <th className="px-2 py-1.5">Medewerker</th>
+                    <th className="px-2 py-1.5">Datum</th>
+                    <th className="px-2 py-1.5">Van</th>
+                    <th className="px-2 py-1.5">Tot</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingWeekEntries.map((entry, index) => (
+                    <tr key={`${entry.workOrderId}-${index}`} className="border-b border-swatt-gold/10 last:border-0">
+                      <td className="px-2 py-1.5">{entry.employeeDisplayName}</td>
+                      <td className="px-2 py-1.5">{formatWeekEntryDate(entry.startedAt)}</td>
+                      <td className="px-2 py-1.5">{formatWeekEntryTime(entry.startedAt)}</td>
+                      <td className="px-2 py-1.5">{formatWeekEntryTime(entry.endedAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       )}
 
       {workOrder.photos.length > 0 && (
@@ -773,6 +812,14 @@ function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   return `${hours}u ${String(minutes).padStart(2, '0')}min`;
+}
+
+function formatWeekEntryDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('nl-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+}
+
+function formatWeekEntryTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
 }
 
 function stripDataUrlPrefix(dataUrl: string): string {

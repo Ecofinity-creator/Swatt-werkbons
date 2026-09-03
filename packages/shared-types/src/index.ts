@@ -258,11 +258,23 @@ export interface UpdateProjectSigningModeResponseBody {
 }
 
 /** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */
+/** Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt" — één rij per tijdregistratie, over ALLE openstaande werkbonnen van de week heen (niet enkel die van de medewerker die de onderteken-actie start, zie WeeklyApprovalService.listPendingForEmployee()). */
+export interface PendingWeekEntrySummary {
+  workOrderId: string;
+  workOrderNumber: string;
+  employeeDisplayName: string;
+  startedAt: string;
+  endedAt: string;
+  pausedSeconds: number;
+}
+
 export interface PendingWeekResponseBody {
   weekStartDate: string;
   weekEndDate: string;
   /** Werkbonnen van DEZE medewerker die deze week nog wachten op weekondertekening. */
   workOrderIds: string[];
+  /** Detail van ALLE openstaande werkbonnen/tijdregistraties van de week op dit project — voor het overzicht vóór ondertekenen. */
+  entries: PendingWeekEntrySummary[];
 }
 
 /** Body van POST /weekly-approvals/:projectId/sign — zelfde velden als het bestaande /work-orders/:id/sign, nu voor de hele lopende week. */

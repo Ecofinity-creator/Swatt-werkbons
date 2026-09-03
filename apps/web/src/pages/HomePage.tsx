@@ -46,7 +46,7 @@ export function HomePage() {
 
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
-      <header className="mb-8 flex flex-col items-start gap-3">
+      <header className="mb-8 flex flex-col items-center gap-3">
         {/* Volledige lockup (icoon + "UURIVO"-woordmerk) zoals op het loginscherm,
             i.p.v. enkel het compacte icoon — zelfde goudomrande lichte kaart
             nodig voor zichtbaarheid (donkere tekst/pictogram op transparante

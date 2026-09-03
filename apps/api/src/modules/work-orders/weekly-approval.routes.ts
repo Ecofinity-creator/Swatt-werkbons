@@ -32,8 +32,20 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
     async (request): Promise<PendingWeekResponseBody> => {
       const employeeId = requireEmployeeId(request);
       const query = pendingWeekQuerySchema.parse(request.query);
-      const { weekStartDate, weekEndDate, workOrderIds } = await service.listPendingForEmployee(employeeId, query.projectId);
-      return { weekStartDate: weekStartDate.toISOString(), weekEndDate: weekEndDate.toISOString(), workOrderIds };
+      const { weekStartDate, weekEndDate, workOrderIds, entries } = await service.listPendingForEmployee(employeeId, query.projectId);
+      return {
+        weekStartDate: weekStartDate.toISOString(),
+        weekEndDate: weekEndDate.toISOString(),
+        workOrderIds,
+        entries: entries.map((entry) => ({
+          workOrderId: entry.workOrderId,
+          workOrderNumber: entry.workOrderNumber,
+          employeeDisplayName: entry.employeeDisplayName,
+          startedAt: entry.startedAt.toISOString(),
+          endedAt: entry.endedAt.toISOString(),
+          pausedSeconds: entry.pausedSeconds,
+        })),
+      };
     },
   );
 
