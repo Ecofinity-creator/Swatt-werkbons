@@ -32,14 +32,18 @@ export class AuditLogService {
           action: entry.action,
           entityType: entry.entityType,
           entityId: entry.entityId,
-          // Cast naar Prisma's eigen JSON-inputtype: `Record<string, unknown>`
-          // is structureel niet identiek aan `Prisma.InputJsonValue` (dat
-          // enkel gegarandeerd JSON-serialiseerbare waarden toelaat) — met
-          // `exactOptionalPropertyTypes: true` accepteert TS dat verschil
-          // niet stilzwijgend. Veilig hier: elke aanroeper geeft effectief
-          // platte, JSON-serialiseerbare metadata mee (strings/getallen/
-          // booleans/geneste objecten), nooit functies/Dates/class-instanties.
-          metadata: (entry.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
+          // `exactOptionalPropertyTypes: true` verbiedt een sleutel expliciet
+          // op `undefined` te zetten voor een optioneel Prisma-inputveld (dat
+          // is iets anders dan de sleutel gewoon weglaten) — vandaar de
+          // conditionele spread i.p.v. `metadata: entry.metadata ?? undefined`
+          // (zelfde patroon als elders in deze codebase, bv.
+          // company-settings.service.ts se toelichting bij optionele velden).
+          // De cast naar `Prisma.InputJsonValue` blijft nodig omdat
+          // `Record<string, unknown>` structureel niet identiek is aan dat
+          // type (dat enkel gegarandeerd JSON-serialiseerbare waarden
+          // toelaat) — veilig hier, elke aanroeper geeft effectief platte,
+          // JSON-serialiseerbare metadata mee.
+          ...(entry.metadata !== undefined ? { metadata: entry.metadata as Prisma.InputJsonValue } : {}),
         },
       });
     } catch (err) {
