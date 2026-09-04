@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 
 /**
  * Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
@@ -32,7 +32,14 @@ export class AuditLogService {
           action: entry.action,
           entityType: entry.entityType,
           entityId: entry.entityId,
-          metadata: entry.metadata ?? undefined,
+          // Cast naar Prisma's eigen JSON-inputtype: `Record<string, unknown>`
+          // is structureel niet identiek aan `Prisma.InputJsonValue` (dat
+          // enkel gegarandeerd JSON-serialiseerbare waarden toelaat) — met
+          // `exactOptionalPropertyTypes: true` accepteert TS dat verschil
+          // niet stilzwijgend. Veilig hier: elke aanroeper geeft effectief
+          // platte, JSON-serialiseerbare metadata mee (strings/getallen/
+          // booleans/geneste objecten), nooit functies/Dates/class-instanties.
+          metadata: (entry.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
         },
       });
     } catch (err) {
