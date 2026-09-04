@@ -111,10 +111,14 @@ export interface WorkOrderRecord {
   /** Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.customerEmailSentAt/reminderSentAt in schema.prisma. */
   customerEmailSentAt: Date | null;
   reminderSentAt: Date | null;
+  /** Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet enkel op de factuur" — Phase 12, deel D. Bevroren bij ondertekenen (WorkOrderSignatureService/WeeklyApprovalService), `null` zolang niet ondertekend of geen km-tarief ingesteld. */
+  kmAmountCents: number | null;
   project: {
     name: string;
     projectNumber: string | null;
     address: string | null;
+    /** Zie de toelichting bij WorkOrder.kmAmountCents hierboven — de rijafstand zelf (één richting), om op de PDF te kunnen tonen hoeveel km er precies verrekend is. */
+    kmDistanceOneWayMeters: number | null;
     /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
     signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
     customer: { name: string; email: string | null; address: string | null; vatNumber: string | null };

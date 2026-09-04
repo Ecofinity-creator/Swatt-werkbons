@@ -1,0 +1,105 @@
+From 31edf5da5544da8a8ed811b0e18a24cb038be91f Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Fri, 4 Sep 2026 06:44:18 +0000
+Subject: [PATCH] =?UTF-8?q?Fix:=20CI-typecheckfout=20in=20PayrollService.t?=
+ =?UTF-8?q?oBatchRecord()=20=E2=80=94=20parametertype=20rechtstreeks=20van?=
+ =?UTF-8?q?=20de=20Prisma-query=20afgeleid=20i.p.v.=20handgeschreven?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+CI (met een echte, verse Prisma-client) meldde 4 typefouten: een waarde met
+een volledige, geneste Employee-rij (id/createdAt/userId/updatedAt/
+displayName/phone/defaultHourlyRateCents/payrollRateCents/employmentType)
+bleek niet toewijsbaar aan toBatchRecord()'s handgeschreven parametertype,
+dat enkel `employee: { displayName: string }` verwachtte.
+
+Root cause: WITH_LINES_DETAILS gebruikt `employee: true` (een volledige
+Prisma-include, geen `select`) — de effectieve queryresultaten bevatten dus
+altijd de VOLLEDIGE Employee-rij, niet enkel displayName. Het handgeschreven
+parametertype van toBatchRecord() weerspiegelde dat niet correct. Dit werd
+in de sandbox nooit opgemerkt: die kan nooit een verse Prisma-client
+genereren (bekende, herhaaldelijk in dit project tegengekomen beperking),
+waardoor elke aanroep die op de exacte vorm van een gegenereerd Prisma-type
+steunt, onopgemerkt blijft tot een echte CI-run.
+
+Fix: toBatchRecord() se parametertype is nu
+`Prisma.PayrollBatchGetPayload<typeof WITH_LINES_DETAILS>` — Prisma's eigen,
+officieel aanbevolen patroon om het exacte TypeScript-type van een
+querybresultaat af te leiden in plaats van het handmatig na te tekenen. Dit
+maakt een mismatch tussen de query en het typebeeld ervan structureel
+onmogelijk: het type volgt voortaan automatisch mee zodra WITH_LINES_DETAILS
+ooit wijzigt.
+
+Belangrijk gevonden tijdens dit onderzoek: hetzelfde risicopatroon
+(handgeschreven `employee: { displayName: string }`/`customer: { name:
+string }`-achtige types naast een ECHTE volledige `include: { employee:
+true }`) komt ook voor in minstens work-order.service.ts,
+time-entries/time-entry.service.ts, invoice-batches/invoice-batch.service.ts
+en projects/project.routes.ts. Deze zijn NIET in deze fix meegenomen (bewust
+beperkt tot de effectief gerapporteerde CI-fout) — aanbevolen als apart,
+gericht vervolgtraject, want elk van deze kan op dezelfde manier pas in een
+latere CI-run aan het licht komen.
+
+Verificatie: lint schoon, bestaande payroll-tests (11) slagen nog steeds in
+de sandbox (geen regressie in wat wél lokaal verifieerbaar is) — de fix zelf
+kan wegens de sandboxbeperking niet lokaal tot op typecheck-niveau bevestigd
+worden, enkel via de eerstvolgende CI-run.
+---
+ .../src/modules/payroll/payroll.service.ts    | 40 +++++++------------
+ 1 file changed, 15 insertions(+), 25 deletions(-)
+
+diff --git a/apps/api/src/modules/payroll/payroll.service.ts b/apps/api/src/modules/payroll/payroll.service.ts
+index 39d101b..bed97e3 100644
+--- a/apps/api/src/modules/payroll/payroll.service.ts
++++ b/apps/api/src/modules/payroll/payroll.service.ts
+@@ -307,31 +307,21 @@ function computeLinesForEmployee(entries: PayableTimeEntryRow[]): ComputedLine[]
+   return lines;
+ }
+ 
+-function toBatchRecord(batch: {
+-  id: string;
+-  employeeId: string;
+-  employee: { displayName: string };
+-  periodLabel: string;
+-  status: string;
+-  totalAmountCents: number;
+-  createdAt: Date;
+-  closedAt: Date | null;
+-  lines: Array<{
+-    id: string;
+-    timeEntryId: string;
+-    normalHours: Prisma.Decimal | number;
+-    overtimeHours: Prisma.Decimal | number;
+-    premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-    amountCents: number;
+-    timeEntry: {
+-      project: { name: string };
+-      startedAt: Date;
+-      endedAt: Date | null;
+-      pausedSeconds: number;
+-      workOrderLink: { workOrder: { workOrderNumber: string } } | null;
+-    };
+-  }>;
+-}): PayrollBatchRecord {
++/**
++ * Vertaalt een ruwe Prisma-rij naar het publiek record-type. Het
++ * parametertype wordt bewust rechtstreeks van de Prisma-query zelf afgeleid
++ * (`Prisma.PayrollBatchGetPayload<typeof WITH_LINES_DETAILS>` — het officieel
++ * door Prisma aanbevolen patroon voor exact dit scenario) in plaats van hier
++ * een eigen, handgeschreven kopie van die vorm te onderhouden. Dat
++ * handgeschreven type (bv. `employee: { displayName: string }` i.p.v. de
++ * werkelijke, volledige Employee-rij die `include: { employee: true }`
++ * effectief teruggeeft) leek in de sandbox te werken — de hier nooit vers te
++ * genereren Prisma-client verborg de mismatch — maar faalde in CI, waar wél
++ * een echte, volledige client gegenereerd wordt. Dit patroon maakt zo'n
++ * mismatch structureel onmogelijk: het type volgt automatisch mee zodra
++ * WITH_LINES_DETAILS ooit wijzigt.
++ */
++function toBatchRecord(batch: Prisma.PayrollBatchGetPayload<typeof WITH_LINES_DETAILS>): PayrollBatchRecord {
+   return {
+     id: batch.id,
+     employeeId: batch.employeeId,
+-- 
+2.43.0
+

@@ -1,0 +1,246 @@
+diff --git a/apps/api/src/modules/work-orders/work-order-pdf-document.ts b/apps/api/src/modules/work-orders/work-order-pdf-document.ts
+index 170eb11..6db1edd 100644
+--- a/apps/api/src/modules/work-orders/work-order-pdf-document.ts
++++ b/apps/api/src/modules/work-orders/work-order-pdf-document.ts
+@@ -33,14 +33,14 @@ import { createElement as h } from 'react';
+ type ReactPdfModule = typeof import('@react-pdf/renderer', { with: { 'resolution-mode': 'import' } });
+ 
+ let reactPdfModulePromise: Promise<ReactPdfModule> | null = null;
+-function loadReactPdf(): Promise<ReactPdfModule> {
++export function loadReactPdf(): Promise<ReactPdfModule> {
+   if (!reactPdfModulePromise) {
+     reactPdfModulePromise = import('@react-pdf/renderer');
+   }
+   return reactPdfModulePromise;
+ }
+ 
+-interface PdfKit {
++export interface PdfKit {
+   View: ReactPdfModule['View'];
+   Text: ReactPdfModule['Text'];
+   Image: ReactPdfModule['Image'];
+@@ -132,6 +132,9 @@ export interface WorkOrderPdfData {
+   projectNumber: string | null;
+   projectAddress: string | null;
+   description: string | null;
++  /** Op vraag (4/9/2026) — zie de toelichting bij work-order-pdf.service.ts se buildPdfData(). `null` = km-vergoeding niet van toepassing, toont dan geen aparte regel. */
++  kmAmountCents: number | null;
++  kmDistanceOneWayMeters: number | null;
+   timeEntries: WorkOrderPdfTimeEntryData[];
+   photos: WorkOrderPdfPhotoData[];
+   signature: {
+@@ -285,9 +288,37 @@ function buildHoursTable({ View, Text }: PdfKit, data: WorkOrderPdfData) {
+         h(Text, { style: styles.totalValue }, formatHm(totalSeconds)),
+       ),
+     ),
++    buildKmCompensation({ View, Text }, data),
+   );
+ }
+ 
++/**
++ * Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet enkel op
++ * de factuur" — voorheen enkel zichtbaar als aparte "verplaatsingskosten"-
++ * regel op de Teamleader-conceptfactuur (TeamleaderInvoiceService), nooit op
++ * de PDF die de klant effectief ter plaatse ondertekent. Toont niets (geen
++ * lege/nul-regel) wanneer er geen km-vergoeding van toepassing is. Bewust
++ * geëxporteerd (i.p.v. lokaal in buildHoursTable() gehouden) zodat dit
++ * rechtstreeks, zonder een volledige PDF te moeten renderen/parsen, getest
++ * kan worden — zie test/work-order-pdf-document.test.ts.
++ */
++export function buildKmCompensation({ View, Text }: Pick<PdfKit, 'View' | 'Text'>, data: WorkOrderPdfData) {
++  if (!data.kmAmountCents || data.kmDistanceOneWayMeters == null) {
++    return null;
++  }
++  const roundTripKm = Math.round((data.kmDistanceOneWayMeters * 2) / 1000);
++  return h(
++    View,
++    { style: styles.tableTotalRow },
++    h(Text, { style: styles.totalLabel }, `Verplaatsingskosten (${roundTripKm} km heen-terug)`),
++    h(Text, { style: styles.totalValue }, formatEuro(data.kmAmountCents)),
++  );
++}
++
++function formatEuro(cents: number): string {
++  return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
++}
++
+ function buildPhotos({ View, Text, Image }: PdfKit, photos: WorkOrderPdfPhotoData[]) {
+   return h(
+     View,
+diff --git a/apps/api/src/modules/work-orders/work-order-pdf.service.ts b/apps/api/src/modules/work-orders/work-order-pdf.service.ts
+index 9fa5cd1..ab5a393 100644
+--- a/apps/api/src/modules/work-orders/work-order-pdf.service.ts
++++ b/apps/api/src/modules/work-orders/work-order-pdf.service.ts
+@@ -113,6 +113,14 @@ export class WorkOrderPdfService {
+       projectNumber: workOrder.project.projectNumber,
+       projectAddress: workOrder.project.address ?? workOrder.project.customer.address,
+       description: workOrder.description,
++      // Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet
++      // enkel op de factuur" — zie de toelichting bij
++      // computeKmAmountCents()/kmAmountCents in distance.service.ts en
++      // schema.prisma. Beide `null` zolang er geen km-tarief ingesteld is
++      // (CompanySettings.kmRateCents) — de PDF-sectie zelf toont dan
++      // gewoon niets, geen foutieve "€ 0,00"-regel.
++      kmAmountCents: workOrder.kmAmountCents,
++      kmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
+       timeEntries: workOrder.timeEntries.map((link) => ({
+         employeeDisplayName: link.timeEntry.employee.displayName,
+         startedAt: link.timeEntry.startedAt,
+diff --git a/apps/api/src/modules/work-orders/work-order.service.ts b/apps/api/src/modules/work-orders/work-order.service.ts
+index a35e2e0..408a976 100644
+--- a/apps/api/src/modules/work-orders/work-order.service.ts
++++ b/apps/api/src/modules/work-orders/work-order.service.ts
+@@ -111,10 +111,14 @@ export interface WorkOrderRecord {
+   /** Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.customerEmailSentAt/reminderSentAt in schema.prisma. */
+   customerEmailSentAt: Date | null;
+   reminderSentAt: Date | null;
++  /** Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet enkel op de factuur" — Phase 12, deel D. Bevroren bij ondertekenen (WorkOrderSignatureService/WeeklyApprovalService), `null` zolang niet ondertekend of geen km-tarief ingesteld. */
++  kmAmountCents: number | null;
+   project: {
+     name: string;
+     projectNumber: string | null;
+     address: string | null;
++    /** Zie de toelichting bij WorkOrder.kmAmountCents hierboven — de rijafstand zelf (één richting), om op de PDF te kunnen tonen hoeveel km er precies verrekend is. */
++    kmDistanceOneWayMeters: number | null;
+     /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
+     signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+     customer: { name: string; email: string | null; address: string | null; vatNumber: string | null };
+diff --git a/apps/api/test/work-order-pdf-document.test.ts b/apps/api/test/work-order-pdf-document.test.ts
+new file mode 100644
+index 0000000..2af5cec
+--- /dev/null
++++ b/apps/api/test/work-order-pdf-document.test.ts
+@@ -0,0 +1,76 @@
++import { describe, expect, it } from 'vitest';
++import { buildKmCompensation, loadReactPdf } from '../src/modules/work-orders/work-order-pdf-document';
++import type { WorkOrderPdfData } from '../src/modules/work-orders/work-order-pdf-document';
++
++/**
++ * Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet enkel op
++ * de factuur". Test rechtstreeks op de teruggegeven React-elementenboom
++ * (i.p.v. een volledige PDF te renderen en de bytes te moeten parsen, waar
++ * geen library voor beschikbaar is in dit project) — voldoende om te
++ * bewijzen dat de juiste tekst effectief in de boom terechtkomt.
++ */
++
++const BASE_DATA: WorkOrderPdfData = {
++  workOrderNumber: 'WB-2026-000123',
++  customerName: 'Janssens BV',
++  projectName: 'Onderhoud warmtepomp',
++  projectNumber: 'PRO-1',
++  projectAddress: 'Kerkstraat 1, 9000 Gent',
++  description: null,
++  kmAmountCents: null,
++  kmDistanceOneWayMeters: null,
++  timeEntries: [],
++  photos: [],
++  signature: {
++    signerName: 'Jan Janssens',
++    signerFunction: null,
++    signedAt: new Date('2026-08-24T10:00:00Z'),
++    image: { data: Buffer.from([]), mimeType: 'image/png' },
++  },
++  company: {
++    companyName: 'Uurivo',
++    addressLine: null,
++    vatNumber: null,
++    contactEmail: null,
++    contactPhone: null,
++    logo: null,
++    legalText: 'De klant bevestigt door ondertekening de hierboven vermelde uitgevoerde werkzaamheden.',
++  },
++};
++
++/** Doorzoekt de React-elementenboom recursief op alle tekstuele children. */
++function collectTexts(node: unknown): string[] {
++  if (node == null || typeof node !== 'object') return [];
++  const element = node as { props?: { children?: unknown } };
++  const children = element.props?.children;
++  if (typeof children === 'string') return [children];
++  if (Array.isArray(children)) return children.flatMap(collectTexts);
++  if (children != null && typeof children === 'object') return collectTexts(children);
++  return [];
++}
++
++describe('buildKmCompensation() — km-vergoeding op de werkbon-PDF', () => {
++  it('toont niets wanneer er geen km-vergoeding van toepassing is (kmAmountCents null)', async () => {
++    const { View, Text } = await loadReactPdf();
++    const element = buildKmCompensation({ View, Text }, BASE_DATA);
++    expect(element).toBeNull();
++  });
++
++  it('toont niets bij kmAmountCents = 0 (geen zinloze "€ 0,00"-regel)', async () => {
++    const { View, Text } = await loadReactPdf();
++    const element = buildKmCompensation({ View, Text }, { ...BASE_DATA, kmAmountCents: 0, kmDistanceOneWayMeters: 5000 });
++    expect(element).toBeNull();
++  });
++
++  it('toont de heen-terug-afstand en het correcte bedrag wanneer een km-vergoeding van toepassing is', async () => {
++    const { View, Text } = await loadReactPdf();
++    // 12.500m één richting -> 25km heen-terug; bedrag hier een representatief,
++    // al elders bevroren getal (via computeKmAmountCents() in distance.service.ts) — deze test controleert enkel de weergave, niet de berekening zelf.
++    const element = buildKmCompensation({ View, Text }, { ...BASE_DATA, kmAmountCents: 8750, kmDistanceOneWayMeters: 12_500 });
++
++    expect(element).not.toBeNull();
++    const texts = collectTexts(element);
++    expect(texts.some((text) => text.includes('25 km heen-terug'))).toBe(true);
++    expect(texts.some((text) => text.includes('87,50'))).toBe(true);
++  });
++});
+diff --git a/apps/api/test/work-order-pdf.service.test.ts b/apps/api/test/work-order-pdf.service.test.ts
+index af92073..420943f 100644
+--- a/apps/api/test/work-order-pdf.service.test.ts
++++ b/apps/api/test/work-order-pdf.service.test.ts
+@@ -32,10 +32,15 @@ function createFakeWorkOrder(overrides: Partial<Record<string, unknown>> = {}) {
+     pdfFileName: null,
+     pdfGeneratedAt: null,
+     pdfError: null,
++    // Op vraag (4/9/2026) — expliciet null i.p.v. weggelaten, zodat deze
++    // fixture realistisch overeenkomt met een echte Prisma-rij (die geeft
++    // altijd `null` terug voor een lege kolom, nooit `undefined`).
++    kmAmountCents: null,
+     project: {
+       name: 'Onderhoud warmtepomp',
+       projectNumber: 'PRO-42',
+       address: 'Kerkstraat 1, 9000 Gent',
++      kmDistanceOneWayMeters: null,
+       customer: { name: 'Janssens BV', address: 'Kerkstraat 1, 9000 Gent', vatNumber: 'BE0123456789' },
+     },
+     createdByEmployee: { displayName: 'Peter' },
+@@ -127,6 +132,36 @@ describe('WorkOrderPdfService.generate()', () => {
+     expect(savedBuffer.subarray(0, 4).toString()).toBe('%PDF');
+   });
+ 
++  it('neemt de km-vergoeding mee in de gegenereerde PDF wanneer die van toepassing is (4/9/2026)', async () => {
++    const fakeWorkOrder = createFakeWorkOrder({
++      kmAmountCents: 8750,
++      project: {
++        name: 'Onderhoud warmtepomp',
++        projectNumber: 'PRO-42',
++        address: 'Kerkstraat 1, 9000 Gent',
++        kmDistanceOneWayMeters: 12_500,
++        customer: { name: 'Janssens BV', address: 'Kerkstraat 1, 9000 Gent', vatNumber: 'BE0123456789' },
++      },
++    });
++    const workOrderService = { get: vi.fn().mockResolvedValue(fakeWorkOrder) };
++    const storage = createFakeStorage();
++    const companySettings = createFakeCompanySettings();
++    const update = vi.fn().mockResolvedValue({});
++    const prisma = { workOrder: { update } } as never;
++
++    const service = new WorkOrderPdfService(prisma, storage as never, workOrderService as never, companySettings as never);
++    await service.generate('wo-1');
++
++    // Enkel bevestigen dat de PDF-generatie zelf niet faalt met deze extra
++    // velden (het effectieve tekstuele resultaat wordt gedetailleerd getest
++    // in work-order-pdf-document.test.ts, op de element-boom i.p.v. de PDF-
++    // bytes zelf).
++    const finalCall = update.mock.calls[1]?.[0];
++    expect(finalCall.data.pdfStatus).toBe('PDF_READY');
++    const [savedBuffer] = storage.save.mock.calls[0] as [Buffer, string];
++    expect(savedBuffer.subarray(0, 4).toString()).toBe('%PDF');
++  });
++
+   it('gooit notSignedForPdf() voor een DRAFT-werkbon, zonder de werkbon aan te raken', async () => {
+     const fakeWorkOrder = createFakeWorkOrder({ status: 'DRAFT', signature: null });
+     const workOrderService = { get: vi.fn().mockResolvedValue(fakeWorkOrder) };

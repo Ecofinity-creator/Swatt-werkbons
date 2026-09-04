@@ -33,14 +33,14 @@ import { createElement as h } from 'react';
 type ReactPdfModule = typeof import('@react-pdf/renderer', { with: { 'resolution-mode': 'import' } });
 
 let reactPdfModulePromise: Promise<ReactPdfModule> | null = null;
-function loadReactPdf(): Promise<ReactPdfModule> {
+export function loadReactPdf(): Promise<ReactPdfModule> {
   if (!reactPdfModulePromise) {
     reactPdfModulePromise = import('@react-pdf/renderer');
   }
   return reactPdfModulePromise;
 }
 
-interface PdfKit {
+export interface PdfKit {
   View: ReactPdfModule['View'];
   Text: ReactPdfModule['Text'];
   Image: ReactPdfModule['Image'];
@@ -132,6 +132,9 @@ export interface WorkOrderPdfData {
   projectNumber: string | null;
   projectAddress: string | null;
   description: string | null;
+  /** Op vraag (4/9/2026) — zie de toelichting bij work-order-pdf.service.ts se buildPdfData(). `null` = km-vergoeding niet van toepassing, toont dan geen aparte regel. */
+  kmAmountCents: number | null;
+  kmDistanceOneWayMeters: number | null;
   timeEntries: WorkOrderPdfTimeEntryData[];
   photos: WorkOrderPdfPhotoData[];
   signature: {
@@ -285,7 +288,35 @@ function buildHoursTable({ View, Text }: PdfKit, data: WorkOrderPdfData) {
         h(Text, { style: styles.totalValue }, formatHm(totalSeconds)),
       ),
     ),
+    buildKmCompensation({ View, Text }, data),
   );
+}
+
+/**
+ * Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet enkel op
+ * de factuur" — voorheen enkel zichtbaar als aparte "verplaatsingskosten"-
+ * regel op de Teamleader-conceptfactuur (TeamleaderInvoiceService), nooit op
+ * de PDF die de klant effectief ter plaatse ondertekent. Toont niets (geen
+ * lege/nul-regel) wanneer er geen km-vergoeding van toepassing is. Bewust
+ * geëxporteerd (i.p.v. lokaal in buildHoursTable() gehouden) zodat dit
+ * rechtstreeks, zonder een volledige PDF te moeten renderen/parsen, getest
+ * kan worden — zie test/work-order-pdf-document.test.ts.
+ */
+export function buildKmCompensation({ View, Text }: Pick<PdfKit, 'View' | 'Text'>, data: WorkOrderPdfData) {
+  if (!data.kmAmountCents || data.kmDistanceOneWayMeters == null) {
+    return null;
+  }
+  const roundTripKm = Math.round((data.kmDistanceOneWayMeters * 2) / 1000);
+  return h(
+    View,
+    { style: styles.tableTotalRow },
+    h(Text, { style: styles.totalLabel }, `Verplaatsingskosten (${roundTripKm} km heen-terug)`),
+    h(Text, { style: styles.totalValue }, formatEuro(data.kmAmountCents)),
+  );
+}
+
+function formatEuro(cents: number): string {
+  return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function buildPhotos({ View, Text, Image }: PdfKit, photos: WorkOrderPdfPhotoData[]) {

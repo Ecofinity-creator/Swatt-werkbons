@@ -113,6 +113,14 @@ export class WorkOrderPdfService {
       projectNumber: workOrder.project.projectNumber,
       projectAddress: workOrder.project.address ?? workOrder.project.customer.address,
       description: workOrder.description,
+      // Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet
+      // enkel op de factuur" — zie de toelichting bij
+      // computeKmAmountCents()/kmAmountCents in distance.service.ts en
+      // schema.prisma. Beide `null` zolang er geen km-tarief ingesteld is
+      // (CompanySettings.kmRateCents) — de PDF-sectie zelf toont dan
+      // gewoon niets, geen foutieve "€ 0,00"-regel.
+      kmAmountCents: workOrder.kmAmountCents,
+      kmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
       timeEntries: workOrder.timeEntries.map((link) => ({
         employeeDisplayName: link.timeEntry.employee.displayName,
         startedAt: link.timeEntry.startedAt,

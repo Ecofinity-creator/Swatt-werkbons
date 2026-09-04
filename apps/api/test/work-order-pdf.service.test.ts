@@ -32,10 +32,15 @@ function createFakeWorkOrder(overrides: Partial<Record<string, unknown>> = {}) {
     pdfFileName: null,
     pdfGeneratedAt: null,
     pdfError: null,
+    // Op vraag (4/9/2026) — expliciet null i.p.v. weggelaten, zodat deze
+    // fixture realistisch overeenkomt met een echte Prisma-rij (die geeft
+    // altijd `null` terug voor een lege kolom, nooit `undefined`).
+    kmAmountCents: null,
     project: {
       name: 'Onderhoud warmtepomp',
       projectNumber: 'PRO-42',
       address: 'Kerkstraat 1, 9000 Gent',
+      kmDistanceOneWayMeters: null,
       customer: { name: 'Janssens BV', address: 'Kerkstraat 1, 9000 Gent', vatNumber: 'BE0123456789' },
     },
     createdByEmployee: { displayName: 'Peter' },
@@ -124,6 +129,36 @@ describe('WorkOrderPdfService.generate()', () => {
     expect(storage.save).toHaveBeenCalledTimes(1);
     const [savedBuffer, savedMimeType] = storage.save.mock.calls[0] as [Buffer, string];
     expect(savedMimeType).toBe('application/pdf');
+    expect(savedBuffer.subarray(0, 4).toString()).toBe('%PDF');
+  });
+
+  it('neemt de km-vergoeding mee in de gegenereerde PDF wanneer die van toepassing is (4/9/2026)', async () => {
+    const fakeWorkOrder = createFakeWorkOrder({
+      kmAmountCents: 8750,
+      project: {
+        name: 'Onderhoud warmtepomp',
+        projectNumber: 'PRO-42',
+        address: 'Kerkstraat 1, 9000 Gent',
+        kmDistanceOneWayMeters: 12_500,
+        customer: { name: 'Janssens BV', address: 'Kerkstraat 1, 9000 Gent', vatNumber: 'BE0123456789' },
+      },
+    });
+    const workOrderService = { get: vi.fn().mockResolvedValue(fakeWorkOrder) };
+    const storage = createFakeStorage();
+    const companySettings = createFakeCompanySettings();
+    const update = vi.fn().mockResolvedValue({});
+    const prisma = { workOrder: { update } } as never;
+
+    const service = new WorkOrderPdfService(prisma, storage as never, workOrderService as never, companySettings as never);
+    await service.generate('wo-1');
+
+    // Enkel bevestigen dat de PDF-generatie zelf niet faalt met deze extra
+    // velden (het effectieve tekstuele resultaat wordt gedetailleerd getest
+    // in work-order-pdf-document.test.ts, op de element-boom i.p.v. de PDF-
+    // bytes zelf).
+    const finalCall = update.mock.calls[1]?.[0];
+    expect(finalCall.data.pdfStatus).toBe('PDF_READY');
+    const [savedBuffer] = storage.save.mock.calls[0] as [Buffer, string];
     expect(savedBuffer.subarray(0, 4).toString()).toBe('%PDF');
   });
 
