@@ -6,6 +6,7 @@ import type {
   PayrollBatchSummary,
 } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthErrors } from '../../errors';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
 import { requireRole } from '../rbac/rbac.middleware';
@@ -26,6 +27,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
   const service = new PayrollService(app.prisma);
   const companySettings = new CompanySettingsService(app.prisma);
   const storage: StorageService = new DatabaseStorageService(app.prisma);
+  const auditLogService = new AuditLogService(app.prisma);
 
   app.get(
     '/admin/payroll/payable',
@@ -57,6 +59,13 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
         throw AuthErrors.notAuthenticated();
       }
       const batch = await service.createBatch(body.employeeId, body.periodLabel, userId);
+      await auditLogService.record({
+        actorUserId: userId,
+        action: 'PAYROLL_BATCH_CREATED',
+        entityType: 'PayrollBatch',
+        entityId: batch.id,
+        metadata: { employeeDisplayName: batch.employeeDisplayName, periodLabel: batch.periodLabel, totalAmountCents: batch.totalAmountCents },
+      });
       reply.code(201);
       return { batch: toBatchSummary(batch) };
     },
@@ -68,6 +77,12 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
     async (request, reply) => {
       const params = payrollBatchIdParamsSchema.parse(request.params);
       await service.remove(params.id);
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'PAYROLL_BATCH_REMOVED',
+        entityType: 'PayrollBatch',
+        entityId: params.id,
+      });
       reply.code(204);
       return null;
     },

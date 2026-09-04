@@ -262,6 +262,10 @@ export class WeeklyApprovalService {
           // de PDF/sync-velden hierboven: het oude bevroren bedrag hoort niet
           // meer bij een geldige handtekening).
           kmAmountCents: null,
+          // Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.reminderSentAt
+          // in schema.prisma: een hernieuwde DRAFT-periode verdient een nieuwe
+          // herinnering als ze opnieuw te lang blijft liggen.
+          reminderSentAt: null,
         },
       }),
     ]);

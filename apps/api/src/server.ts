@@ -2,6 +2,8 @@ import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { buildApp } from './app';
 import { env } from './config/env';
+import { AuditLogService } from './modules/audit-log/audit-log.service';
+import { WorkOrderReminderService } from './modules/reminders/work-order-reminder.service';
 import { SYNC_QUEUE_NAME, type SyncQueueJobData } from './queue/queue';
 
 async function main(): Promise<void> {
@@ -24,6 +26,25 @@ async function main(): Promise<void> {
   void app.syncJobService.reconcilePendingJobs().catch((err: unknown) => {
     app.log.error({ err }, 'Herqueuen van openstaande syncjobs bij opstart is mislukt');
   });
+
+  // Op vraag (3/9/2026): "automatische herinnering bij een vergeten
+  // werkbon" — zie WorkOrderReminderService voor de volledige toelichting,
+  // waaronder waarom dit een in-process interval is i.p.v. een externe cron-
+  // dienst. Draait elk uur; de service zelf filtert op WORK_ORDER_REMINDER_
+  // THRESHOLD_HOURS en op reminderSentAt (dus geen dubbele mails per uur).
+  // Bewust ook één run meteen bij opstart (in plaats van pas na het eerste
+  // uur wachten), zelfde reden als reconcilePendingJobs() hierboven: een net
+  // heropgestarte service (na een deploy) mag geen achterstand extra laten
+  // oplopen.
+  const REMINDER_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+  const workOrderReminderService = new WorkOrderReminderService(app.prisma, app.emailService, new AuditLogService(app.prisma));
+  const runReminderCheck = () => {
+    void workOrderReminderService.sendPendingReminders(env.WORK_ORDER_REMINDER_THRESHOLD_HOURS).catch((err: unknown) => {
+      app.log.error({ err }, 'Versturen van werkbon-herinneringen is mislukt');
+    });
+  };
+  runReminderCheck();
+  const reminderInterval = setInterval(runReminderCheck, REMINDER_CHECK_INTERVAL_MS);
 
   // Demo-/testmodus (RUN_SYNC_WORKER_INLINE, zie config/env.ts): laat de
   // BullMQ-syncwerker meedraaien in dit proces i.p.v. als aparte
@@ -62,6 +83,7 @@ async function main(): Promise<void> {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, async () => {
       app.log.info(`${signal} ontvangen, server wordt afgesloten...`);
+      clearInterval(reminderInterval);
       await inlineWorker?.close();
       await inlineWorkerConnection?.quit().catch(() => {
         // Best effort — bij een reeds verbroken verbinding is er niets meer te sluiten.

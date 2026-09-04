@@ -24,6 +24,7 @@ import type {
   ListTeamleaderUsersResponseBody,
   ListUsersResponseBody,
   ListWorkOrderDraftsResponseBody,
+  ListWorkOrdersOverviewResponseBody,
   ListWorkOrderSyncIssuesResponseBody,
   LinkTeamleaderUserBody,
   LoginResponseBody,
@@ -32,7 +33,9 @@ import type {
   ProjectSyncResponseBody,
   CreateWorkOrderBody,
   ResendInviteResponseBody,
+  ListAuditLogResponseBody,
   RetryWorkOrderSyncResponseBody,
+  SendWorkOrderPdfResponseBody,
   SelectProjectMilestoneResponseBody,
   UpdateProjectInvoicingEnabledResponseBody,
   UpdateProjectOvertimeSettingsBody,
@@ -316,6 +319,21 @@ export const workOrdersApi = {
     request<ListWorkOrderDraftsResponseBody>(`/work-orders/drafts?projectId=${encodeURIComponent(projectId)}`, {
       method: 'GET',
     }),
+  /** Fase 11/sectie 20 — "Mijn werkbonnen": de eigen volledige geschiedenis. */
+  listMine: () => request<ListWorkOrdersOverviewResponseBody>('/work-orders/mine', { method: 'GET' }),
+  /** Sectie 20 — "Werkbonnenoverzicht" (SUPERVISOR+), met filters. */
+  listOverview: (filters: { status?: string; projectId?: string; employeeId?: string; signed?: boolean; teamleaderUploadStatus?: string; from?: string; to?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.status) params.set('status', filters.status);
+    if (filters.projectId) params.set('projectId', filters.projectId);
+    if (filters.employeeId) params.set('employeeId', filters.employeeId);
+    if (filters.signed !== undefined) params.set('signed', String(filters.signed));
+    if (filters.teamleaderUploadStatus) params.set('teamleaderUploadStatus', filters.teamleaderUploadStatus);
+    if (filters.from) params.set('from', filters.from);
+    if (filters.to) params.set('to', filters.to);
+    const query = params.toString();
+    return request<ListWorkOrdersOverviewResponseBody>(`/admin/work-orders${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
   get: (workOrderId: string) => request<WorkOrderResponseBody>(`/work-orders/${workOrderId}`, { method: 'GET' }),
   /** Phase 7 — verplichte klanthandtekening (sectie 10). Zet de werkbon DRAFT → SIGNED. */
   sign: (workOrderId: string, body: SignWorkOrderBody) =>
@@ -336,6 +354,21 @@ export const workOrdersApi = {
    */
   retrySync: (workOrderId: string) =>
     request<RetryWorkOrderSyncResponseBody>(`/work-orders/${workOrderId}/sync/retry`, { method: 'POST' }),
+  /** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen". */
+  sendToCustomer: (workOrderId: string) =>
+    request<SendWorkOrderPdfResponseBody>(`/work-orders/${workOrderId}/send-to-customer`, { method: 'POST' }),
+};
+
+/** Op vraag (3/9/2026): "auditlog-scherm". ADMIN-only, zie AuditLogPage.tsx. */
+export const auditLogApi = {
+  list: (filters: { entityType?: string; from?: string; to?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.entityType) params.set('entityType', filters.entityType);
+    if (filters.from) params.set('from', filters.from);
+    if (filters.to) params.set('to', filters.to);
+    const query = params.toString();
+    return request<ListAuditLogResponseBody>(`/admin/audit-log${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
 };
 
 /**

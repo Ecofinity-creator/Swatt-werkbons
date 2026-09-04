@@ -17,6 +17,9 @@ import { PayrollPage } from './pages/admin/PayrollPage';
 import { InvoicingPage } from './pages/admin/InvoicingPage';
 import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
 import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
+import { AuditLogPage } from './pages/admin/AuditLogPage';
+import { WorkOrdersOverviewPage } from './pages/admin/WorkOrdersOverviewPage';
+import { MyWorkOrdersPage } from './pages/MyWorkOrdersPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { UsersPage } from './pages/admin/UsersPage';
 
@@ -134,6 +137,30 @@ export function App() {
         element={
           <RequireAuth minimumRole="SUPERVISOR">
             <SyncIssuesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/auditlog"
+        element={
+          <RequireAuth minimumRole="ADMIN">
+            <AuditLogPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/werkbonnen"
+        element={
+          <RequireAuth minimumRole="SUPERVISOR">
+            <WorkOrdersOverviewPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/mijn-werkbonnen"
+        element={
+          <RequireAuth>
+            <MyWorkOrdersPage />
           </RequireAuth>
         }
       />

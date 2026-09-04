@@ -18,6 +18,23 @@ export const listWorkOrderDraftsQuerySchema = z.object({
 });
 
 /**
+ * Sectie 20: "Werkbonnenoverzicht" — alle filters optioneel. `signed` komt
+ * als de string "true"/"false" binnen (querystring), vandaar de transform.
+ */
+export const listWorkOrdersOverviewQuerySchema = z.object({
+  status: z.enum(['DRAFT', 'READY_FOR_SIGNATURE', 'SIGNED', 'SYNC_PENDING', 'SYNC_FAILED', 'READY_FOR_INVOICING', 'INVOICED']).optional(),
+  projectId: z.string().uuid().optional(),
+  employeeId: z.string().uuid().optional(),
+  signed: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === 'true')),
+  teamleaderUploadStatus: z.enum(['TEAMLEADER_UPLOAD_PENDING', 'TEAMLEADER_UPLOADED', 'TEAMLEADER_UPLOAD_FAILED']).optional(),
+  from: z.string().trim().min(1).optional(),
+  to: z.string().trim().min(1).optional(),
+});
+
+/**
  * Phase 6/7 — foto's en handtekening komen als base64 mee in de gewone JSON-
  * body (geen `multipart/form-data`) — zelfde reden als de rest van de app:
  * dit vermijdt een aparte Fastify-multipart-plugin en houdt de

@@ -718,6 +718,28 @@ export interface ListWorkOrderSyncIssuesResponseBody {
 }
 
 /**
+ * Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
+ * wanneer gewijzigd heeft". Zie AuditLog in schema.prisma voor de volledige
+ * toelichting bij het datamodel.
+ */
+export interface AuditLogEntrySummary {
+  id: string;
+  /** Naam van de medewerker (of anders het e-mailadres) die de actie uitvoerde — `null` bij een systeemactie (bv. de automatische herinnering). */
+  actorDisplayName: string | null;
+  /** Bv. "WORK_ORDER_SIGNED", "PAYROLL_BATCH_CREATED" — vrije, leesbare code. */
+  action: string;
+  entityType: string;
+  entityId: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+/** Response van GET /admin/audit-log. */
+export interface ListAuditLogResponseBody {
+  entries: AuditLogEntrySummary[];
+}
+
+/**
  * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
  * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — lichtgewicht
  * lijst-item, zie WorkOrderService.listDraftsForEmployeeOnProject().
@@ -730,9 +752,44 @@ export interface WorkOrderDraftSummary {
   totalSeconds: number;
 }
 
+/**
+ * Sectie 20/Fase 11: "Werkbonnenoverzicht" (backoffice) en "Mijn werkbonnen"
+ * (werknemer) — zie WorkOrderService.listForAdmin()/listForEmployee() voor
+ * de volledige toelichting.
+ */
+export interface WorkOrderOverviewItemSummary {
+  id: string;
+  workOrderNumber: string;
+  status: WorkOrderStatus;
+  createdAt: string;
+  projectId: string;
+  projectName: string;
+  projectNumber: string | null;
+  customerName: string;
+  createdByEmployeeDisplayName: string;
+  totalSeconds: number;
+  /** `null` zolang niet ondertekend (status DRAFT). */
+  signedAt: string | null;
+  teamleaderUploadStatus: WorkOrderTeamleaderUploadStatus;
+}
+
+/** Response van GET /work-orders/mine en GET /admin/work-orders. */
+export interface ListWorkOrdersOverviewResponseBody {
+  workOrders: WorkOrderOverviewItemSummary[];
+}
+
 /** Response van GET /work-orders/drafts?projectId=... */
 export interface ListWorkOrderDraftsResponseBody {
   workOrders: WorkOrderDraftSummary[];
+}
+
+/**
+ * Op vraag (3/9/2026): "PDF via een knop naar de klant sturen". Response van
+ * POST /work-orders/:id/send-to-customer.
+ */
+export interface SendWorkOrderPdfResponseBody {
+  sentAt: string;
+  customerEmail: string;
 }
 
 /**

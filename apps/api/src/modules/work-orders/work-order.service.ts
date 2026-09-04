@@ -19,6 +19,54 @@ const WITH_DETAILS = {
   },
 } as const;
 
+/**
+ * Lichtgewicht select voor de overzichtsschermen (listForAdmin()/
+ * listForEmployee() hieronder) — bewust GEEN foto's/handtekeningbestand,
+ * enkel wat nodig is voor een tabelrij + het aggregeren van totalSeconds.
+ */
+const LIST_ITEM_SELECT = {
+  id: true,
+  workOrderNumber: true,
+  status: true,
+  createdAt: true,
+  projectId: true,
+  teamleaderUploadStatus: true,
+  project: { select: { name: true, projectNumber: true, customer: { select: { name: true } } } },
+  createdByEmployee: { select: { displayName: true } },
+  signature: { select: { signedAt: true } },
+  timeEntries: { select: { timeEntry: { select: { startedAt: true, endedAt: true, pausedSeconds: true } } } },
+} as const;
+
+interface WorkOrderOverviewItemRow {
+  id: string;
+  workOrderNumber: string;
+  status: WorkOrderOverviewItemRecord['status'];
+  createdAt: Date;
+  projectId: string;
+  teamleaderUploadStatus: WorkOrderOverviewItemRecord['teamleaderUploadStatus'];
+  project: { name: string; projectNumber: string | null; customer: { name: string } };
+  createdByEmployee: { displayName: string };
+  signature: { signedAt: Date } | null;
+  timeEntries: Array<{ timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number } }>;
+}
+
+function toOverviewItemRecord(row: WorkOrderOverviewItemRow): WorkOrderOverviewItemRecord {
+  return {
+    id: row.id,
+    workOrderNumber: row.workOrderNumber,
+    status: row.status,
+    createdAt: row.createdAt,
+    projectId: row.projectId,
+    projectName: row.project.name,
+    projectNumber: row.project.projectNumber,
+    customerName: row.project.customer.name,
+    createdByEmployeeDisplayName: row.createdByEmployee.displayName,
+    totalSeconds: row.timeEntries.reduce((sum, link) => sum + computeWorkedSeconds(link.timeEntry), 0),
+    signedAt: row.signature?.signedAt ?? null,
+    teamleaderUploadStatus: row.teamleaderUploadStatus,
+  };
+}
+
 export interface WorkOrderPhotoRecord {
   id: string;
   category: string | null;
@@ -60,13 +108,16 @@ export interface WorkOrderRecord {
   teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING' | 'TEAMLEADER_UPLOADED' | 'TEAMLEADER_UPLOAD_FAILED';
   teamleaderUploadedAt: Date | null;
   teamleaderUploadError: string | null;
+  /** Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.customerEmailSentAt/reminderSentAt in schema.prisma. */
+  customerEmailSentAt: Date | null;
+  reminderSentAt: Date | null;
   project: {
     name: string;
     projectNumber: string | null;
     address: string | null;
     /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
     signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
-    customer: { name: string; address: string | null; vatNumber: string | null };
+    customer: { name: string; email: string | null; address: string | null; vatNumber: string | null };
   };
   createdByEmployee: { displayName: string };
   timeEntries: Array<{
@@ -127,6 +178,31 @@ export interface WorkOrderListItemRecord {
   totalSeconds: number;
 }
 
+export interface WorkOrderOverviewItemRecord {
+  id: string;
+  workOrderNumber: string;
+  status: 'DRAFT' | 'READY_FOR_SIGNATURE' | 'SIGNED' | 'SYNC_PENDING' | 'SYNC_FAILED' | 'READY_FOR_INVOICING' | 'INVOICED';
+  createdAt: Date;
+  projectId: string;
+  projectName: string;
+  projectNumber: string | null;
+  customerName: string;
+  createdByEmployeeDisplayName: string;
+  totalSeconds: number;
+  signedAt: Date | null;
+  teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING' | 'TEAMLEADER_UPLOADED' | 'TEAMLEADER_UPLOAD_FAILED';
+}
+
+export interface WorkOrderAdminListFilters {
+  status?: WorkOrderOverviewItemRecord['status'] | undefined;
+  projectId?: string | undefined;
+  employeeId?: string | undefined;
+  signed?: boolean | undefined;
+  teamleaderUploadStatus?: WorkOrderOverviewItemRecord['teamleaderUploadStatus'] | undefined;
+  from?: Date | undefined;
+  to?: Date | undefined;
+}
+
 export class WorkOrderService {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -136,6 +212,53 @@ export class WorkOrderService {
       throw WorkOrderErrors.notFound();
     }
     return workOrder;
+  }
+
+  /**
+   * Sectie 20 uit de oorspronkelijke projectbrief: "Werkbonnenoverzicht" —
+   * SUPERVISOR+, alle werkbonnen (niet beperkt tot één project of enkel
+   * DRAFT, in tegenstelling tot listDraftsForEmployeeOnProject()
+   * hieronder). Filters: datum, werknemer, project, status, ondertekend
+   * ja/nee, Teamleader-sync — exact de lijst uit sectie 20 (klant/
+   * facturatiestatus zitten al vervat in respectievelijk projectId
+   * (via het project) en status zelf (READY_FOR_INVOICING/INVOICED zijn
+   * WorkOrderStatus-waarden)).
+   */
+  async listForAdmin(filters: WorkOrderAdminListFilters): Promise<WorkOrderOverviewItemRecord[]> {
+    const rows = await this.prisma.workOrder.findMany({
+      where: {
+        ...(filters.status ? { status: filters.status } : {}),
+        ...(filters.projectId ? { projectId: filters.projectId } : {}),
+        ...(filters.employeeId
+          ? { OR: [{ createdByEmployeeId: filters.employeeId }, { timeEntries: { some: { timeEntry: { employeeId: filters.employeeId } } } }] }
+          : {}),
+        ...(filters.signed === true ? { NOT: { status: 'DRAFT' } } : {}),
+        ...(filters.signed === false ? { status: 'DRAFT' } : {}),
+        ...(filters.teamleaderUploadStatus ? { teamleaderUploadStatus: filters.teamleaderUploadStatus } : {}),
+        ...(filters.from || filters.to
+          ? { createdAt: { ...(filters.from ? { gte: filters.from } : {}), ...(filters.to ? { lte: filters.to } : {}) } }
+          : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      select: LIST_ITEM_SELECT,
+      take: 500,
+    });
+    return (rows as unknown as WorkOrderOverviewItemRow[]).map(toOverviewItemRecord);
+  }
+
+  /**
+   * Sectie 20/Fase 11: "Mijn werkbonnen" — de eigen volledige geschiedenis
+   * van een medewerker (alle statussen, niet enkel DRAFT zoals
+   * listDraftsForEmployeeOnProject()), over alle projecten heen.
+   */
+  async listForEmployee(employeeId: string): Promise<WorkOrderOverviewItemRecord[]> {
+    const rows = await this.prisma.workOrder.findMany({
+      where: { OR: [{ createdByEmployeeId: employeeId }, { timeEntries: { some: { timeEntry: { employeeId } } } }] },
+      orderBy: { createdAt: 'desc' },
+      select: LIST_ITEM_SELECT,
+      take: 200,
+    });
+    return (rows as unknown as WorkOrderOverviewItemRow[]).map(toOverviewItemRecord);
   }
 
   /**

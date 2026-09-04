@@ -75,6 +75,13 @@ export function HomePage() {
       </Link>
 
       <Link
+        to="/mijn-werkbonnen"
+        className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+      >
+        Mijn werkbonnen
+      </Link>
+
+      <Link
         to="/app-toegang"
         className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
       >
@@ -108,6 +115,15 @@ export function HomePage() {
         </Link>
       )}
 
+      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
+        <Link
+          to="/backoffice/werkbonnen"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Werkbonnenoverzicht
+        </Link>
+      )}
+
       {user.role === 'ADMIN' && (
         <Link
           to="/backoffice/facturatie"
@@ -132,6 +148,15 @@ export function HomePage() {
           className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
         >
           Personeelsuitbetaling
+        </Link>
+      )}
+
+      {user.role === 'ADMIN' && (
+        <Link
+          to="/backoffice/auditlog"
+          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+        >
+          Auditlog
         </Link>
       )}
 

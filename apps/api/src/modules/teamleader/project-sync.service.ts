@@ -70,11 +70,18 @@ interface AddressResponse {
   country: string;
 }
 
+/** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — geverifieerd via een erkende SDK-referentie (madeITBelgium/TeamLeader). */
+interface EmailResponse {
+  type: string;
+  email: string;
+}
+
 interface ContactInfoRow {
   id: string;
   first_name: string;
   last_name: string;
   primary_address: AddressResponse | null;
+  emails?: EmailResponse[];
 }
 
 interface CompanyInfoRow {
@@ -82,12 +89,14 @@ interface CompanyInfoRow {
   name: string;
   vat_number: string | null;
   primary_address: AddressResponse | null;
+  emails?: EmailResponse[];
 }
 
 interface CustomerDetails {
   name: string;
   vatNumber: string | null;
   address: string | null;
+  email: string | null;
 }
 
 export interface ProjectSyncResult {
@@ -182,6 +191,7 @@ export class ProjectSyncService {
             teamleaderType: ref.type,
             name: details.name,
             address: details.address,
+            email: details.email,
             vatNumber: details.vatNumber,
             isArchivedInTl: false,
             lastSyncedAt: new Date(),
@@ -190,6 +200,7 @@ export class ProjectSyncService {
             teamleaderType: ref.type,
             name: details.name,
             address: details.address,
+            email: details.email,
             vatNumber: details.vatNumber,
             isArchivedInTl: false,
             lastSyncedAt: new Date(),
@@ -286,6 +297,7 @@ export class ProjectSyncService {
         name: `${contact.first_name} ${contact.last_name}`.trim(),
         vatNumber: null,
         address: formatAddress(contact.primary_address),
+        email: extractPrimaryEmail(contact.emails),
       });
     }
     for (const company of companyRows) {
@@ -293,6 +305,7 @@ export class ProjectSyncService {
         name: company.name,
         vatNumber: company.vat_number,
         address: formatAddress(company.primary_address),
+        email: extractPrimaryEmail(company.emails),
       });
     }
     return result;
@@ -397,4 +410,11 @@ function formatAddress(address: AddressResponse | null): string | null {
   const secondLine = [address.postal_code, address.city].filter((part) => part && part.length > 0).join(' ');
   const formatted = [address.line_1, secondLine].filter((part) => part && part.length > 0).join(', ');
   return formatted.length > 0 ? formatted : null;
+}
+
+/** Voorkeur voor `type: "primary"`, anders gewoon de eerste — zelfde tolerante aanpak als formatAddress() hierboven. */
+function extractPrimaryEmail(emails: EmailResponse[] | undefined): string | null {
+  if (!emails || emails.length === 0) return null;
+  const primary = emails.find((entry) => entry.type === 'primary');
+  return (primary ?? emails[0])?.email ?? null;
 }

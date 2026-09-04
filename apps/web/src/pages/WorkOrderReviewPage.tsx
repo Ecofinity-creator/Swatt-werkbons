@@ -49,6 +49,11 @@ export function WorkOrderReviewPage() {
   const [isRegeneratingPdf, setIsRegeneratingPdf] = useState(false);
   const [regeneratePdfError, setRegeneratePdfError] = useState<string | null>(null);
 
+  // Op vraag (3/9/2026): "PDF via een knop naar de klant sturen".
+  const [isSendingToCustomer, setIsSendingToCustomer] = useState(false);
+  const [sendToCustomerError, setSendToCustomerError] = useState<string | null>(null);
+  const [sendToCustomerSentAt, setSendToCustomerSentAt] = useState<string | null>(null);
+
   const [isRetryingSync, setIsRetryingSync] = useState(false);
   const [retrySyncError, setRetrySyncError] = useState<string | null>(null);
 
@@ -192,6 +197,21 @@ export function WorkOrderReviewPage() {
     }
   }
 
+  /** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen". */
+  async function handleSendToCustomer() {
+    if (!workOrderId) return;
+    setSendToCustomerError(null);
+    setIsSendingToCustomer(true);
+    try {
+      const response = await workOrdersApi.sendToCustomer(workOrderId);
+      setSendToCustomerSentAt(response.sentAt);
+    } catch (err) {
+      setSendToCustomerError(err instanceof ApiRequestError ? err.message : 'Versturen naar de klant is mislukt.');
+    } finally {
+      setIsSendingToCustomer(false);
+    }
+  }
+
   /**
    * Phase 9 — sectie 13: handmatige "Opnieuw synchroniseren" (SUPERVISOR+,
    * zie SyncJobService.retry).
@@ -255,6 +275,10 @@ export function WorkOrderReviewPage() {
           isRegeneratingPdf={isRegeneratingPdf}
           regeneratePdfError={regeneratePdfError}
           onRegeneratePdf={() => void handleRegeneratePdf()}
+          isSendingToCustomer={isSendingToCustomer}
+          sendToCustomerError={sendToCustomerError}
+          sendToCustomerSentAt={sendToCustomerSentAt}
+          onSendToCustomer={() => void handleSendToCustomer()}
           isRetryingSync={isRetryingSync}
           retrySyncError={retrySyncError}
           onRetrySync={() => void handleRetrySync()}
@@ -613,6 +637,10 @@ function SignedWorkOrderView({
   isRegeneratingPdf,
   regeneratePdfError,
   onRegeneratePdf,
+  isSendingToCustomer,
+  sendToCustomerError,
+  sendToCustomerSentAt,
+  onSendToCustomer,
   isRetryingSync,
   retrySyncError,
   onRetrySync,
@@ -622,6 +650,10 @@ function SignedWorkOrderView({
   isRegeneratingPdf: boolean;
   regeneratePdfError: string | null;
   onRegeneratePdf: () => void;
+  isSendingToCustomer: boolean;
+  sendToCustomerError: string | null;
+  sendToCustomerSentAt: string | null;
+  onSendToCustomer: () => void;
   isRetryingSync: boolean;
   retrySyncError: string | null;
   onRetrySync: () => void;
@@ -655,6 +687,25 @@ function SignedWorkOrderView({
           >
             Download PDF
           </a>
+        )}
+
+        {workOrder.pdfStatus === 'PDF_READY' && (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={onSendToCustomer}
+              disabled={isSendingToCustomer}
+              className="rounded-lg border border-swatt-gold px-4 py-3 text-sm font-semibold text-swatt-gold disabled:opacity-60"
+            >
+              {isSendingToCustomer ? 'Bezig...' : 'Verstuur naar klant'}
+            </button>
+            {sendToCustomerSentAt && (
+              <p className="mt-2 text-sm text-emerald-300">
+                Verstuurd op {new Date(sendToCustomerSentAt).toLocaleString('nl-BE')}
+              </p>
+            )}
+            {sendToCustomerError && <p className="mt-2 text-sm text-red-300">{sendToCustomerError}</p>}
+          </div>
         )}
 
         {workOrder.pdfStatus === 'PDF_FAILED' && (

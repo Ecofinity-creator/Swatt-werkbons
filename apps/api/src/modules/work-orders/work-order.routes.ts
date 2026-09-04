@@ -2,16 +2,21 @@ import {
   roleAtLeast,
   type ListWorkOrderDraftsResponseBody,
   type ListWorkOrderSyncIssuesResponseBody,
+  type ListWorkOrdersOverviewResponseBody,
+  type SendWorkOrderPdfResponseBody,
+  type WorkOrderOverviewItemSummary,
   type WorkOrderPhotoSummary,
   type WorkOrderResponseBody,
   type WorkOrderSummary,
   type WorkOrderSyncIssueSummary,
 } from '@swatt/shared-types';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthErrors, WorkOrderErrors } from '../../errors';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
+import { requireRole } from '../rbac/rbac.middleware';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
-import type { WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
+import type { WorkOrderOverviewItemRecord, WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
 import { WorkOrderService, deriveTimeTrackingSyncError, deriveTimeTrackingSyncStatus } from './work-order.service';
 import { WorkOrderPdfService } from './work-order-pdf.service';
 import { WorkOrderPhotoService } from './work-order-photo.service';
@@ -20,6 +25,7 @@ import {
   addWorkOrderPhotoBodySchema,
   createWorkOrderBodySchema,
   listWorkOrderDraftsQuerySchema,
+  listWorkOrdersOverviewQuerySchema,
   signWorkOrderBodySchema,
   workOrderIdParamsSchema,
   workOrderPhotoParamsSchema,
@@ -40,6 +46,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
   const companySettingsService = new CompanySettingsService(app.prisma);
   const signatureService = new WorkOrderSignatureService(app.prisma, storage, companySettingsService);
   const pdfService = new WorkOrderPdfService(app.prisma, storage, service, companySettingsService);
+  const auditLogService = new AuditLogService(app.prisma);
 
   app.post('/work-orders', { preHandler: [app.authenticate] }, async (request, reply): Promise<WorkOrderResponseBody> => {
     const employeeId = requireEmployeeId(request);
@@ -72,6 +79,44 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
           totalSeconds: draft.totalSeconds,
         })),
       };
+    },
+  );
+
+  /**
+   * Fase 11/sectie 20: "Mijn werkbonnen" — de eigen volledige geschiedenis
+   * (alle statussen, alle projecten), i.p.v. enkel de openstaande DRAFT-
+   * werkbonnen van één project hierboven.
+   */
+  app.get(
+    '/work-orders/mine',
+    { preHandler: [app.authenticate] },
+    async (request): Promise<ListWorkOrdersOverviewResponseBody> => {
+      const employeeId = requireEmployeeId(request);
+      const workOrders = await service.listForEmployee(employeeId);
+      return { workOrders: workOrders.map(toOverviewSummary) };
+    },
+  );
+
+  /**
+   * Sectie 20: "Werkbonnenoverzicht" — SUPERVISOR+, alle werkbonnen met
+   * filters. Zie WorkOrderService.listForAdmin() voor de volledige
+   * toelichting bij de filterkeuzes.
+   */
+  app.get(
+    '/admin/work-orders',
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+    async (request): Promise<ListWorkOrdersOverviewResponseBody> => {
+      const query = listWorkOrdersOverviewQuerySchema.parse(request.query);
+      const workOrders = await service.listForAdmin({
+        status: query.status,
+        projectId: query.projectId,
+        employeeId: query.employeeId,
+        signed: query.signed,
+        teamleaderUploadStatus: query.teamleaderUploadStatus,
+        from: query.from ? new Date(query.from) : undefined,
+        to: query.to ? new Date(`${query.to}T23:59:59`) : undefined,
+      });
+      return { workOrders: workOrders.map(toOverviewSummary) };
     },
   );
 
@@ -135,6 +180,13 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
         requestedByUserId: userId,
         ipAddress: request.ip ?? null,
         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
+      });
+      await auditLogService.record({
+        actorUserId: userId,
+        action: 'WORK_ORDER_SIGNED',
+        entityType: 'WorkOrder',
+        entityId: params.id,
+        metadata: { signerName: body.signerName },
       });
 
       // Phase 8 — de PDF wordt automatisch gegenereerd meteen na ondertekenen
@@ -241,6 +293,81 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
     reply.header('Content-Disposition', `inline; filename="${workOrder.pdfFileName ?? 'werkbon.pdf'}"`);
     return reply.send(file.data);
   });
+
+  /**
+   * Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — bewust
+   * een expliciete actie (geen automatische verzending zodra de werkbon
+   * ondertekend is), zodat de installateur/supervisor zelf beslist wanneer.
+   * Zelfde toegangsregels als de PDF-download hierboven.
+   */
+  app.post(
+    '/work-orders/:id/send-to-customer',
+    { preHandler: [app.authenticate] },
+    async (request): Promise<SendWorkOrderPdfResponseBody> => {
+      const params = workOrderIdParamsSchema.parse(request.params);
+      const workOrder = await service.get(params.id);
+      requireWorkOrderAccess(request, workOrder);
+
+      if (workOrder.status !== 'SIGNED' || workOrder.pdfStatus !== 'PDF_READY' || !workOrder.pdfFileKey) {
+        throw WorkOrderErrors.notReadyToSendToCustomer();
+      }
+      const customerEmail = workOrder.project.customer.email;
+      if (!customerEmail) {
+        throw WorkOrderErrors.noCustomerEmail();
+      }
+
+      const file = await storage.read(workOrder.pdfFileKey);
+      await app.emailService.send({
+        to: customerEmail,
+        subject: `Werkbon ${workOrder.workOrderNumber} — ${workOrder.project.name}`,
+        html: buildCustomerPdfEmailHtml(workOrder),
+        attachments: [{ filename: workOrder.pdfFileName ?? `${workOrder.workOrderNumber}.pdf`, content: file.data.toString('base64') }],
+      });
+
+      const sentAt = new Date();
+      await app.prisma.workOrder.update({ where: { id: workOrder.id }, data: { customerEmailSentAt: sentAt } });
+      await auditLogService.record({
+        actorUserId: request.currentUser!.id,
+        action: 'WORK_ORDER_SENT_TO_CUSTOMER',
+        entityType: 'WorkOrder',
+        entityId: workOrder.id,
+        metadata: { workOrderNumber: workOrder.workOrderNumber, customerEmail },
+      });
+
+      return { sentAt: sentAt.toISOString(), customerEmail };
+    },
+  );
+}
+
+/** Eenvoudige, nette e-mailtekst — zelfde stijl als auth-emails.ts. */
+function buildCustomerPdfEmailHtml(workOrder: WorkOrderRecord): string {
+  return `
+    <p>Beste,</p>
+    <p>In bijlage vindt u de ondertekende werkbon <strong>${escapeHtml(workOrder.workOrderNumber)}</strong> voor project "${escapeHtml(workOrder.project.name)}".</p>
+    <p>Met vriendelijke groeten</p>
+  `;
+}
+
+/** Zelfde minimale HTML-escaping als auth-emails.ts (bewust geen dependency voor iets dat maar op 2 plekken gebeurt). */
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function toOverviewSummary(record: WorkOrderOverviewItemRecord): WorkOrderOverviewItemSummary {
+  return {
+    id: record.id,
+    workOrderNumber: record.workOrderNumber,
+    status: record.status,
+    createdAt: record.createdAt.toISOString(),
+    projectId: record.projectId,
+    projectName: record.projectName,
+    projectNumber: record.projectNumber,
+    customerName: record.customerName,
+    createdByEmployeeDisplayName: record.createdByEmployeeDisplayName,
+    totalSeconds: record.totalSeconds,
+    signedAt: record.signedAt ? record.signedAt.toISOString() : null,
+    teamleaderUploadStatus: record.teamleaderUploadStatus,
+  };
 }
 
 function requireEmployeeId(request: FastifyRequest): string {

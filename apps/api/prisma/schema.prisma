@@ -282,6 +282,9 @@ model User {
   /// Phase 12, deel B — weekgoedkeuringen die deze gebruiker ooit heeft aangevraagd (de uitvoerder die "Week aftekenen" koos).
   requestedWeeklyApprovals WeeklyApproval[]
 
+  /// Op vraag (3/9/2026) — zie AuditLog hieronder.
+  auditLogs AuditLog[]
+
   @@index([role])
   @@map("user")
 }
@@ -489,6 +492,12 @@ model Customer {
   teamleaderId   String  @unique @map("teamleader_id")
   teamleaderType String  @map("teamleader_type") // 'contact' | 'company'
   name           String
+  /// Werknemer vs. Onderaannemer-uitbreiding (3/9/2026): "PDF via een knop
+  /// naar de klant sturen". Opgehaald via het `emails`-veld van Teamleader
+  /// contacts.list/companies.list (array van {type, email} — geverifieerd
+  /// via een erkende SDK-referentie, zie project-sync.service.ts). `null`
+  /// zolang niet gesynchroniseerd of geen e-mailadres bij Teamleader gekend.
+  email          String?
   address        String?
   vatNumber      String? @map("vat_number")
   isArchivedInTl Boolean @default(false) @map("is_archived_in_tl")
@@ -849,6 +858,21 @@ model WorkOrder {
   /// wanneer km-vergoeding niet actief was op het moment van ondertekenen
   /// (geen tarief ingesteld, of afstand nog onbekend).
   kmAmountCents Int? @map("km_amount_cents")
+
+  /// Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — bewust
+  /// een expliciete actie (geen automatische verzending, zie
+  /// EmailErrors/de toelichting bij WorkOrderService.sendPdfToCustomer()).
+  /// `null` = nog niet (of nooit) naar de klant gestuurd.
+  customerEmailSentAt DateTime? @map("customer_email_sent_at") @db.Timestamptz
+
+  /// Op vraag (3/9/2026): "automatische herinnering bij een 'vergeten'
+  /// werkbon" — gezet zodra een herinneringsmail verstuurd is voor deze
+  /// (nog steeds DRAFT) werkbon, zodat de achtergrondtaak dezelfde werkbon
+  /// niet elke run opnieuw meldt. Wordt teruggezet op `null` zodra de
+  /// werkbon alsnog ondertekend wordt (zie WorkOrderReminderService) — een
+  /// hernieuwde DRAFT-periode (na heropenen, Phase 12 deel B) verdient een
+  /// nieuwe herinnering.
+  reminderSentAt DateTime? @map("reminder_sent_at") @db.Timestamptz
 
   @@index([projectId])
   @@index([status])
@@ -1259,4 +1283,40 @@ model PayrollBatchLine {
 
   @@index([payrollBatchId])
   @@map("payroll_batch_line")
+}
+
+/// Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
+/// wanneer gewijzigd heeft" — sectie 23/26 uit de oorspronkelijke projectbrief
+/// (nooit als apart model gebouwd; tot nu toe enkel impliciet via losse
+/// timestamps op verschillende tabellen). Bewust een generiek, lichtgewicht
+/// model (geen aparte tabel per entiteitstype) — `entityType`/`entityId` zijn
+/// vrije tekst, geen FK, want een AuditLog-rij moet blijven bestaan ook als de
+/// onderliggende entiteit later verwijderd wordt (bv. een verwijderde
+/// PayrollBatch). `metadata` is vrije JSON voor actie-specifieke details (bv.
+/// oude/nieuwe waarde) — bewust geen apart `oldValue`/`newValue`-kolommenpaar,
+/// dat zou voor sommige acties (bv. "werkbon ondertekend") geen betekenis
+/// hebben.
+///
+/// Fase 1 van dit model instrumenteert bewust enkel de hoogste-impact
+/// financiële/status-wijzigingen (ondertekenen, heropenen, personeels-/
+/// facturatiebatches, als-geëxporteerd markeren, gebruikersbeheer) — niet elke
+/// actie uit sectie 26 (bv. foto toevoegen/verwijderen, timer starten/
+/// pauzeren) is deze ronde geïnstrumenteerd; dat kan later incrementeel
+/// aangevuld worden zonder schema-wijziging.
+model AuditLog {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorUserId String? @map("actor_user_id") @db.Uuid
+  /// Bv. "WORK_ORDER_SIGNED", "PAYROLL_BATCH_CREATED" — vrije, leesbare code, geen enum (voorkomt een migratie bij elke nieuwe actie).
+  action     String
+  entityType String @map("entity_type")
+  entityId   String @map("entity_id")
+  /// Vrije JSON met actie-specifieke details (bv. { "employeeDisplayName": "...", "amountCents": 1234 }) — bewust nooit gevoelige tokens/wachtwoorden.
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  actorUser User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_log")
 }

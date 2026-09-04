@@ -10,6 +10,7 @@ import authRoutes from './modules/auth/auth.routes';
 import seedRoutes from './modules/admin/seed.routes';
 import companySettingsRoutes from './modules/company-settings/company-settings.routes';
 import customerRoutes from './modules/customers/customer.routes';
+import auditLogRoutes from './modules/audit-log/audit-log.routes';
 import hoursExportRoutes from './modules/hours-export/hours-export.routes';
 import invoiceBatchRoutes from './modules/invoice-batches/invoice-batch.routes';
 import payrollRoutes from './modules/payroll/payroll.routes';
@@ -139,6 +140,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(payrollRoutes);
   await app.register(weeklyApprovalRoutes);
   await app.register(hoursExportRoutes);
+  await app.register(auditLogRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 

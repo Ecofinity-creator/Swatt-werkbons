@@ -278,6 +278,20 @@ export const WorkOrderErrors = {
       'WORK_ORDER_NOT_SIGNED_FOR_SYNC',
       'Deze werkbon is nog niet ondertekend — er is nog niets om naar Teamleader te synchroniseren.',
     ),
+  /** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — enkel mogelijk op een ondertekende werkbon met een klaarstaande PDF. */
+  notReadyToSendToCustomer: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_NOT_READY_TO_SEND',
+      'Deze werkbon moet eerst ondertekend zijn en een klaarstaande PDF hebben vóór je ze naar de klant kan sturen.',
+    ),
+  /** De klant heeft geen e-mailadres bij Teamleader — kan enkel opgelost worden door het daar in te vullen en opnieuw te synchroniseren. */
+  noCustomerEmail: () =>
+    new ApiError(
+      409,
+      'WORK_ORDER_NO_CUSTOMER_EMAIL',
+      'Voor deze klant is geen e-mailadres gekend bij Teamleader. Vul dit in bij Teamleader en synchroniseer opnieuw.',
+    ),
 };
 
 /** Phase 10 — facturatie-overzicht (sectie 17/29). Zie modules/invoice-batches/invoice-batch.service.ts. */

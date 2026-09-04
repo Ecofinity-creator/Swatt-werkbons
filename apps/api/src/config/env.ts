@@ -96,6 +96,16 @@ const rawEnvSchema = z.object({
     .string()
     .default('false')
     .transform((value) => value === 'true'),
+
+  /**
+   * Op vraag (3/9/2026): "automatische herinnering bij een vergeten
+   * werkbon" — aantal uren dat een DRAFT-werkbon onaangeroerd mag blijven
+   * vóór WorkOrderReminderService een herinneringsmail stuurt naar de
+   * medewerker die ze aanmaakte. Default 24u (één werkdag) — bewust
+   * configureerbaar via env i.p.v. hardcoded, zodat Steven dit later kan
+   * bijstellen zonder een nieuwe deploy.
+   */
+  WORK_ORDER_REMINDER_THRESHOLD_HOURS: z.coerce.number().int().positive().default(24),
 });
 
 const envSchema = rawEnvSchema.superRefine((value, ctx) => {

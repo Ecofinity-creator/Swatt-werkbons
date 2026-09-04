@@ -10,6 +10,7 @@ import type {
   UpdateInvoiceBatchEmployeeRateResponseBody,
 } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthErrors } from '../../errors';
 import { requireRole } from '../rbac/rbac.middleware';
 import type { InvoiceBatchRecord, InvoiceableWorkOrderRecord } from './invoice-batch.service';
@@ -31,6 +32,7 @@ import {
  */
 export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<void> {
   const service = new InvoiceBatchService(app.prisma);
+  const auditLogService = new AuditLogService(app.prisma);
 
   app.get(
     '/admin/invoice-batches/invoiceable-work-orders',
@@ -62,6 +64,13 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
         throw AuthErrors.notAuthenticated();
       }
       const batch = await service.create({ ...body, createdByUserId: userId });
+      await auditLogService.record({
+        actorUserId: userId,
+        action: 'INVOICE_BATCH_CREATED',
+        entityType: 'InvoiceBatch',
+        entityId: batch.id,
+        metadata: { customerName: batch.customer.name, periodLabel: batch.periodLabel },
+      });
       reply.code(201);
       return { batch: toBatchSummary(batch) };
     },
@@ -73,6 +82,12 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
     async (request, reply) => {
       const params = invoiceBatchIdParamsSchema.parse(request.params);
       await service.remove(params.id);
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'INVOICE_BATCH_REMOVED',
+        entityType: 'InvoiceBatch',
+        entityId: params.id,
+      });
       reply.code(204);
       return null;
     },
@@ -88,6 +103,13 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
     async (request): Promise<CreateTeamleaderDraftInvoiceResponseBody> => {
       const params = invoiceBatchIdParamsSchema.parse(request.params);
       const syncResult = await app.teamleaderInvoiceService.createDraftInvoice(params.id);
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'INVOICE_BATCH_TEAMLEADER_DRAFT_CREATED',
+        entityType: 'InvoiceBatch',
+        entityId: params.id,
+        metadata: { success: syncResult.success },
+      });
       const batch = await service.getById(params.id);
       if (!batch) {
         // Kan in de praktijk niet voorkomen — createDraftInvoice hierboven

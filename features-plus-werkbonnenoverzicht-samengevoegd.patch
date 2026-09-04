@@ -1,0 +1,2468 @@
+diff --git a/apps/api/prisma/migrations/20260903150000_customer_email_reminders_auditlog/migration.sql b/apps/api/prisma/migrations/20260903150000_customer_email_reminders_auditlog/migration.sql
+new file mode 100644
+index 0000000..b52404b
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260903150000_customer_email_reminders_auditlog/migration.sql
+@@ -0,0 +1,31 @@
++-- Op vraag (3/9/2026): drie nieuwe features.
++-- 1) "PDF via een knop naar de klant sturen" -> Customer.email +
++--    WorkOrder.customer_email_sent_at.
++-- 2) "Automatische herinnering bij een vergeten werkbon" ->
++--    WorkOrder.reminder_sent_at.
++-- 3) "Auditlog-scherm" -> nieuwe audit_log-tabel.
++
++ALTER TABLE "customer" ADD COLUMN "email" TEXT;
++
++ALTER TABLE "work_order"
++    ADD COLUMN "customer_email_sent_at" TIMESTAMPTZ,
++    ADD COLUMN "reminder_sent_at" TIMESTAMPTZ;
++
++CREATE TABLE "audit_log" (
++    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
++    "actor_user_id" UUID,
++    "action" TEXT NOT NULL,
++    "entity_type" TEXT NOT NULL,
++    "entity_id" TEXT NOT NULL,
++    "metadata" JSONB,
++    "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
++
++    CONSTRAINT "audit_log_pkey" PRIMARY KEY ("id")
++);
++
++CREATE INDEX "audit_log_entity_type_entity_id_idx" ON "audit_log"("entity_type", "entity_id");
++CREATE INDEX "audit_log_created_at_idx" ON "audit_log"("created_at");
++
++ALTER TABLE "audit_log"
++    ADD CONSTRAINT "audit_log_actor_user_id_fkey"
++    FOREIGN KEY ("actor_user_id") REFERENCES "user"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 0ad3875..e216fb0 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -282,6 +282,9 @@ model User {
+   /// Phase 12, deel B — weekgoedkeuringen die deze gebruiker ooit heeft aangevraagd (de uitvoerder die "Week aftekenen" koos).
+   requestedWeeklyApprovals WeeklyApproval[]
+ 
++  /// Op vraag (3/9/2026) — zie AuditLog hieronder.
++  auditLogs AuditLog[]
++
+   @@index([role])
+   @@map("user")
+ }
+@@ -489,6 +492,12 @@ model Customer {
+   teamleaderId   String  @unique @map("teamleader_id")
+   teamleaderType String  @map("teamleader_type") // 'contact' | 'company'
+   name           String
++  /// Werknemer vs. Onderaannemer-uitbreiding (3/9/2026): "PDF via een knop
++  /// naar de klant sturen". Opgehaald via het `emails`-veld van Teamleader
++  /// contacts.list/companies.list (array van {type, email} — geverifieerd
++  /// via een erkende SDK-referentie, zie project-sync.service.ts). `null`
++  /// zolang niet gesynchroniseerd of geen e-mailadres bij Teamleader gekend.
++  email          String?
+   address        String?
+   vatNumber      String? @map("vat_number")
+   isArchivedInTl Boolean @default(false) @map("is_archived_in_tl")
+@@ -850,6 +859,21 @@ model WorkOrder {
+   /// (geen tarief ingesteld, of afstand nog onbekend).
+   kmAmountCents Int? @map("km_amount_cents")
+ 
++  /// Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — bewust
++  /// een expliciete actie (geen automatische verzending, zie
++  /// EmailErrors/de toelichting bij WorkOrderService.sendPdfToCustomer()).
++  /// `null` = nog niet (of nooit) naar de klant gestuurd.
++  customerEmailSentAt DateTime? @map("customer_email_sent_at") @db.Timestamptz
++
++  /// Op vraag (3/9/2026): "automatische herinnering bij een 'vergeten'
++  /// werkbon" — gezet zodra een herinneringsmail verstuurd is voor deze
++  /// (nog steeds DRAFT) werkbon, zodat de achtergrondtaak dezelfde werkbon
++  /// niet elke run opnieuw meldt. Wordt teruggezet op `null` zodra de
++  /// werkbon alsnog ondertekend wordt (zie WorkOrderReminderService) — een
++  /// hernieuwde DRAFT-periode (na heropenen, Phase 12 deel B) verdient een
++  /// nieuwe herinnering.
++  reminderSentAt DateTime? @map("reminder_sent_at") @db.Timestamptz
++
+   @@index([projectId])
+   @@index([status])
+   @@index([pdfStatus])
+@@ -1260,3 +1284,39 @@ model PayrollBatchLine {
+   @@index([payrollBatchId])
+   @@map("payroll_batch_line")
+ }
++
++/// Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
++/// wanneer gewijzigd heeft" — sectie 23/26 uit de oorspronkelijke projectbrief
++/// (nooit als apart model gebouwd; tot nu toe enkel impliciet via losse
++/// timestamps op verschillende tabellen). Bewust een generiek, lichtgewicht
++/// model (geen aparte tabel per entiteitstype) — `entityType`/`entityId` zijn
++/// vrije tekst, geen FK, want een AuditLog-rij moet blijven bestaan ook als de
++/// onderliggende entiteit later verwijderd wordt (bv. een verwijderde
++/// PayrollBatch). `metadata` is vrije JSON voor actie-specifieke details (bv.
++/// oude/nieuwe waarde) — bewust geen apart `oldValue`/`newValue`-kolommenpaar,
++/// dat zou voor sommige acties (bv. "werkbon ondertekend") geen betekenis
++/// hebben.
++///
++/// Fase 1 van dit model instrumenteert bewust enkel de hoogste-impact
++/// financiële/status-wijzigingen (ondertekenen, heropenen, personeels-/
++/// facturatiebatches, als-geëxporteerd markeren, gebruikersbeheer) — niet elke
++/// actie uit sectie 26 (bv. foto toevoegen/verwijderen, timer starten/
++/// pauzeren) is deze ronde geïnstrumenteerd; dat kan later incrementeel
++/// aangevuld worden zonder schema-wijziging.
++model AuditLog {
++  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
++  actorUserId String? @map("actor_user_id") @db.Uuid
++  /// Bv. "WORK_ORDER_SIGNED", "PAYROLL_BATCH_CREATED" — vrije, leesbare code, geen enum (voorkomt een migratie bij elke nieuwe actie).
++  action     String
++  entityType String @map("entity_type")
++  entityId   String @map("entity_id")
++  /// Vrije JSON met actie-specifieke details (bv. { "employeeDisplayName": "...", "amountCents": 1234 }) — bewust nooit gevoelige tokens/wachtwoorden.
++  metadata  Json?
++  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
++
++  actorUser User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
++
++  @@index([entityType, entityId])
++  @@index([createdAt])
++  @@map("audit_log")
++}
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 3c6c126..50bdf44 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -10,6 +10,7 @@ import authRoutes from './modules/auth/auth.routes';
+ import seedRoutes from './modules/admin/seed.routes';
+ import companySettingsRoutes from './modules/company-settings/company-settings.routes';
+ import customerRoutes from './modules/customers/customer.routes';
++import auditLogRoutes from './modules/audit-log/audit-log.routes';
+ import hoursExportRoutes from './modules/hours-export/hours-export.routes';
+ import invoiceBatchRoutes from './modules/invoice-batches/invoice-batch.routes';
+ import payrollRoutes from './modules/payroll/payroll.routes';
+@@ -139,6 +140,7 @@ export async function buildApp(): Promise<FastifyInstance> {
+   await app.register(payrollRoutes);
+   await app.register(weeklyApprovalRoutes);
+   await app.register(hoursExportRoutes);
++  await app.register(auditLogRoutes);
+ 
+   app.get('/health', async () => ({ status: 'ok' }));
+ 
+diff --git a/apps/api/src/config/env.ts b/apps/api/src/config/env.ts
+index d770205..9237f29 100644
+--- a/apps/api/src/config/env.ts
++++ b/apps/api/src/config/env.ts
+@@ -96,6 +96,16 @@ const rawEnvSchema = z.object({
+     .string()
+     .default('false')
+     .transform((value) => value === 'true'),
++
++  /**
++   * Op vraag (3/9/2026): "automatische herinnering bij een vergeten
++   * werkbon" — aantal uren dat een DRAFT-werkbon onaangeroerd mag blijven
++   * vóór WorkOrderReminderService een herinneringsmail stuurt naar de
++   * medewerker die ze aanmaakte. Default 24u (één werkdag) — bewust
++   * configureerbaar via env i.p.v. hardcoded, zodat Steven dit later kan
++   * bijstellen zonder een nieuwe deploy.
++   */
++  WORK_ORDER_REMINDER_THRESHOLD_HOURS: z.coerce.number().int().positive().default(24),
+ });
+ 
+ const envSchema = rawEnvSchema.superRefine((value, ctx) => {
+diff --git a/apps/api/src/errors.ts b/apps/api/src/errors.ts
+index 4017f78..fbd0d34 100644
+--- a/apps/api/src/errors.ts
++++ b/apps/api/src/errors.ts
+@@ -278,6 +278,20 @@ export const WorkOrderErrors = {
+       'WORK_ORDER_NOT_SIGNED_FOR_SYNC',
+       'Deze werkbon is nog niet ondertekend — er is nog niets om naar Teamleader te synchroniseren.',
+     ),
++  /** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — enkel mogelijk op een ondertekende werkbon met een klaarstaande PDF. */
++  notReadyToSendToCustomer: () =>
++    new ApiError(
++      409,
++      'WORK_ORDER_NOT_READY_TO_SEND',
++      'Deze werkbon moet eerst ondertekend zijn en een klaarstaande PDF hebben vóór je ze naar de klant kan sturen.',
++    ),
++  /** De klant heeft geen e-mailadres bij Teamleader — kan enkel opgelost worden door het daar in te vullen en opnieuw te synchroniseren. */
++  noCustomerEmail: () =>
++    new ApiError(
++      409,
++      'WORK_ORDER_NO_CUSTOMER_EMAIL',
++      'Voor deze klant is geen e-mailadres gekend bij Teamleader. Vul dit in bij Teamleader en synchroniseer opnieuw.',
++    ),
+ };
+ 
+ /** Phase 10 — facturatie-overzicht (sectie 17/29). Zie modules/invoice-batches/invoice-batch.service.ts. */
+diff --git a/apps/api/src/modules/audit-log/audit-log.routes.ts b/apps/api/src/modules/audit-log/audit-log.routes.ts
+new file mode 100644
+index 0000000..29cddf8
+--- /dev/null
++++ b/apps/api/src/modules/audit-log/audit-log.routes.ts
+@@ -0,0 +1,49 @@
++import { z } from 'zod';
++import type { FastifyInstance } from 'fastify';
++import type { AuditLogEntrySummary, ListAuditLogResponseBody } from '@swatt/shared-types';
++import { requireRole } from '../rbac/rbac.middleware';
++import { AuditLogService, type AuditLogRecord } from './audit-log.service';
++
++const listAuditLogQuerySchema = z.object({
++  entityType: z.string().trim().min(1).optional(),
++  actorUserId: z.string().uuid().optional(),
++  from: z.string().datetime().optional(),
++  to: z.string().datetime().optional(),
++});
++
++/**
++ * Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
++ * wanneer gewijzigd heeft" — sectie 23/26 uit de oorspronkelijke projectbrief.
++ * ADMIN-only: dit toont wie welke financiële/status-wijziging deed, over alle
++ * medewerkers heen — zelfde gevoeligheidsniveau als Facturatie/Uren-export.
++ */
++export default async function auditLogRoutes(app: FastifyInstance): Promise<void> {
++  const service = new AuditLogService(app.prisma);
++
++  app.get(
++    '/admin/audit-log',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request): Promise<ListAuditLogResponseBody> => {
++      const query = listAuditLogQuerySchema.parse(request.query);
++      const entries = await service.list({
++        entityType: query.entityType,
++        actorUserId: query.actorUserId,
++        from: query.from ? new Date(query.from) : undefined,
++        to: query.to ? new Date(query.to) : undefined,
++      });
++      return { entries: entries.map(toSummary) };
++    },
++  );
++}
++
++function toSummary(entry: AuditLogRecord): AuditLogEntrySummary {
++  return {
++    id: entry.id,
++    actorDisplayName: entry.actorUser?.employee?.displayName ?? entry.actorUser?.email ?? null,
++    action: entry.action,
++    entityType: entry.entityType,
++    entityId: entry.entityId,
++    metadata: entry.metadata,
++    createdAt: entry.createdAt.toISOString(),
++  };
++}
+diff --git a/apps/api/src/modules/audit-log/audit-log.service.ts b/apps/api/src/modules/audit-log/audit-log.service.ts
+new file mode 100644
+index 0000000..0564730
+--- /dev/null
++++ b/apps/api/src/modules/audit-log/audit-log.service.ts
+@@ -0,0 +1,75 @@
++import type { PrismaClient } from '@prisma/client';
++
++/**
++ * Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
++ * wanneer gewijzigd heeft" — sectie 23/26 uit de oorspronkelijke projectbrief.
++ * Zie AuditLog in schema.prisma voor de volledige toelichting bij het
++ * datamodel (bewust generiek, geen FK naar de onderliggende entiteit).
++ *
++ * Bewust een heel dunne service (één `record()`-methode) i.p.v. een aparte
++ * klasse per entiteitstype — elke aanroeper (WorkOrderSignatureService,
++ * PayrollService, ...) roept dit rechtstreeks aan op het moment van de
++ * effectieve wijziging. `record()` gooit zelf nooit — een falende audit-log-
++ * schrijving mag de eigenlijke actie (bv. een ondertekening) nooit laten
++ * mislukken (business rule 9-analoog: een neveneffect mag de hoofdactie niet
++ * in gevaar brengen). Fouten worden enkel gelogd naar console, niet
++ * doorgegooid.
++ */
++export class AuditLogService {
++  constructor(private readonly prisma: PrismaClient) {}
++
++  async record(entry: {
++    actorUserId: string | null;
++    action: string;
++    entityType: string;
++    entityId: string;
++    metadata?: Record<string, unknown>;
++  }): Promise<void> {
++    try {
++      await this.prisma.auditLog.create({
++        data: {
++          actorUserId: entry.actorUserId,
++          action: entry.action,
++          entityType: entry.entityType,
++          entityId: entry.entityId,
++          metadata: entry.metadata ?? undefined,
++        },
++      });
++    } catch (err) {
++      // eslint-disable-next-line no-console
++      console.error('AuditLogService.record() mislukt (actie zelf gaat gewoon door):', err);
++    }
++  }
++
++  async list(filters: {
++    entityType?: string | undefined;
++    actorUserId?: string | undefined;
++    from?: Date | undefined;
++    to?: Date | undefined;
++    limit?: number | undefined;
++  } = {}): Promise<AuditLogRecord[]> {
++    return this.prisma.auditLog.findMany({
++      where: {
++        ...(filters.entityType ? { entityType: filters.entityType } : {}),
++        ...(filters.actorUserId ? { actorUserId: filters.actorUserId } : {}),
++        ...(filters.from || filters.to
++          ? { createdAt: { ...(filters.from ? { gte: filters.from } : {}), ...(filters.to ? { lte: filters.to } : {}) } }
++          : {}),
++      },
++      include: { actorUser: { select: { email: true, employee: { select: { displayName: true } } } } },
++      orderBy: { createdAt: 'desc' },
++      take: filters.limit ?? 200,
++    }) as unknown as Promise<AuditLogRecord[]>;
++  }
++}
++
++export interface AuditLogRecord {
++  id: string;
++  actorUserId: string | null;
++  actorUser: { email: string; employee: { displayName: string } | null } | null;
++  action: string;
++  entityType: string;
++  entityId: string;
++  metadata: Record<string, unknown> | null;
++  createdAt: Date;
++}
+diff --git a/apps/api/src/modules/email/email.service.ts b/apps/api/src/modules/email/email.service.ts
+index 73e68bf..eb22e6c 100644
+--- a/apps/api/src/modules/email/email.service.ts
++++ b/apps/api/src/modules/email/email.service.ts
+@@ -6,6 +6,14 @@ export interface SendEmailParams {
+   subject: string;
+   /** Volledige HTML-body — zie auth-emails.ts voor de opgemaakte sjablonen. */
+   html: string;
++  /**
++   * Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — Resend
++   * ondersteunt bijlagen als base64-gecodeerde inhoud (max. 40MB per e-mail
++   * na base64-codering — geverifieerd via resend.com/docs/api-reference/
++   * emails/send-email). Optioneel, want de meeste bestaande e-mails
++   * (uitnodiging, wachtwoord-reset) hebben er geen nodig.
++   */
++  attachments?: Array<{ filename: string; content: string }>;
+ }
+ 
+ export interface EmailService {
+@@ -40,6 +48,7 @@ export class ResendEmailService implements EmailService {
+         to: params.to,
+         subject: params.subject,
+         html: params.html,
++        ...(params.attachments ? { attachments: params.attachments } : {}),
+       }),
+     });
+ 
+diff --git a/apps/api/src/modules/hours-export/hours-export.routes.ts b/apps/api/src/modules/hours-export/hours-export.routes.ts
+index 4eb61cd..25704ea 100644
+--- a/apps/api/src/modules/hours-export/hours-export.routes.ts
++++ b/apps/api/src/modules/hours-export/hours-export.routes.ts
+@@ -1,5 +1,6 @@
+ import type { HoursExportOverviewResponseBody, MarkHoursExportedResponseBody } from '@swatt/shared-types';
+ import type { FastifyInstance } from 'fastify';
++import { AuditLogService } from '../audit-log/audit-log.service';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+ import { requireRole } from '../rbac/rbac.middleware';
+ import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+@@ -18,6 +19,7 @@ import { renderSubcontractorStatementPdf } from './subcontractor-statement-docum
+  */
+ export default async function hoursExportRoutes(app: FastifyInstance): Promise<void> {
+   const service = new HoursExportService(app.prisma);
++  const auditLogService = new AuditLogService(app.prisma);
+   const storage: StorageService = new DatabaseStorageService(app.prisma);
+   const companySettings = new CompanySettingsService(app.prisma);
+ 
+@@ -44,6 +46,13 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
+     async (request): Promise<MarkHoursExportedResponseBody> => {
+       const body = markHoursExportedBodySchema.parse(request.body);
+       const markedCount = await service.markExported(body.employeeId, body.period);
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'HOURS_EXPORT_MARKED_EXPORTED',
++        entityType: 'Employee',
++        entityId: body.employeeId,
++        metadata: { period: body.period, markedCount },
++      });
+       return { markedCount };
+     },
+   );
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts b/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
+index 730c07e..bf336a3 100644
+--- a/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
++++ b/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
+@@ -10,6 +10,7 @@ import type {
+   UpdateInvoiceBatchEmployeeRateResponseBody,
+ } from '@swatt/shared-types';
+ import type { FastifyInstance } from 'fastify';
++import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors } from '../../errors';
+ import { requireRole } from '../rbac/rbac.middleware';
+ import type { InvoiceBatchRecord, InvoiceableWorkOrderRecord } from './invoice-batch.service';
+@@ -31,6 +32,7 @@ import {
+  */
+ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<void> {
+   const service = new InvoiceBatchService(app.prisma);
++  const auditLogService = new AuditLogService(app.prisma);
+ 
+   app.get(
+     '/admin/invoice-batches/invoiceable-work-orders',
+@@ -62,6 +64,13 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
+         throw AuthErrors.notAuthenticated();
+       }
+       const batch = await service.create({ ...body, createdByUserId: userId });
++      await auditLogService.record({
++        actorUserId: userId,
++        action: 'INVOICE_BATCH_CREATED',
++        entityType: 'InvoiceBatch',
++        entityId: batch.id,
++        metadata: { customerName: batch.customer.name, periodLabel: batch.periodLabel },
++      });
+       reply.code(201);
+       return { batch: toBatchSummary(batch) };
+     },
+@@ -73,6 +82,12 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
+     async (request, reply) => {
+       const params = invoiceBatchIdParamsSchema.parse(request.params);
+       await service.remove(params.id);
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'INVOICE_BATCH_REMOVED',
++        entityType: 'InvoiceBatch',
++        entityId: params.id,
++      });
+       reply.code(204);
+       return null;
+     },
+@@ -88,6 +103,13 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
+     async (request): Promise<CreateTeamleaderDraftInvoiceResponseBody> => {
+       const params = invoiceBatchIdParamsSchema.parse(request.params);
+       const syncResult = await app.teamleaderInvoiceService.createDraftInvoice(params.id);
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'INVOICE_BATCH_TEAMLEADER_DRAFT_CREATED',
++        entityType: 'InvoiceBatch',
++        entityId: params.id,
++        metadata: { success: syncResult.success },
++      });
+       const batch = await service.getById(params.id);
+       if (!batch) {
+         // Kan in de praktijk niet voorkomen — createDraftInvoice hierboven
+diff --git a/apps/api/src/modules/payroll/payroll.routes.ts b/apps/api/src/modules/payroll/payroll.routes.ts
+index 605a9f5..cacf3d5 100644
+--- a/apps/api/src/modules/payroll/payroll.routes.ts
++++ b/apps/api/src/modules/payroll/payroll.routes.ts
+@@ -6,6 +6,7 @@ import type {
+   PayrollBatchSummary,
+ } from '@swatt/shared-types';
+ import type { FastifyInstance } from 'fastify';
++import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors } from '../../errors';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+ import { requireRole } from '../rbac/rbac.middleware';
+@@ -26,6 +27,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
+   const service = new PayrollService(app.prisma);
+   const companySettings = new CompanySettingsService(app.prisma);
+   const storage: StorageService = new DatabaseStorageService(app.prisma);
++  const auditLogService = new AuditLogService(app.prisma);
+ 
+   app.get(
+     '/admin/payroll/payable',
+@@ -57,6 +59,13 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
+         throw AuthErrors.notAuthenticated();
+       }
+       const batch = await service.createBatch(body.employeeId, body.periodLabel, userId);
++      await auditLogService.record({
++        actorUserId: userId,
++        action: 'PAYROLL_BATCH_CREATED',
++        entityType: 'PayrollBatch',
++        entityId: batch.id,
++        metadata: { employeeDisplayName: batch.employeeDisplayName, periodLabel: batch.periodLabel, totalAmountCents: batch.totalAmountCents },
++      });
+       reply.code(201);
+       return { batch: toBatchSummary(batch) };
+     },
+@@ -68,6 +77,12 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
+     async (request, reply) => {
+       const params = payrollBatchIdParamsSchema.parse(request.params);
+       await service.remove(params.id);
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'PAYROLL_BATCH_REMOVED',
++        entityType: 'PayrollBatch',
++        entityId: params.id,
++      });
+       reply.code(204);
+       return null;
+     },
+diff --git a/apps/api/src/modules/reminders/work-order-reminder.service.ts b/apps/api/src/modules/reminders/work-order-reminder.service.ts
+new file mode 100644
+index 0000000..c42957e
+--- /dev/null
++++ b/apps/api/src/modules/reminders/work-order-reminder.service.ts
+@@ -0,0 +1,102 @@
++import type { PrismaClient } from '@prisma/client';
++import { isEmailConfigured } from '../../config/env';
++import type { EmailService } from '../email/email.service';
++import { AuditLogService } from '../audit-log/audit-log.service';
++
++/**
++ * Op vraag (3/9/2026): "automatische herinnering bij een 'vergeten' werkbon"
++ * — bv. een gestopte timer waarvan de werkbon na een tijdje nog steeds niet
++ * ondertekend/verstuurd is. Sluit rechtstreeks aan bij de eerder gebouwde
++ * "naar niet-getekende werkbonnen navigeren"-functie (3/9/2026, zelfde dag):
++ * dit is de proactieve tegenhanger daarvan.
++ *
++ * Draait als een periodieke achtergrondtaak binnen het Fastify-process zelf
++ * (zie scheduleWorkOrderReminders() in app.ts) — bewust GEEN externe cron-
++ * dienst (bv. Render Cron Jobs), want dat vereist handmatige configuratie in
++ * Render's dashboard die vanuit hier niet mogelijk is. Nadeel: dit werkt
++ * enkel zolang het proces zelf draait (herstart bij elke deploy, en zou niet
++ * lopen op een service die inactief mag spinnen-down — voor een always-on
++ * Render "Web Service" is dat geen probleem).
++ */
++export class WorkOrderReminderService {
++  constructor(
++    private readonly prisma: PrismaClient,
++    private readonly emailService: EmailService,
++    private readonly auditLogService: AuditLogService,
++  ) {}
++
++  /**
++   * Stuurt een herinneringsmail voor elke DRAFT-werkbon die ouder is dan
++   * `thresholdHours` en nog geen herinnering kreeg (`reminderSentAt: null`).
++   * Geeft het aantal effectief verstuurde herinneringen terug. Eén mislukte
++   * verzending (bv. tijdelijk Resend-probleem) mag de andere werkbonnen niet
++   * blokkeren — vandaar de try/catch per werkbon i.p.v. rond de hele lus.
++   */
++  async sendPendingReminders(thresholdHours: number): Promise<number> {
++    if (!isEmailConfigured()) {
++      return 0;
++    }
++    const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000);
++    const pending = await this.prisma.workOrder.findMany({
++      where: { status: 'DRAFT', createdAt: { lt: cutoff }, reminderSentAt: null },
++      select: {
++        id: true,
++        workOrderNumber: true,
++        createdAt: true,
++        project: { select: { name: true, customer: { select: { name: true } } } },
++        createdByEmployee: { select: { displayName: true, user: { select: { id: true, email: true } } } },
++      },
++    });
++
++    let sentCount = 0;
++    for (const workOrder of pending as unknown as PendingWorkOrderForReminder[]) {
++      try {
++        await this.emailService.send({
++          to: workOrder.createdByEmployee.user.email,
++          subject: `Herinnering: werkbon ${workOrder.workOrderNumber} nog niet afgerond`,
++          html: buildReminderEmailHtml(workOrder, thresholdHours),
++        });
++        await this.prisma.workOrder.update({ where: { id: workOrder.id }, data: { reminderSentAt: new Date() } });
++        await this.auditLogService.record({
++          actorUserId: null,
++          action: 'WORK_ORDER_REMINDER_SENT',
++          entityType: 'WorkOrder',
++          entityId: workOrder.id,
++          metadata: { workOrderNumber: workOrder.workOrderNumber, toUserId: workOrder.createdByEmployee.user.id },
++        });
++        sentCount += 1;
++      } catch (err) {
++        // eslint-disable-next-line no-console
++        console.error(`WorkOrderReminderService: herinnering voor werkbon ${workOrder.workOrderNumber} mislukt:`, err);
++      }
++    }
++    return sentCount;
++  }
++}
++
++interface PendingWorkOrderForReminder {
++  id: string;
++  workOrderNumber: string;
++  createdAt: Date;
++  project: { name: string; customer: { name: string } };
++  createdByEmployee: { displayName: string; user: { id: string; email: string } };
++}
++
++function buildReminderEmailHtml(workOrder: PendingWorkOrderForReminder, thresholdHours: number): string {
++  const days = Math.floor(thresholdHours / 24);
++  const periodLabel = days >= 1 ? `${days} dag${days === 1 ? '' : 'en'}` : `${thresholdHours} uur`;
++  return `
++    <p>Hallo ${escapeHtml(workOrder.createdByEmployee.displayName)},</p>
++    <p>
++      Werkbon <strong>${escapeHtml(workOrder.workOrderNumber)}</strong> bij ${escapeHtml(workOrder.project.customer.name)}
++      (project "${escapeHtml(workOrder.project.name)}") staat al meer dan ${periodLabel} klaar, maar is nog niet
++      ondertekend door de klant.
++    </p>
++    <p>Open de app en ga naar het project om deze werkbon alsnog te laten tekenen.</p>
++  `;
++}
++
++/** Zelfde minimale HTML-escaping als elders (auth-emails.ts, work-order.routes.ts). */
++function escapeHtml(value: string): string {
++  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
++}
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 8aeb503..ad5b25a 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -70,11 +70,18 @@ interface AddressResponse {
+   country: string;
+ }
+ 
++/** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — geverifieerd via een erkende SDK-referentie (madeITBelgium/TeamLeader). */
++interface EmailResponse {
++  type: string;
++  email: string;
++}
++
+ interface ContactInfoRow {
+   id: string;
+   first_name: string;
+   last_name: string;
+   primary_address: AddressResponse | null;
++  emails?: EmailResponse[];
+ }
+ 
+ interface CompanyInfoRow {
+@@ -82,12 +89,14 @@ interface CompanyInfoRow {
+   name: string;
+   vat_number: string | null;
+   primary_address: AddressResponse | null;
++  emails?: EmailResponse[];
+ }
+ 
+ interface CustomerDetails {
+   name: string;
+   vatNumber: string | null;
+   address: string | null;
++  email: string | null;
+ }
+ 
+ export interface ProjectSyncResult {
+@@ -182,6 +191,7 @@ export class ProjectSyncService {
+             teamleaderType: ref.type,
+             name: details.name,
+             address: details.address,
++            email: details.email,
+             vatNumber: details.vatNumber,
+             isArchivedInTl: false,
+             lastSyncedAt: new Date(),
+@@ -190,6 +200,7 @@ export class ProjectSyncService {
+             teamleaderType: ref.type,
+             name: details.name,
+             address: details.address,
++            email: details.email,
+             vatNumber: details.vatNumber,
+             isArchivedInTl: false,
+             lastSyncedAt: new Date(),
+@@ -286,6 +297,7 @@ export class ProjectSyncService {
+         name: `${contact.first_name} ${contact.last_name}`.trim(),
+         vatNumber: null,
+         address: formatAddress(contact.primary_address),
++        email: extractPrimaryEmail(contact.emails),
+       });
+     }
+     for (const company of companyRows) {
+@@ -293,6 +305,7 @@ export class ProjectSyncService {
+         name: company.name,
+         vatNumber: company.vat_number,
+         address: formatAddress(company.primary_address),
++        email: extractPrimaryEmail(company.emails),
+       });
+     }
+     return result;
+@@ -398,3 +411,10 @@ function formatAddress(address: AddressResponse | null): string | null {
+   const formatted = [address.line_1, secondLine].filter((part) => part && part.length > 0).join(', ');
+   return formatted.length > 0 ? formatted : null;
+ }
++
++/** Voorkeur voor `type: "primary"`, anders gewoon de eerste — zelfde tolerante aanpak als formatAddress() hierboven. */
++function extractPrimaryEmail(emails: EmailResponse[] | undefined): string | null {
++  if (!emails || emails.length === 0) return null;
++  const primary = emails.find((entry) => entry.type === 'primary');
++  return (primary ?? emails[0])?.email ?? null;
++}
+diff --git a/apps/api/src/modules/users/user.routes.ts b/apps/api/src/modules/users/user.routes.ts
+index 4a82501..8005a56 100644
+--- a/apps/api/src/modules/users/user.routes.ts
++++ b/apps/api/src/modules/users/user.routes.ts
+@@ -11,6 +11,7 @@ import type {
+ import { Prisma } from '@prisma/client';
+ import type { FastifyInstance } from 'fastify';
+ import { z } from 'zod';
++import { AuditLogService } from '../audit-log/audit-log.service';
+ import { TeamleaderErrors, UserErrors } from '../../errors';
+ import { buildInviteEmail } from '../auth/auth-emails';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+@@ -34,6 +35,7 @@ const userIdParamsSchema = z.object({ id: z.string().uuid() });
+  */
+ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+   const companySettingsService = new CompanySettingsService(app.prisma);
++  const auditLogService = new AuditLogService(app.prisma);
+ 
+   app.get(
+     '/admin/users',
+@@ -78,6 +80,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+         },
+         include: { employee: true },
+       });
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'USER_CREATED',
++        entityType: 'User',
++        entityId: user.id,
++        metadata: { email: body.email, role: body.role, displayName: body.displayName },
++      });
+ 
+       // Account blijft sowieso aangemaakt, zelfs als de uitnodigingsmail
+       // faalt (bv. e-maildienst nog niet geconfigureerd) — business rule 9
+@@ -128,6 +137,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+             ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
+           },
+         });
++        await auditLogService.record({
++          actorUserId: request.currentUser?.id ?? null,
++          action: body.isActive === false ? 'USER_DEACTIVATED' : body.isActive === true ? 'USER_ACTIVATED' : 'USER_ROLE_CHANGED',
++          entityType: 'User',
++          entityId: params.id,
++          metadata: { newRole: body.role, newIsActive: body.isActive },
++        });
+ 
+         // Deactivatie moet meteen effect hebben — bestaande sessies blijven
+         // anders geldig tot hun natuurlijke verval (zie ook het commentaar
+@@ -262,6 +278,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
+       // automatisch mee verwijderd (zie schema.prisma).
+       await app.prisma.session.deleteMany({ where: { userId: params.id } });
+       await app.prisma.user.delete({ where: { id: params.id } });
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'USER_DELETED',
++        entityType: 'User',
++        entityId: params.id,
++        metadata: { email: user.email, displayName: user.employee?.displayName ?? null },
++      });
+ 
+       reply.code(204);
+       return null;
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.routes.ts b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+index 53ca5b8..2021cf3 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.routes.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+@@ -1,5 +1,6 @@
+ import type { PendingWeekResponseBody, SignWeekResponseBody, WeeklyApprovalSummary } from '@swatt/shared-types';
+ import type { FastifyInstance, FastifyRequest } from 'fastify';
++import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors } from '../../errors';
+ import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+@@ -23,6 +24,7 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+   const storage: StorageService = new DatabaseStorageService(app.prisma);
+   const workOrderService = new WorkOrderService(app.prisma);
+   const companySettingsService = new CompanySettingsService(app.prisma);
++  const auditLogService = new AuditLogService(app.prisma);
+   const pdfService = new WorkOrderPdfService(app.prisma, storage, workOrderService, companySettingsService);
+   const service = new WeeklyApprovalService(app.prisma, storage, companySettingsService);
+ 
+@@ -71,6 +73,13 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+         ipAddress: request.ip ?? null,
+         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
+       });
++      await auditLogService.record({
++        actorUserId: userId,
++        action: 'WEEKLY_APPROVAL_SIGNED',
++        entityType: 'WeeklyApproval',
++        entityId: weeklyApproval.id,
++        metadata: { signerName: body.signerName, workOrderCount: weeklyApproval.workOrderIds.length },
++      });
+ 
+       // Zelfde volgorde/redenering als bij een individuele /work-orders/:id/sign
+       // (zie work-order.routes.ts): PDF-generatie gebeurt best-effort en
+@@ -102,6 +111,12 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+     async (request) => {
+       const params = weeklyApprovalIdParamsSchema.parse(request.params);
+       await service.reopen(params.id);
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'WEEKLY_APPROVAL_REOPENED',
++        entityType: 'WeeklyApproval',
++        entityId: params.id,
++      });
+       return { success: true };
+     },
+   );
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.service.ts b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+index c34c1dc..14590f1 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.service.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+@@ -262,6 +262,10 @@ export class WeeklyApprovalService {
+           // de PDF/sync-velden hierboven: het oude bevroren bedrag hoort niet
+           // meer bij een geldige handtekening).
+           kmAmountCents: null,
++          // Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.reminderSentAt
++          // in schema.prisma: een hernieuwde DRAFT-periode verdient een nieuwe
++          // herinnering als ze opnieuw te lang blijft liggen.
++          reminderSentAt: null,
+         },
+       }),
+     ]);
+diff --git a/apps/api/src/modules/work-orders/work-order.routes.ts b/apps/api/src/modules/work-orders/work-order.routes.ts
+index c03f6ba..eb64891 100644
+--- a/apps/api/src/modules/work-orders/work-order.routes.ts
++++ b/apps/api/src/modules/work-orders/work-order.routes.ts
+@@ -2,16 +2,21 @@ import {
+   roleAtLeast,
+   type ListWorkOrderDraftsResponseBody,
+   type ListWorkOrderSyncIssuesResponseBody,
++  type ListWorkOrdersOverviewResponseBody,
++  type SendWorkOrderPdfResponseBody,
++  type WorkOrderOverviewItemSummary,
+   type WorkOrderPhotoSummary,
+   type WorkOrderResponseBody,
+   type WorkOrderSummary,
+   type WorkOrderSyncIssueSummary,
+ } from '@swatt/shared-types';
+ import type { FastifyInstance, FastifyRequest } from 'fastify';
++import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors, WorkOrderErrors } from '../../errors';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
++import { requireRole } from '../rbac/rbac.middleware';
+ import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+-import type { WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
++import type { WorkOrderOverviewItemRecord, WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
+ import { WorkOrderService, deriveTimeTrackingSyncError, deriveTimeTrackingSyncStatus } from './work-order.service';
+ import { WorkOrderPdfService } from './work-order-pdf.service';
+ import { WorkOrderPhotoService } from './work-order-photo.service';
+@@ -20,6 +25,7 @@ import {
+   addWorkOrderPhotoBodySchema,
+   createWorkOrderBodySchema,
+   listWorkOrderDraftsQuerySchema,
++  listWorkOrdersOverviewQuerySchema,
+   signWorkOrderBodySchema,
+   workOrderIdParamsSchema,
+   workOrderPhotoParamsSchema,
+@@ -40,6 +46,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+   const companySettingsService = new CompanySettingsService(app.prisma);
+   const signatureService = new WorkOrderSignatureService(app.prisma, storage, companySettingsService);
+   const pdfService = new WorkOrderPdfService(app.prisma, storage, service, companySettingsService);
++  const auditLogService = new AuditLogService(app.prisma);
+ 
+   app.post('/work-orders', { preHandler: [app.authenticate] }, async (request, reply): Promise<WorkOrderResponseBody> => {
+     const employeeId = requireEmployeeId(request);
+@@ -75,6 +82,44 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+     },
+   );
+ 
++  /**
++   * Fase 11/sectie 20: "Mijn werkbonnen" — de eigen volledige geschiedenis
++   * (alle statussen, alle projecten), i.p.v. enkel de openstaande DRAFT-
++   * werkbonnen van één project hierboven.
++   */
++  app.get(
++    '/work-orders/mine',
++    { preHandler: [app.authenticate] },
++    async (request): Promise<ListWorkOrdersOverviewResponseBody> => {
++      const employeeId = requireEmployeeId(request);
++      const workOrders = await service.listForEmployee(employeeId);
++      return { workOrders: workOrders.map(toOverviewSummary) };
++    },
++  );
++
++  /**
++   * Sectie 20: "Werkbonnenoverzicht" — SUPERVISOR+, alle werkbonnen met
++   * filters. Zie WorkOrderService.listForAdmin() voor de volledige
++   * toelichting bij de filterkeuzes.
++   */
++  app.get(
++    '/admin/work-orders',
++    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
++    async (request): Promise<ListWorkOrdersOverviewResponseBody> => {
++      const query = listWorkOrdersOverviewQuerySchema.parse(request.query);
++      const workOrders = await service.listForAdmin({
++        status: query.status,
++        projectId: query.projectId,
++        employeeId: query.employeeId,
++        signed: query.signed,
++        teamleaderUploadStatus: query.teamleaderUploadStatus,
++        from: query.from ? new Date(query.from) : undefined,
++        to: query.to ? new Date(`${query.to}T23:59:59`) : undefined,
++      });
++      return { workOrders: workOrders.map(toOverviewSummary) };
++    },
++  );
++
+   app.get('/work-orders/:id', { preHandler: [app.authenticate] }, async (request): Promise<WorkOrderResponseBody> => {
+     const params = workOrderIdParamsSchema.parse(request.params);
+     const workOrder = await service.get(params.id);
+@@ -136,6 +181,13 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+         ipAddress: request.ip ?? null,
+         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
+       });
++      await auditLogService.record({
++        actorUserId: userId,
++        action: 'WORK_ORDER_SIGNED',
++        entityType: 'WorkOrder',
++        entityId: params.id,
++        metadata: { signerName: body.signerName },
++      });
+ 
+       // Phase 8 — de PDF wordt automatisch gegenereerd meteen na ondertekenen
+       // (sectie 34, stappen 3-5). `generate()` gooit zelf nooit verder (zie
+@@ -241,6 +293,81 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+     reply.header('Content-Disposition', `inline; filename="${workOrder.pdfFileName ?? 'werkbon.pdf'}"`);
+     return reply.send(file.data);
+   });
++
++  /**
++   * Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — bewust
++   * een expliciete actie (geen automatische verzending zodra de werkbon
++   * ondertekend is), zodat de installateur/supervisor zelf beslist wanneer.
++   * Zelfde toegangsregels als de PDF-download hierboven.
++   */
++  app.post(
++    '/work-orders/:id/send-to-customer',
++    { preHandler: [app.authenticate] },
++    async (request): Promise<SendWorkOrderPdfResponseBody> => {
++      const params = workOrderIdParamsSchema.parse(request.params);
++      const workOrder = await service.get(params.id);
++      requireWorkOrderAccess(request, workOrder);
++
++      if (workOrder.status !== 'SIGNED' || workOrder.pdfStatus !== 'PDF_READY' || !workOrder.pdfFileKey) {
++        throw WorkOrderErrors.notReadyToSendToCustomer();
++      }
++      const customerEmail = workOrder.project.customer.email;
++      if (!customerEmail) {
++        throw WorkOrderErrors.noCustomerEmail();
++      }
++
++      const file = await storage.read(workOrder.pdfFileKey);
++      await app.emailService.send({
++        to: customerEmail,
++        subject: `Werkbon ${workOrder.workOrderNumber} — ${workOrder.project.name}`,
++        html: buildCustomerPdfEmailHtml(workOrder),
++        attachments: [{ filename: workOrder.pdfFileName ?? `${workOrder.workOrderNumber}.pdf`, content: file.data.toString('base64') }],
++      });
++
++      const sentAt = new Date();
++      await app.prisma.workOrder.update({ where: { id: workOrder.id }, data: { customerEmailSentAt: sentAt } });
++      await auditLogService.record({
++        actorUserId: request.currentUser!.id,
++        action: 'WORK_ORDER_SENT_TO_CUSTOMER',
++        entityType: 'WorkOrder',
++        entityId: workOrder.id,
++        metadata: { workOrderNumber: workOrder.workOrderNumber, customerEmail },
++      });
++
++      return { sentAt: sentAt.toISOString(), customerEmail };
++    },
++  );
++}
++
++/** Eenvoudige, nette e-mailtekst — zelfde stijl als auth-emails.ts. */
++function buildCustomerPdfEmailHtml(workOrder: WorkOrderRecord): string {
++  return `
++    <p>Beste,</p>
++    <p>In bijlage vindt u de ondertekende werkbon <strong>${escapeHtml(workOrder.workOrderNumber)}</strong> voor project "${escapeHtml(workOrder.project.name)}".</p>
++    <p>Met vriendelijke groeten</p>
++  `;
++}
++
++/** Zelfde minimale HTML-escaping als auth-emails.ts (bewust geen dependency voor iets dat maar op 2 plekken gebeurt). */
++function escapeHtml(value: string): string {
++  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
++}
++
++function toOverviewSummary(record: WorkOrderOverviewItemRecord): WorkOrderOverviewItemSummary {
++  return {
++    id: record.id,
++    workOrderNumber: record.workOrderNumber,
++    status: record.status,
++    createdAt: record.createdAt.toISOString(),
++    projectId: record.projectId,
++    projectName: record.projectName,
++    projectNumber: record.projectNumber,
++    customerName: record.customerName,
++    createdByEmployeeDisplayName: record.createdByEmployeeDisplayName,
++    totalSeconds: record.totalSeconds,
++    signedAt: record.signedAt ? record.signedAt.toISOString() : null,
++    teamleaderUploadStatus: record.teamleaderUploadStatus,
++  };
+ }
+ 
+ function requireEmployeeId(request: FastifyRequest): string {
+diff --git a/apps/api/src/modules/work-orders/work-order.schemas.ts b/apps/api/src/modules/work-orders/work-order.schemas.ts
+index d335de4..b78bbbd 100644
+--- a/apps/api/src/modules/work-orders/work-order.schemas.ts
++++ b/apps/api/src/modules/work-orders/work-order.schemas.ts
+@@ -17,6 +17,23 @@ export const listWorkOrderDraftsQuerySchema = z.object({
+   projectId: z.string().uuid(),
+ });
+ 
++/**
++ * Sectie 20: "Werkbonnenoverzicht" — alle filters optioneel. `signed` komt
++ * als de string "true"/"false" binnen (querystring), vandaar de transform.
++ */
++export const listWorkOrdersOverviewQuerySchema = z.object({
++  status: z.enum(['DRAFT', 'READY_FOR_SIGNATURE', 'SIGNED', 'SYNC_PENDING', 'SYNC_FAILED', 'READY_FOR_INVOICING', 'INVOICED']).optional(),
++  projectId: z.string().uuid().optional(),
++  employeeId: z.string().uuid().optional(),
++  signed: z
++    .enum(['true', 'false'])
++    .optional()
++    .transform((value) => (value === undefined ? undefined : value === 'true')),
++  teamleaderUploadStatus: z.enum(['TEAMLEADER_UPLOAD_PENDING', 'TEAMLEADER_UPLOADED', 'TEAMLEADER_UPLOAD_FAILED']).optional(),
++  from: z.string().trim().min(1).optional(),
++  to: z.string().trim().min(1).optional(),
++});
++
+ /**
+  * Phase 6/7 — foto's en handtekening komen als base64 mee in de gewone JSON-
+  * body (geen `multipart/form-data`) — zelfde reden als de rest van de app:
+diff --git a/apps/api/src/modules/work-orders/work-order.service.ts b/apps/api/src/modules/work-orders/work-order.service.ts
+index 903ad31..a35e2e0 100644
+--- a/apps/api/src/modules/work-orders/work-order.service.ts
++++ b/apps/api/src/modules/work-orders/work-order.service.ts
+@@ -19,6 +19,54 @@ const WITH_DETAILS = {
+   },
+ } as const;
+ 
++/**
++ * Lichtgewicht select voor de overzichtsschermen (listForAdmin()/
++ * listForEmployee() hieronder) — bewust GEEN foto's/handtekeningbestand,
++ * enkel wat nodig is voor een tabelrij + het aggregeren van totalSeconds.
++ */
++const LIST_ITEM_SELECT = {
++  id: true,
++  workOrderNumber: true,
++  status: true,
++  createdAt: true,
++  projectId: true,
++  teamleaderUploadStatus: true,
++  project: { select: { name: true, projectNumber: true, customer: { select: { name: true } } } },
++  createdByEmployee: { select: { displayName: true } },
++  signature: { select: { signedAt: true } },
++  timeEntries: { select: { timeEntry: { select: { startedAt: true, endedAt: true, pausedSeconds: true } } } },
++} as const;
++
++interface WorkOrderOverviewItemRow {
++  id: string;
++  workOrderNumber: string;
++  status: WorkOrderOverviewItemRecord['status'];
++  createdAt: Date;
++  projectId: string;
++  teamleaderUploadStatus: WorkOrderOverviewItemRecord['teamleaderUploadStatus'];
++  project: { name: string; projectNumber: string | null; customer: { name: string } };
++  createdByEmployee: { displayName: string };
++  signature: { signedAt: Date } | null;
++  timeEntries: Array<{ timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number } }>;
++}
++
++function toOverviewItemRecord(row: WorkOrderOverviewItemRow): WorkOrderOverviewItemRecord {
++  return {
++    id: row.id,
++    workOrderNumber: row.workOrderNumber,
++    status: row.status,
++    createdAt: row.createdAt,
++    projectId: row.projectId,
++    projectName: row.project.name,
++    projectNumber: row.project.projectNumber,
++    customerName: row.project.customer.name,
++    createdByEmployeeDisplayName: row.createdByEmployee.displayName,
++    totalSeconds: row.timeEntries.reduce((sum, link) => sum + computeWorkedSeconds(link.timeEntry), 0),
++    signedAt: row.signature?.signedAt ?? null,
++    teamleaderUploadStatus: row.teamleaderUploadStatus,
++  };
++}
++
+ export interface WorkOrderPhotoRecord {
+   id: string;
+   category: string | null;
+@@ -60,13 +108,16 @@ export interface WorkOrderRecord {
+   teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING' | 'TEAMLEADER_UPLOADED' | 'TEAMLEADER_UPLOAD_FAILED';
+   teamleaderUploadedAt: Date | null;
+   teamleaderUploadError: string | null;
++  /** Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.customerEmailSentAt/reminderSentAt in schema.prisma. */
++  customerEmailSentAt: Date | null;
++  reminderSentAt: Date | null;
+   project: {
+     name: string;
+     projectNumber: string | null;
+     address: string | null;
+     /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
+     signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+-    customer: { name: string; address: string | null; vatNumber: string | null };
++    customer: { name: string; email: string | null; address: string | null; vatNumber: string | null };
+   };
+   createdByEmployee: { displayName: string };
+   timeEntries: Array<{
+@@ -127,6 +178,31 @@ export interface WorkOrderListItemRecord {
+   totalSeconds: number;
+ }
+ 
++export interface WorkOrderOverviewItemRecord {
++  id: string;
++  workOrderNumber: string;
++  status: 'DRAFT' | 'READY_FOR_SIGNATURE' | 'SIGNED' | 'SYNC_PENDING' | 'SYNC_FAILED' | 'READY_FOR_INVOICING' | 'INVOICED';
++  createdAt: Date;
++  projectId: string;
++  projectName: string;
++  projectNumber: string | null;
++  customerName: string;
++  createdByEmployeeDisplayName: string;
++  totalSeconds: number;
++  signedAt: Date | null;
++  teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING' | 'TEAMLEADER_UPLOADED' | 'TEAMLEADER_UPLOAD_FAILED';
++}
++
++export interface WorkOrderAdminListFilters {
++  status?: WorkOrderOverviewItemRecord['status'] | undefined;
++  projectId?: string | undefined;
++  employeeId?: string | undefined;
++  signed?: boolean | undefined;
++  teamleaderUploadStatus?: WorkOrderOverviewItemRecord['teamleaderUploadStatus'] | undefined;
++  from?: Date | undefined;
++  to?: Date | undefined;
++}
++
+ export class WorkOrderService {
+   constructor(private readonly prisma: PrismaClient) {}
+ 
+@@ -138,6 +214,53 @@ export class WorkOrderService {
+     return workOrder;
+   }
+ 
++  /**
++   * Sectie 20 uit de oorspronkelijke projectbrief: "Werkbonnenoverzicht" —
++   * SUPERVISOR+, alle werkbonnen (niet beperkt tot één project of enkel
++   * DRAFT, in tegenstelling tot listDraftsForEmployeeOnProject()
++   * hieronder). Filters: datum, werknemer, project, status, ondertekend
++   * ja/nee, Teamleader-sync — exact de lijst uit sectie 20 (klant/
++   * facturatiestatus zitten al vervat in respectievelijk projectId
++   * (via het project) en status zelf (READY_FOR_INVOICING/INVOICED zijn
++   * WorkOrderStatus-waarden)).
++   */
++  async listForAdmin(filters: WorkOrderAdminListFilters): Promise<WorkOrderOverviewItemRecord[]> {
++    const rows = await this.prisma.workOrder.findMany({
++      where: {
++        ...(filters.status ? { status: filters.status } : {}),
++        ...(filters.projectId ? { projectId: filters.projectId } : {}),
++        ...(filters.employeeId
++          ? { OR: [{ createdByEmployeeId: filters.employeeId }, { timeEntries: { some: { timeEntry: { employeeId: filters.employeeId } } } }] }
++          : {}),
++        ...(filters.signed === true ? { NOT: { status: 'DRAFT' } } : {}),
++        ...(filters.signed === false ? { status: 'DRAFT' } : {}),
++        ...(filters.teamleaderUploadStatus ? { teamleaderUploadStatus: filters.teamleaderUploadStatus } : {}),
++        ...(filters.from || filters.to
++          ? { createdAt: { ...(filters.from ? { gte: filters.from } : {}), ...(filters.to ? { lte: filters.to } : {}) } }
++          : {}),
++      },
++      orderBy: { createdAt: 'desc' },
++      select: LIST_ITEM_SELECT,
++      take: 500,
++    });
++    return (rows as unknown as WorkOrderOverviewItemRow[]).map(toOverviewItemRecord);
++  }
++
++  /**
++   * Sectie 20/Fase 11: "Mijn werkbonnen" — de eigen volledige geschiedenis
++   * van een medewerker (alle statussen, niet enkel DRAFT zoals
++   * listDraftsForEmployeeOnProject()), over alle projecten heen.
++   */
++  async listForEmployee(employeeId: string): Promise<WorkOrderOverviewItemRecord[]> {
++    const rows = await this.prisma.workOrder.findMany({
++      where: { OR: [{ createdByEmployeeId: employeeId }, { timeEntries: { some: { timeEntry: { employeeId } } } }] },
++      orderBy: { createdAt: 'desc' },
++      select: LIST_ITEM_SELECT,
++      take: 200,
++    });
++    return (rows as unknown as WorkOrderOverviewItemRow[]).map(toOverviewItemRecord);
++  }
++
+   /**
+    * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
+    * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — bv. op
+diff --git a/apps/api/src/server.ts b/apps/api/src/server.ts
+index 5c591ad..c273ca0 100644
+--- a/apps/api/src/server.ts
++++ b/apps/api/src/server.ts
+@@ -2,6 +2,8 @@ import { Worker } from 'bullmq';
+ import IORedis from 'ioredis';
+ import { buildApp } from './app';
+ import { env } from './config/env';
++import { AuditLogService } from './modules/audit-log/audit-log.service';
++import { WorkOrderReminderService } from './modules/reminders/work-order-reminder.service';
+ import { SYNC_QUEUE_NAME, type SyncQueueJobData } from './queue/queue';
+ 
+ async function main(): Promise<void> {
+@@ -25,6 +27,25 @@ async function main(): Promise<void> {
+     app.log.error({ err }, 'Herqueuen van openstaande syncjobs bij opstart is mislukt');
+   });
+ 
++  // Op vraag (3/9/2026): "automatische herinnering bij een vergeten
++  // werkbon" — zie WorkOrderReminderService voor de volledige toelichting,
++  // waaronder waarom dit een in-process interval is i.p.v. een externe cron-
++  // dienst. Draait elk uur; de service zelf filtert op WORK_ORDER_REMINDER_
++  // THRESHOLD_HOURS en op reminderSentAt (dus geen dubbele mails per uur).
++  // Bewust ook één run meteen bij opstart (in plaats van pas na het eerste
++  // uur wachten), zelfde reden als reconcilePendingJobs() hierboven: een net
++  // heropgestarte service (na een deploy) mag geen achterstand extra laten
++  // oplopen.
++  const REMINDER_CHECK_INTERVAL_MS = 60 * 60 * 1000;
++  const workOrderReminderService = new WorkOrderReminderService(app.prisma, app.emailService, new AuditLogService(app.prisma));
++  const runReminderCheck = () => {
++    void workOrderReminderService.sendPendingReminders(env.WORK_ORDER_REMINDER_THRESHOLD_HOURS).catch((err: unknown) => {
++      app.log.error({ err }, 'Versturen van werkbon-herinneringen is mislukt');
++    });
++  };
++  runReminderCheck();
++  const reminderInterval = setInterval(runReminderCheck, REMINDER_CHECK_INTERVAL_MS);
++
+   // Demo-/testmodus (RUN_SYNC_WORKER_INLINE, zie config/env.ts): laat de
+   // BullMQ-syncwerker meedraaien in dit proces i.p.v. als aparte
+   // `swatt-sync-worker`-service (queue/worker.ts) — nodig omdat Render's
+@@ -62,6 +83,7 @@ async function main(): Promise<void> {
+   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+     process.on(signal, async () => {
+       app.log.info(`${signal} ontvangen, server wordt afgesloten...`);
++      clearInterval(reminderInterval);
+       await inlineWorker?.close();
+       await inlineWorkerConnection?.quit().catch(() => {
+         // Best effort — bij een reeds verbroken verbinding is er niets meer te sluiten.
+diff --git a/apps/api/test/audit-log.service.test.ts b/apps/api/test/audit-log.service.test.ts
+new file mode 100644
+index 0000000..7909356
+--- /dev/null
++++ b/apps/api/test/audit-log.service.test.ts
+@@ -0,0 +1,100 @@
++import type { PrismaClient } from '@prisma/client';
++import { describe, expect, it, vi } from 'vitest';
++import { AuditLogService } from '../src/modules/audit-log/audit-log.service';
++
++function createFakePrisma() {
++  const rows: Array<{
++    id: string;
++    actorUserId: string | null;
++    action: string;
++    entityType: string;
++    entityId: string;
++    metadata: Record<string, unknown> | null;
++    createdAt: Date;
++  }> = [];
++  let idCounter = 0;
++
++  const prisma = {
++    auditLog: {
++      create: vi.fn(async ({ data }: { data: { actorUserId: string | null; action: string; entityType: string; entityId: string; metadata?: Record<string, unknown> } }) => {
++        const row = { id: `log-${++idCounter}`, metadata: null, createdAt: new Date(), ...data };
++        rows.push(row);
++        return row;
++      }),
++      findMany: vi.fn(
++        async ({
++          where,
++          take,
++        }: {
++          where: { entityType?: string; actorUserId?: string; createdAt?: { gte?: Date; lte?: Date } };
++          take: number;
++        }) => {
++          return rows
++            .filter((row) => (where.entityType ? row.entityType === where.entityType : true))
++            .filter((row) => (where.actorUserId ? row.actorUserId === where.actorUserId : true))
++            .filter((row) => (where.createdAt?.gte ? row.createdAt >= where.createdAt.gte : true))
++            .filter((row) => (where.createdAt?.lte ? row.createdAt <= where.createdAt.lte : true))
++            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
++            .slice(0, take)
++            .map((row) => ({ ...row, actorUser: row.actorUserId ? { email: 'admin@ecofinity.eu', employee: null } : null }));
++        },
++      ),
++    },
++  };
++  return { prisma: prisma as unknown as PrismaClient, rows };
++}
++
++describe('AuditLogService', () => {
++  it('record() slaat een audit-rij op met alle velden', async () => {
++    const { prisma, rows } = createFakePrisma();
++    const service = new AuditLogService(prisma);
++
++    await service.record({
++      actorUserId: 'user-1',
++      action: 'WORK_ORDER_SIGNED',
++      entityType: 'WorkOrder',
++      entityId: 'wo-1',
++      metadata: { signerName: 'Jan Janssens' },
++    });
++
++    expect(rows).toHaveLength(1);
++    expect(rows[0]).toMatchObject({ action: 'WORK_ORDER_SIGNED', entityType: 'WorkOrder', entityId: 'wo-1' });
++  });
++
++  it('record() gooit nooit door, zelfs als de databankschrijving mislukt (mag de hoofdactie niet blokkeren)', async () => {
++    const { prisma } = createFakePrisma();
++    (prisma.auditLog.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('DB weg'));
++    const service = new AuditLogService(prisma);
++
++    await expect(
++      service.record({ actorUserId: 'user-1', action: 'X', entityType: 'Y', entityId: 'z' }),
++    ).resolves.toBeUndefined();
++  });
++
++  it('list() filtert correct op entityType en actorUserId', async () => {
++    const { prisma } = createFakePrisma();
++    const service = new AuditLogService(prisma);
++    await service.record({ actorUserId: 'user-1', action: 'A', entityType: 'WorkOrder', entityId: '1' });
++    await service.record({ actorUserId: 'user-2', action: 'B', entityType: 'PayrollBatch', entityId: '2' });
++
++    const workOrderLogs = await service.list({ entityType: 'WorkOrder' });
++    expect(workOrderLogs).toHaveLength(1);
++    expect(workOrderLogs[0]?.action).toBe('A');
++
++    const user2Logs = await service.list({ actorUserId: 'user-2' });
++    expect(user2Logs).toHaveLength(1);
++    expect(user2Logs[0]?.action).toBe('B');
++  });
++
++  it('list() geeft de meest recente eerst', async () => {
++    const { prisma } = createFakePrisma();
++    const service = new AuditLogService(prisma);
++    await service.record({ actorUserId: 'user-1', action: 'EERST', entityType: 'X', entityId: '1' });
++    await new Promise((resolve) => setTimeout(resolve, 5));
++    await service.record({ actorUserId: 'user-1', action: 'LAATST', entityType: 'X', entityId: '2' });
++
++    const logs = await service.list();
++    expect(logs[0]?.action).toBe('LAATST');
++    expect(logs[1]?.action).toBe('EERST');
++  });
++});
+diff --git a/apps/api/test/work-order-overview.service.test.ts b/apps/api/test/work-order-overview.service.test.ts
+new file mode 100644
+index 0000000..03edb2c
+--- /dev/null
++++ b/apps/api/test/work-order-overview.service.test.ts
+@@ -0,0 +1,173 @@
++import type { PrismaClient } from '@prisma/client';
++import { describe, expect, it } from 'vitest';
++import { WorkOrderService } from '../src/modules/work-orders/work-order.service';
++
++interface FakeRow {
++  id: string;
++  workOrderNumber: string;
++  status: 'DRAFT' | 'READY_FOR_SIGNATURE' | 'SIGNED' | 'SYNC_PENDING' | 'SYNC_FAILED' | 'READY_FOR_INVOICING' | 'INVOICED';
++  createdAt: Date;
++  projectId: string;
++  teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING' | 'TEAMLEADER_UPLOADED' | 'TEAMLEADER_UPLOAD_FAILED';
++  createdByEmployeeId: string;
++  participantEmployeeIds: string[];
++  projectName: string;
++  customerName: string;
++  signedAt: Date | null;
++}
++
++function row(overrides: Partial<FakeRow> & { id: string }): FakeRow {
++  return {
++    workOrderNumber: `WB-${overrides.id}`,
++    status: 'DRAFT',
++    createdAt: new Date('2026-08-15T08:00:00Z'),
++    projectId: 'project-1',
++    teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING',
++    createdByEmployeeId: 'emp-1',
++    participantEmployeeIds: [],
++    projectName: 'Onderhoud HVAC',
++    customerName: 'Janssens BV',
++    signedAt: null,
++    ...overrides,
++  };
++}
++
++function createFakePrisma(rows: FakeRow[]) {
++  const prisma = {
++    workOrder: {
++      findMany: async ({
++        where,
++      }: {
++        where: {
++          status?: FakeRow['status'];
++          projectId?: string;
++          OR?: Array<{ createdByEmployeeId?: string; timeEntries?: { some: { timeEntry: { employeeId: string } } } }>;
++          NOT?: { status: string };
++          teamleaderUploadStatus?: FakeRow['teamleaderUploadStatus'];
++          createdAt?: { gte?: Date; lte?: Date };
++        };
++      }) => {
++        let result = [...rows];
++        if (where.status) result = result.filter((r) => r.status === where.status);
++        if (where.projectId) result = result.filter((r) => r.projectId === where.projectId);
++        if (where.NOT?.status) result = result.filter((r) => r.status !== where.NOT!.status);
++        if (where.teamleaderUploadStatus) result = result.filter((r) => r.teamleaderUploadStatus === where.teamleaderUploadStatus);
++        if (where.createdAt?.gte) result = result.filter((r) => r.createdAt >= where.createdAt!.gte!);
++        if (where.createdAt?.lte) result = result.filter((r) => r.createdAt <= where.createdAt!.lte!);
++        if (where.OR) {
++          const employeeIdClause = where.OR.find((c) => 'createdByEmployeeId' in c)?.createdByEmployeeId;
++          const timeEntryClause = where.OR.find((c) => 'timeEntries' in c)?.timeEntries?.some.timeEntry.employeeId;
++          const employeeId = employeeIdClause ?? timeEntryClause;
++          result = result.filter((r) => r.createdByEmployeeId === employeeId || r.participantEmployeeIds.includes(employeeId!));
++        }
++        return result
++          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
++          .map((r) => ({
++            id: r.id,
++            workOrderNumber: r.workOrderNumber,
++            status: r.status,
++            createdAt: r.createdAt,
++            projectId: r.projectId,
++            teamleaderUploadStatus: r.teamleaderUploadStatus,
++            project: { name: r.projectName, projectNumber: 'P-1', customer: { name: r.customerName } },
++            createdByEmployee: { displayName: `Medewerker ${r.createdByEmployeeId}` },
++            signature: r.signedAt ? { signedAt: r.signedAt } : null,
++            timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-15T08:00:00Z'), endedAt: new Date('2026-08-15T10:00:00Z'), pausedSeconds: 0 } }],
++          }));
++      },
++    },
++  };
++  return prisma as unknown as PrismaClient;
++}
++
++describe('WorkOrderService.listForAdmin() — sectie 20: "Werkbonnenoverzicht"', () => {
++  it('toont alle werkbonnen zonder filters, meest recente eerst', async () => {
++    const prisma = createFakePrisma([
++      row({ id: 'wo-1', createdAt: new Date('2026-08-10T08:00:00Z') }),
++      row({ id: 'wo-2', createdAt: new Date('2026-08-12T08:00:00Z') }),
++    ]);
++    const service = new WorkOrderService(prisma);
++
++    const results = await service.listForAdmin({});
++
++    expect(results.map((r) => r.id)).toEqual(['wo-2', 'wo-1']);
++  });
++
++  it('filtert op status', async () => {
++    const prisma = createFakePrisma([row({ id: 'wo-1', status: 'DRAFT' }), row({ id: 'wo-2', status: 'SIGNED' })]);
++    const service = new WorkOrderService(prisma);
++
++    const results = await service.listForAdmin({ status: 'SIGNED' });
++
++    expect(results.map((r) => r.id)).toEqual(['wo-2']);
++  });
++
++  it('filtert op "ondertekend" (signed: true/false)', async () => {
++    const prisma = createFakePrisma([
++      row({ id: 'wo-draft', status: 'DRAFT' }),
++      row({ id: 'wo-signed', status: 'SIGNED', signedAt: new Date() }),
++    ]);
++    const service = new WorkOrderService(prisma);
++
++    expect((await service.listForAdmin({ signed: true })).map((r) => r.id)).toEqual(['wo-signed']);
++    expect((await service.listForAdmin({ signed: false })).map((r) => r.id)).toEqual(['wo-draft']);
++  });
++
++  it('filtert op project en op Teamleader-syncstatus', async () => {
++    const prisma = createFakePrisma([
++      row({ id: 'wo-1', projectId: 'project-1', teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_FAILED' }),
++      row({ id: 'wo-2', projectId: 'project-2', teamleaderUploadStatus: 'TEAMLEADER_UPLOADED' }),
++    ]);
++    const service = new WorkOrderService(prisma);
++
++    expect((await service.listForAdmin({ projectId: 'project-2' })).map((r) => r.id)).toEqual(['wo-2']);
++    expect((await service.listForAdmin({ teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_FAILED' })).map((r) => r.id)).toEqual(['wo-1']);
++  });
++
++  it('mapt alle velden correct (project, klant, medewerker, uren, ondertekeningsdatum)', async () => {
++    const prisma = createFakePrisma([
++      row({
++        id: 'wo-1',
++        projectName: 'Interventie CV-ketel',
++        customerName: 'De Smet NV',
++        createdByEmployeeId: 'emp-peter',
++        signedAt: new Date('2026-08-15T16:00:00Z'),
++      }),
++    ]);
++    const service = new WorkOrderService(prisma);
++
++    const [result] = await service.listForAdmin({});
++
++    expect(result).toMatchObject({
++      projectName: 'Interventie CV-ketel',
++      customerName: 'De Smet NV',
++      createdByEmployeeDisplayName: 'Medewerker emp-peter',
++      totalSeconds: 7200,
++      signedAt: new Date('2026-08-15T16:00:00Z'),
++    });
++  });
++});
++
++describe('WorkOrderService.listForEmployee() — Fase 11: "Mijn werkbonnen"', () => {
++  it('toont de volledige geschiedenis van de medewerker (alle statussen), niet enkel DRAFT', async () => {
++    const prisma = createFakePrisma([
++      row({ id: 'wo-1', createdByEmployeeId: 'emp-1', status: 'DRAFT' }),
++      row({ id: 'wo-2', createdByEmployeeId: 'emp-1', status: 'INVOICED', createdAt: new Date('2026-07-01T08:00:00Z') }),
++      row({ id: 'wo-3', createdByEmployeeId: 'emp-2', status: 'DRAFT' }), // andere medewerker
++    ]);
++    const service = new WorkOrderService(prisma);
++
++    const results = await service.listForEmployee('emp-1');
++
++    expect(results.map((r) => r.id).sort()).toEqual(['wo-1', 'wo-2']);
++  });
++
++  it('toont een werkbon ook via participatie (tijdregistratie), niet enkel via het aanmaken ervan', async () => {
++    const prisma = createFakePrisma([row({ id: 'wo-1', createdByEmployeeId: 'emp-collega', participantEmployeeIds: ['emp-1'] })]);
++    const service = new WorkOrderService(prisma);
++
++    const results = await service.listForEmployee('emp-1');
++
++    expect(results.map((r) => r.id)).toEqual(['wo-1']);
++  });
++});
+diff --git a/apps/api/test/work-order-reminder.service.test.ts b/apps/api/test/work-order-reminder.service.test.ts
+new file mode 100644
+index 0000000..43d1f1a
+--- /dev/null
++++ b/apps/api/test/work-order-reminder.service.test.ts
+@@ -0,0 +1,142 @@
++import type { PrismaClient } from '@prisma/client';
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { AuditLogService } from '../src/modules/audit-log/audit-log.service';
++import type { EmailService } from '../src/modules/email/email.service';
++import { WorkOrderReminderService } from '../src/modules/reminders/work-order-reminder.service';
++
++vi.mock('../src/config/env', () => ({
++  isEmailConfigured: vi.fn(() => true),
++}));
++
++interface FakeWorkOrder {
++  id: string;
++  workOrderNumber: string;
++  status: string;
++  createdAt: Date;
++  reminderSentAt: Date | null;
++  projectName: string;
++  customerName: string;
++  employeeDisplayName: string;
++  employeeUserId: string;
++  employeeEmail: string;
++}
++
++function createFakePrisma(workOrders: FakeWorkOrder[]) {
++  const prisma = {
++    workOrder: {
++      findMany: async ({ where }: { where: { status: string; createdAt: { lt: Date }; reminderSentAt: null } }) => {
++        return workOrders
++          .filter((wo) => wo.status === where.status && wo.createdAt < where.createdAt.lt && wo.reminderSentAt === where.reminderSentAt)
++          .map((wo) => ({
++            id: wo.id,
++            workOrderNumber: wo.workOrderNumber,
++            createdAt: wo.createdAt,
++            project: { name: wo.projectName, customer: { name: wo.customerName } },
++            createdByEmployee: { displayName: wo.employeeDisplayName, user: { id: wo.employeeUserId, email: wo.employeeEmail } },
++          }));
++      },
++      update: async ({ where, data }: { where: { id: string }; data: { reminderSentAt: Date } }) => {
++        const wo = workOrders.find((w) => w.id === where.id);
++        if (wo) wo.reminderSentAt = data.reminderSentAt;
++        return wo;
++      },
++    },
++  };
++  return prisma as unknown as PrismaClient;
++}
++
++function makeWorkOrder(overrides: Partial<FakeWorkOrder> & { id: string }): FakeWorkOrder {
++  return {
++    workOrderNumber: `WB-${overrides.id}`,
++    status: 'DRAFT',
++    createdAt: new Date('2026-08-01T08:00:00Z'),
++    reminderSentAt: null,
++    projectName: 'Onderhoud HVAC',
++    customerName: 'Janssens BV',
++    employeeDisplayName: 'Peter Janssens',
++    employeeUserId: 'user-1',
++    employeeEmail: 'peter@ecofinity.eu',
++    ...overrides,
++  };
++}
++
++describe('WorkOrderReminderService', () => {
++  let sentEmails: Array<{ to: string; subject: string; html: string }>;
++  let emailService: EmailService;
++  let auditLogService: AuditLogService;
++
++  beforeEach(() => {
++    sentEmails = [];
++    emailService = { send: vi.fn(async (params) => void sentEmails.push(params)) };
++    auditLogService = { record: vi.fn(async () => undefined) } as unknown as AuditLogService;
++  });
++
++  it('stuurt een herinnering voor een DRAFT-werkbon ouder dan de drempel zonder eerdere herinnering', async () => {
++    const oldWorkOrder = makeWorkOrder({ id: 'wo-1', createdAt: new Date(Date.now() - 30 * 60 * 60 * 1000) }); // 30u geleden
++    const prisma = createFakePrisma([oldWorkOrder]);
++    const service = new WorkOrderReminderService(prisma, emailService, auditLogService);
++
++    const sentCount = await service.sendPendingReminders(24);
++
++    expect(sentCount).toBe(1);
++    expect(sentEmails).toHaveLength(1);
++    expect(sentEmails[0]?.to).toBe('peter@ecofinity.eu');
++    expect(sentEmails[0]?.html).toContain('WB-wo-1');
++    expect(oldWorkOrder.reminderSentAt).not.toBeNull();
++  });
++
++  it('stuurt geen herinnering voor een werkbon die nog niet oud genoeg is', async () => {
++    const recentWorkOrder = makeWorkOrder({ id: 'wo-2', createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000) }); // 2u geleden
++    const prisma = createFakePrisma([recentWorkOrder]);
++    const service = new WorkOrderReminderService(prisma, emailService, auditLogService);
++
++    const sentCount = await service.sendPendingReminders(24);
++
++    expect(sentCount).toBe(0);
++    expect(sentEmails).toHaveLength(0);
++  });
++
++  it('stuurt geen tweede herinnering voor een werkbon die er al één kreeg', async () => {
++    const alreadyReminded = makeWorkOrder({
++      id: 'wo-3',
++      createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
++      reminderSentAt: new Date(),
++    });
++    const prisma = createFakePrisma([alreadyReminded]);
++    const service = new WorkOrderReminderService(prisma, emailService, auditLogService);
++
++    const sentCount = await service.sendPendingReminders(24);
++
++    expect(sentCount).toBe(0);
++  });
++
++  it('een mislukte verzending blokkeert de andere werkbonnen niet', async () => {
++    const willFail = makeWorkOrder({ id: 'wo-4', createdAt: new Date(Date.now() - 30 * 60 * 60 * 1000), employeeEmail: 'fail@ecofinity.eu' });
++    const willSucceed = makeWorkOrder({ id: 'wo-5', createdAt: new Date(Date.now() - 30 * 60 * 60 * 1000) });
++    const prisma = createFakePrisma([willFail, willSucceed]);
++    emailService.send = vi.fn(async (params) => {
++      if (params.to === 'fail@ecofinity.eu') throw new Error('Resend tijdelijk onbeschikbaar');
++      sentEmails.push(params);
++    });
++    const service = new WorkOrderReminderService(prisma, emailService, auditLogService);
++
++    const sentCount = await service.sendPendingReminders(24);
++
++    expect(sentCount).toBe(1);
++    expect(willFail.reminderSentAt).toBeNull(); // blijft null, komt volgende run opnieuw aan bod
++    expect(willSucceed.reminderSentAt).not.toBeNull();
++  });
++
++  it('doet niets wanneer e-mail niet geconfigureerd is', async () => {
++    const { isEmailConfigured } = await import('../src/config/env.js');
++    vi.mocked(isEmailConfigured).mockReturnValueOnce(false);
++    const oldWorkOrder = makeWorkOrder({ id: 'wo-6', createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000) });
++    const prisma = createFakePrisma([oldWorkOrder]);
++    const service = new WorkOrderReminderService(prisma, emailService, auditLogService);
++
++    const sentCount = await service.sendPendingReminders(24);
++
++    expect(sentCount).toBe(0);
++    expect(sentEmails).toHaveLength(0);
++  });
++});
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 85461b1..1519226 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -17,6 +17,9 @@ import { PayrollPage } from './pages/admin/PayrollPage';
+ import { InvoicingPage } from './pages/admin/InvoicingPage';
+ import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
+ import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
++import { AuditLogPage } from './pages/admin/AuditLogPage';
++import { WorkOrdersOverviewPage } from './pages/admin/WorkOrdersOverviewPage';
++import { MyWorkOrdersPage } from './pages/MyWorkOrdersPage';
+ import { UserDetailPage } from './pages/admin/UserDetailPage';
+ import { UsersPage } from './pages/admin/UsersPage';
+ 
+@@ -137,6 +140,30 @@ export function App() {
+           </RequireAuth>
+         }
+       />
++      <Route
++        path="/backoffice/auditlog"
++        element={
++          <RequireAuth minimumRole="ADMIN">
++            <AuditLogPage />
++          </RequireAuth>
++        }
++      />
++      <Route
++        path="/backoffice/werkbonnen"
++        element={
++          <RequireAuth minimumRole="SUPERVISOR">
++            <WorkOrdersOverviewPage />
++          </RequireAuth>
++        }
++      />
++      <Route
++        path="/mijn-werkbonnen"
++        element={
++          <RequireAuth>
++            <MyWorkOrdersPage />
++          </RequireAuth>
++        }
++      />
+       <Route
+         path="/backoffice/facturatie"
+         element={
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 2389a75..0579887 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -24,6 +24,7 @@ import type {
+   ListTeamleaderUsersResponseBody,
+   ListUsersResponseBody,
+   ListWorkOrderDraftsResponseBody,
++  ListWorkOrdersOverviewResponseBody,
+   ListWorkOrderSyncIssuesResponseBody,
+   LinkTeamleaderUserBody,
+   LoginResponseBody,
+@@ -32,7 +33,9 @@ import type {
+   ProjectSyncResponseBody,
+   CreateWorkOrderBody,
+   ResendInviteResponseBody,
++  ListAuditLogResponseBody,
+   RetryWorkOrderSyncResponseBody,
++  SendWorkOrderPdfResponseBody,
+   SelectProjectMilestoneResponseBody,
+   UpdateProjectInvoicingEnabledResponseBody,
+   UpdateProjectOvertimeSettingsBody,
+@@ -316,6 +319,21 @@ export const workOrdersApi = {
+     request<ListWorkOrderDraftsResponseBody>(`/work-orders/drafts?projectId=${encodeURIComponent(projectId)}`, {
+       method: 'GET',
+     }),
++  /** Fase 11/sectie 20 — "Mijn werkbonnen": de eigen volledige geschiedenis. */
++  listMine: () => request<ListWorkOrdersOverviewResponseBody>('/work-orders/mine', { method: 'GET' }),
++  /** Sectie 20 — "Werkbonnenoverzicht" (SUPERVISOR+), met filters. */
++  listOverview: (filters: { status?: string; projectId?: string; employeeId?: string; signed?: boolean; teamleaderUploadStatus?: string; from?: string; to?: string } = {}) => {
++    const params = new URLSearchParams();
++    if (filters.status) params.set('status', filters.status);
++    if (filters.projectId) params.set('projectId', filters.projectId);
++    if (filters.employeeId) params.set('employeeId', filters.employeeId);
++    if (filters.signed !== undefined) params.set('signed', String(filters.signed));
++    if (filters.teamleaderUploadStatus) params.set('teamleaderUploadStatus', filters.teamleaderUploadStatus);
++    if (filters.from) params.set('from', filters.from);
++    if (filters.to) params.set('to', filters.to);
++    const query = params.toString();
++    return request<ListWorkOrdersOverviewResponseBody>(`/admin/work-orders${query ? `?${query}` : ''}`, { method: 'GET' });
++  },
+   get: (workOrderId: string) => request<WorkOrderResponseBody>(`/work-orders/${workOrderId}`, { method: 'GET' }),
+   /** Phase 7 — verplichte klanthandtekening (sectie 10). Zet de werkbon DRAFT → SIGNED. */
+   sign: (workOrderId: string, body: SignWorkOrderBody) =>
+@@ -336,6 +354,21 @@ export const workOrdersApi = {
+    */
+   retrySync: (workOrderId: string) =>
+     request<RetryWorkOrderSyncResponseBody>(`/work-orders/${workOrderId}/sync/retry`, { method: 'POST' }),
++  /** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen". */
++  sendToCustomer: (workOrderId: string) =>
++    request<SendWorkOrderPdfResponseBody>(`/work-orders/${workOrderId}/send-to-customer`, { method: 'POST' }),
++};
++
++/** Op vraag (3/9/2026): "auditlog-scherm". ADMIN-only, zie AuditLogPage.tsx. */
++export const auditLogApi = {
++  list: (filters: { entityType?: string; from?: string; to?: string } = {}) => {
++    const params = new URLSearchParams();
++    if (filters.entityType) params.set('entityType', filters.entityType);
++    if (filters.from) params.set('from', filters.from);
++    if (filters.to) params.set('to', filters.to);
++    const query = params.toString();
++    return request<ListAuditLogResponseBody>(`/admin/audit-log${query ? `?${query}` : ''}`, { method: 'GET' });
++  },
+ };
+ 
+ /**
+diff --git a/apps/web/src/pages/HomePage.tsx b/apps/web/src/pages/HomePage.tsx
+index 3d2877a..c11121c 100644
+--- a/apps/web/src/pages/HomePage.tsx
++++ b/apps/web/src/pages/HomePage.tsx
+@@ -74,6 +74,13 @@ export function HomePage() {
+         Mijn projecten
+       </Link>
+ 
++      <Link
++        to="/mijn-werkbonnen"
++        className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
++      >
++        Mijn werkbonnen
++      </Link>
++
+       <Link
+         to="/app-toegang"
+         className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+@@ -108,6 +115,15 @@ export function HomePage() {
+         </Link>
+       )}
+ 
++      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
++        <Link
++          to="/backoffice/werkbonnen"
++          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
++        >
++          Werkbonnenoverzicht
++        </Link>
++      )}
++
+       {user.role === 'ADMIN' && (
+         <Link
+           to="/backoffice/facturatie"
+@@ -135,6 +151,15 @@ export function HomePage() {
+         </Link>
+       )}
+ 
++      {user.role === 'ADMIN' && (
++        <Link
++          to="/backoffice/auditlog"
++          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
++        >
++          Auditlog
++        </Link>
++      )}
++
+       {user.role === 'ADMIN' && (
+         <Link
+           to="/instellingen/teamleader"
+diff --git a/apps/web/src/pages/MyWorkOrdersPage.tsx b/apps/web/src/pages/MyWorkOrdersPage.tsx
+new file mode 100644
+index 0000000..80e995d
+--- /dev/null
++++ b/apps/web/src/pages/MyWorkOrdersPage.tsx
+@@ -0,0 +1,103 @@
++import type { WorkOrderOverviewItemSummary } from '@swatt/shared-types';
++import { useCallback, useEffect, useState } from 'react';
++import { Link } from 'react-router-dom';
++import { workOrdersApi } from '../api/client';
++import { ApiRequestError } from '../auth/AuthContext';
++
++/**
++ * Fase 11/sectie 20: "Mijn werkbonnen" — de eigen volledige werkbon-
++ * geschiedenis (alle statussen, alle projecten). Vult
++ * ProjectTimerPage.tsx's "Nog niet getekende werkbonnen"-sectie aan (die is
++ * beperkt tot DRAFT-werkbonnen van één project): hier ziet een installateur
++ * ook zijn al ondertekende/gefactureerde werkbonnen terug, over alle
++ * projecten heen.
++ */
++export function MyWorkOrdersPage() {
++  const [workOrders, setWorkOrders] = useState<WorkOrderOverviewItemSummary[] | null>(null);
++  const [errorMessage, setErrorMessage] = useState<string | null>(null);
++
++  const load = useCallback(async () => {
++    try {
++      const response = await workOrdersApi.listMine();
++      setWorkOrders(response.workOrders);
++      setErrorMessage(null);
++    } catch (err) {
++      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon je werkbonnen niet ophalen.');
++    }
++  }, []);
++
++  useEffect(() => {
++    void load();
++  }, [load]);
++
++  return (
++    <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
++      <header className="mb-6 flex items-center justify-between">
++        <h1 className="text-xl font-bold">Mijn werkbonnen</h1>
++        <Link to="/" className="text-sm text-neutral-400 underline">
++          Terug
++        </Link>
++      </header>
++
++      {errorMessage && (
++        <p className="mb-4 rounded-lg border border-red-900 bg-red-950 px-4 py-3 text-sm text-red-200">{errorMessage}</p>
++      )}
++
++      {workOrders === null && !errorMessage && <p className="text-neutral-400">Laden...</p>}
++
++      {workOrders && workOrders.length === 0 && <p className="text-neutral-400">Je hebt nog geen werkbonnen.</p>}
++
++      {workOrders && workOrders.length > 0 && (
++        <ul className="space-y-3">
++          {workOrders.map((workOrder) => (
++            <li key={workOrder.id}>
++              <Link
++                to={`/werkbonnen/${workOrder.id}`}
++                className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-3 active:bg-neutral-800"
++              >
++                <span>
++                  <span className="block text-sm font-semibold">{workOrder.workOrderNumber}</span>
++                  <span className="block text-xs text-neutral-400">
++                    {workOrder.customerName} — {workOrder.projectName}
++                  </span>
++                  <span className="block text-xs text-neutral-500">{formatDate(workOrder.createdAt)}</span>
++                </span>
++                <StatusBadge status={workOrder.status} />
++              </Link>
++            </li>
++          ))}
++        </ul>
++      )}
++    </main>
++  );
++}
++
++/** Zelfde mensentaal-labels als het backoffice-overzicht (WorkOrdersOverviewPage.tsx) — bewust hier lokaal herhaald i.p.v. gedeeld, zie de toelichting in dat bestand. */
++const STATUS_LABELS: Record<WorkOrderOverviewItemSummary['status'], string> = {
++  DRAFT: 'Concept',
++  READY_FOR_SIGNATURE: 'Klaar om te ondertekenen',
++  SIGNED: 'Ondertekend',
++  SYNC_PENDING: 'Synchronisatie bezig',
++  SYNC_FAILED: 'Synchronisatie mislukt',
++  READY_FOR_INVOICING: 'Klaar voor facturatie',
++  INVOICED: 'Gefactureerd',
++};
++
++function StatusBadge({ status }: { status: WorkOrderOverviewItemSummary['status'] }) {
++  const isDraft = status === 'DRAFT';
++  const isFailed = status === 'SYNC_FAILED';
++  return (
++    <span
++      className={[
++        'shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold',
++        isFailed ? 'bg-red-950 text-red-300' : isDraft ? 'bg-neutral-800 text-neutral-300' : 'bg-emerald-950 text-emerald-300',
++      ].join(' ')}
++    >
++      {STATUS_LABELS[status]}
++    </span>
++  );
++}
++
++function formatDate(iso: string): string {
++  return new Date(iso).toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
++}
+diff --git a/apps/web/src/pages/WorkOrderReviewPage.tsx b/apps/web/src/pages/WorkOrderReviewPage.tsx
+index 7317123..831dd7e 100644
+--- a/apps/web/src/pages/WorkOrderReviewPage.tsx
++++ b/apps/web/src/pages/WorkOrderReviewPage.tsx
+@@ -49,6 +49,11 @@ export function WorkOrderReviewPage() {
+   const [isRegeneratingPdf, setIsRegeneratingPdf] = useState(false);
+   const [regeneratePdfError, setRegeneratePdfError] = useState<string | null>(null);
+ 
++  // Op vraag (3/9/2026): "PDF via een knop naar de klant sturen".
++  const [isSendingToCustomer, setIsSendingToCustomer] = useState(false);
++  const [sendToCustomerError, setSendToCustomerError] = useState<string | null>(null);
++  const [sendToCustomerSentAt, setSendToCustomerSentAt] = useState<string | null>(null);
++
+   const [isRetryingSync, setIsRetryingSync] = useState(false);
+   const [retrySyncError, setRetrySyncError] = useState<string | null>(null);
+ 
+@@ -192,6 +197,21 @@ export function WorkOrderReviewPage() {
+     }
+   }
+ 
++  /** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen". */
++  async function handleSendToCustomer() {
++    if (!workOrderId) return;
++    setSendToCustomerError(null);
++    setIsSendingToCustomer(true);
++    try {
++      const response = await workOrdersApi.sendToCustomer(workOrderId);
++      setSendToCustomerSentAt(response.sentAt);
++    } catch (err) {
++      setSendToCustomerError(err instanceof ApiRequestError ? err.message : 'Versturen naar de klant is mislukt.');
++    } finally {
++      setIsSendingToCustomer(false);
++    }
++  }
++
+   /**
+    * Phase 9 — sectie 13: handmatige "Opnieuw synchroniseren" (SUPERVISOR+,
+    * zie SyncJobService.retry).
+@@ -255,6 +275,10 @@ export function WorkOrderReviewPage() {
+           isRegeneratingPdf={isRegeneratingPdf}
+           regeneratePdfError={regeneratePdfError}
+           onRegeneratePdf={() => void handleRegeneratePdf()}
++          isSendingToCustomer={isSendingToCustomer}
++          sendToCustomerError={sendToCustomerError}
++          sendToCustomerSentAt={sendToCustomerSentAt}
++          onSendToCustomer={() => void handleSendToCustomer()}
+           isRetryingSync={isRetryingSync}
+           retrySyncError={retrySyncError}
+           onRetrySync={() => void handleRetrySync()}
+@@ -613,6 +637,10 @@ function SignedWorkOrderView({
+   isRegeneratingPdf,
+   regeneratePdfError,
+   onRegeneratePdf,
++  isSendingToCustomer,
++  sendToCustomerError,
++  sendToCustomerSentAt,
++  onSendToCustomer,
+   isRetryingSync,
+   retrySyncError,
+   onRetrySync,
+@@ -622,6 +650,10 @@ function SignedWorkOrderView({
+   isRegeneratingPdf: boolean;
+   regeneratePdfError: string | null;
+   onRegeneratePdf: () => void;
++  isSendingToCustomer: boolean;
++  sendToCustomerError: string | null;
++  sendToCustomerSentAt: string | null;
++  onSendToCustomer: () => void;
+   isRetryingSync: boolean;
+   retrySyncError: string | null;
+   onRetrySync: () => void;
+@@ -657,6 +689,25 @@ function SignedWorkOrderView({
+           </a>
+         )}
+ 
++        {workOrder.pdfStatus === 'PDF_READY' && (
++          <div className="mt-3">
++            <button
++              type="button"
++              onClick={onSendToCustomer}
++              disabled={isSendingToCustomer}
++              className="rounded-lg border border-swatt-gold px-4 py-3 text-sm font-semibold text-swatt-gold disabled:opacity-60"
++            >
++              {isSendingToCustomer ? 'Bezig...' : 'Verstuur naar klant'}
++            </button>
++            {sendToCustomerSentAt && (
++              <p className="mt-2 text-sm text-emerald-300">
++                Verstuurd op {new Date(sendToCustomerSentAt).toLocaleString('nl-BE')}
++              </p>
++            )}
++            {sendToCustomerError && <p className="mt-2 text-sm text-red-300">{sendToCustomerError}</p>}
++          </div>
++        )}
++
+         {workOrder.pdfStatus === 'PDF_FAILED' && (
+           <div className="mt-3">
+             {workOrder.pdfError && <p className="mb-2 text-sm text-red-300">{workOrder.pdfError}</p>}
+diff --git a/apps/web/src/pages/admin/AuditLogPage.tsx b/apps/web/src/pages/admin/AuditLogPage.tsx
+new file mode 100644
+index 0000000..2e4ced4
+--- /dev/null
++++ b/apps/web/src/pages/admin/AuditLogPage.tsx
+@@ -0,0 +1,156 @@
++import type { AuditLogEntrySummary } from '@swatt/shared-types';
++import { useCallback, useEffect, useState } from 'react';
++import { Link } from 'react-router-dom';
++import { auditLogApi } from '../../api/client';
++import { ApiRequestError } from '../../auth/AuthContext';
++
++/**
++ * Backoffice-scherm "Auditlog" (op vraag, 3/9/2026: "om bij een geschil te
++ * zien wie iets wanneer gewijzigd heeft" — sectie 23/26 uit de oorspronkelijke
++ * projectbrief). ADMIN-only, zelfde gevoeligheidsniveau als Facturatie/Uren-
++ * export. Toont enkel de acties die AuditLogService instrumenteert (zie de
++ * toelichting bij AuditLog in schema.prisma — een eerste, gerichte selectie
++ * van financiële/status-wijzigingen, niet elke mogelijke actie in de app).
++ */
++const ACTION_LABELS: Record<string, string> = {
++  WORK_ORDER_SIGNED: 'Werkbon ondertekend',
++  WORK_ORDER_SENT_TO_CUSTOMER: 'Werkbon-PDF naar klant gestuurd',
++  WORK_ORDER_REMINDER_SENT: 'Herinnering verstuurd',
++  WEEKLY_APPROVAL_SIGNED: 'Week ondertekend',
++  WEEKLY_APPROVAL_REOPENED: 'Week heropend',
++  PAYROLL_BATCH_CREATED: 'Personeelsuitbetaling aangemaakt',
++  PAYROLL_BATCH_REMOVED: 'Personeelsuitbetaling verwijderd',
++  INVOICE_BATCH_CREATED: 'Facturatiebatch aangemaakt',
++  INVOICE_BATCH_REMOVED: 'Facturatiebatch verwijderd',
++  INVOICE_BATCH_TEAMLEADER_DRAFT_CREATED: 'Conceptfactuur aangemaakt in Teamleader',
++  HOURS_EXPORT_MARKED_EXPORTED: 'Uren als geëxporteerd gemarkeerd',
++  USER_CREATED: 'Gebruiker aangemaakt',
++  USER_DEACTIVATED: 'Gebruiker gedeactiveerd',
++  USER_ACTIVATED: 'Gebruiker geactiveerd',
++  USER_ROLE_CHANGED: 'Rol gewijzigd',
++  USER_DELETED: 'Gebruiker verwijderd',
++};
++
++const ENTITY_TYPE_OPTIONS = [
++  { value: '', label: 'Alle types' },
++  { value: 'WorkOrder', label: 'Werkbon' },
++  { value: 'WeeklyApproval', label: 'Weekgoedkeuring' },
++  { value: 'PayrollBatch', label: 'Personeelsuitbetaling' },
++  { value: 'InvoiceBatch', label: 'Facturatiebatch' },
++  { value: 'Employee', label: 'Medewerker (uren-export)' },
++  { value: 'User', label: 'Gebruiker' },
++];
++
++export function AuditLogPage() {
++  const [entries, setEntries] = useState<AuditLogEntrySummary[] | null>(null);
++  const [errorMessage, setErrorMessage] = useState<string | null>(null);
++  const [entityType, setEntityType] = useState('');
++  const [fromDate, setFromDate] = useState('');
++  const [toDate, setToDate] = useState('');
++
++  const load = useCallback(async (filters: { entityType: string; from: string; to: string }) => {
++    try {
++      const response = await auditLogApi.list({
++        entityType: filters.entityType || undefined,
++        from: filters.from ? new Date(filters.from).toISOString() : undefined,
++        to: filters.to ? new Date(`${filters.to}T23:59:59`).toISOString() : undefined,
++      });
++      setEntries(response.entries);
++      setErrorMessage(null);
++    } catch (err) {
++      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de auditlog niet ophalen.');
++    }
++  }, []);
++
++  useEffect(() => {
++    void load({ entityType, from: fromDate, to: toDate });
++  }, [entityType, fromDate, toDate, load]);
++
++  return (
++    <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
++      <header className="mb-8 flex items-center justify-between">
++        <div>
++          <h1 className="text-2xl font-extrabold tracking-tight">Auditlog</h1>
++          <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold-dark">Backoffice</p>
++        </div>
++        <Link to="/" className="text-sm font-semibold text-swatt-gold-dark underline">
++          Terug naar overzicht
++        </Link>
++      </header>
++
++      <div className="mb-6 flex flex-wrap items-end gap-4">
++        <label className="text-sm text-neutral-600">
++          Type
++          <select
++            value={entityType}
++            onChange={(e) => setEntityType(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          >
++            {ENTITY_TYPE_OPTIONS.map((option) => (
++              <option key={option.value} value={option.value}>
++                {option.label}
++              </option>
++            ))}
++          </select>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Van
++          <input
++            type="date"
++            value={fromDate}
++            onChange={(e) => setFromDate(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          />
++        </label>
++        <label className="text-sm text-neutral-600">
++          Tot
++          <input
++            type="date"
++            value={toDate}
++            onChange={(e) => setToDate(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          />
++        </label>
++      </div>
++
++      {errorMessage && <p className="mb-4 text-sm text-red-700">{errorMessage}</p>}
++
++      {entries && entries.length === 0 && <p className="text-sm text-neutral-500">Geen resultaten voor deze filters.</p>}
++
++      {entries && entries.length > 0 && (
++        <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
++          <table className="w-full text-left text-sm">
++            <thead className="border-b border-neutral-200 bg-neutral-50 text-xs uppercase tracking-wide text-neutral-500">
++              <tr>
++                <th className="px-4 py-3">Datum/tijd</th>
++                <th className="px-4 py-3">Actie</th>
++                <th className="px-4 py-3">Door</th>
++                <th className="px-4 py-3">Details</th>
++              </tr>
++            </thead>
++            <tbody className="divide-y divide-neutral-100">
++              {entries.map((entry) => (
++                <tr key={entry.id}>
++                  <td className="whitespace-nowrap px-4 py-3 text-neutral-500">
++                    {new Date(entry.createdAt).toLocaleString('nl-BE')}
++                  </td>
++                  <td className="px-4 py-3 font-medium">{ACTION_LABELS[entry.action] ?? entry.action}</td>
++                  <td className="px-4 py-3 text-neutral-600">{entry.actorDisplayName ?? 'Systeem'}</td>
++                  <td className="px-4 py-3 text-xs text-neutral-500">{formatMetadata(entry.metadata)}</td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++    </main>
++  );
++}
++
++/** Eenvoudige, leesbare weergave van de vrije metadata-JSON — geen poging tot mooie opmaak per actietype, enkel key: value. */
++function formatMetadata(metadata: Record<string, unknown> | null): string {
++  if (!metadata) return '—';
++  return Object.entries(metadata)
++    .map(([key, value]) => `${key}: ${String(value)}`)
++    .join(', ');
++}
+diff --git a/apps/web/src/pages/admin/WorkOrdersOverviewPage.tsx b/apps/web/src/pages/admin/WorkOrdersOverviewPage.tsx
+new file mode 100644
+index 0000000..4fd7313
+--- /dev/null
++++ b/apps/web/src/pages/admin/WorkOrdersOverviewPage.tsx
+@@ -0,0 +1,190 @@
++import type { WorkOrderOverviewItemSummary, WorkOrderStatus, WorkOrderTeamleaderUploadStatus } from '@swatt/shared-types';
++import { useCallback, useEffect, useState } from 'react';
++import { Link } from 'react-router-dom';
++import { workOrdersApi } from '../../api/client';
++import { ApiRequestError } from '../../auth/AuthContext';
++
++/**
++ * Sectie 20 uit de oorspronkelijke projectbrief: "Werkbonnenoverzicht" —
++ * SUPERVISOR+. Filters: status, ondertekend ja/nee, project, Teamleader-
++ * sync (datum/werknemer via de Van/Tot-velden en dropdown hieronder; klant
++ * zit vervat in het project, facturatiestatus in status zelf —
++ * READY_FOR_INVOICING/INVOICED zijn WorkOrderStatus-waarden, zie
++ * WorkOrderService.listForAdmin() voor de volledige toelichting).
++ */
++const STATUS_LABELS: Record<WorkOrderStatus, string> = {
++  DRAFT: 'Concept',
++  READY_FOR_SIGNATURE: 'Klaar om te ondertekenen',
++  SIGNED: 'Ondertekend',
++  SYNC_PENDING: 'Synchronisatie bezig',
++  SYNC_FAILED: 'Synchronisatie mislukt',
++  READY_FOR_INVOICING: 'Klaar voor facturatie',
++  INVOICED: 'Gefactureerd',
++};
++
++const TEAMLEADER_UPLOAD_STATUS_LABELS: Record<WorkOrderTeamleaderUploadStatus, string> = {
++  TEAMLEADER_UPLOAD_PENDING: 'Nog niet geüpload',
++  TEAMLEADER_UPLOADED: 'Geüpload',
++  TEAMLEADER_UPLOAD_FAILED: 'Upload mislukt',
++};
++
++export function WorkOrdersOverviewPage() {
++  const [workOrders, setWorkOrders] = useState<WorkOrderOverviewItemSummary[] | null>(null);
++  const [errorMessage, setErrorMessage] = useState<string | null>(null);
++  const [status, setStatus] = useState('');
++  const [signed, setSigned] = useState('');
++  const [teamleaderUploadStatus, setTeamleaderUploadStatus] = useState('');
++  const [fromDate, setFromDate] = useState('');
++  const [toDate, setToDate] = useState('');
++
++  const load = useCallback(
++    async (filters: { status: string; signed: string; teamleaderUploadStatus: string; from: string; to: string }) => {
++      try {
++        const response = await workOrdersApi.listOverview({
++          status: filters.status || undefined,
++          signed: filters.signed === '' ? undefined : filters.signed === 'true',
++          teamleaderUploadStatus: filters.teamleaderUploadStatus || undefined,
++          from: filters.from ? new Date(filters.from).toISOString() : undefined,
++          to: filters.to || undefined,
++        });
++        setWorkOrders(response.workOrders);
++        setErrorMessage(null);
++      } catch (err) {
++        setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon het werkbonnenoverzicht niet ophalen.');
++      }
++    },
++    [],
++  );
++
++  useEffect(() => {
++    void load({ status, signed, teamleaderUploadStatus, from: fromDate, to: toDate });
++  }, [status, signed, teamleaderUploadStatus, fromDate, toDate, load]);
++
++  return (
++    <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
++      <header className="mb-8 flex items-center justify-between">
++        <div>
++          <h1 className="text-2xl font-extrabold tracking-tight">Werkbonnenoverzicht</h1>
++          <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold-dark">Backoffice</p>
++        </div>
++        <Link to="/" className="text-sm text-neutral-500 underline">
++          Terug naar overzicht
++        </Link>
++      </header>
++
++      <div className="mb-6 flex flex-wrap items-end gap-4">
++        <label className="text-sm text-neutral-600">
++          Status
++          <select
++            value={status}
++            onChange={(e) => setStatus(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          >
++            <option value="">Alle statussen</option>
++            {(Object.keys(STATUS_LABELS) as WorkOrderStatus[]).map((value) => (
++              <option key={value} value={value}>
++                {STATUS_LABELS[value]}
++              </option>
++            ))}
++          </select>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Ondertekend
++          <select
++            value={signed}
++            onChange={(e) => setSigned(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          >
++            <option value="">Alle</option>
++            <option value="true">Ja</option>
++            <option value="false">Nee</option>
++          </select>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Teamleader-sync
++          <select
++            value={teamleaderUploadStatus}
++            onChange={(e) => setTeamleaderUploadStatus(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          >
++            <option value="">Alle</option>
++            {(Object.keys(TEAMLEADER_UPLOAD_STATUS_LABELS) as WorkOrderTeamleaderUploadStatus[]).map((value) => (
++              <option key={value} value={value}>
++                {TEAMLEADER_UPLOAD_STATUS_LABELS[value]}
++              </option>
++            ))}
++          </select>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Van
++          <input
++            type="date"
++            value={fromDate}
++            onChange={(e) => setFromDate(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          />
++        </label>
++        <label className="text-sm text-neutral-600">
++          Tot
++          <input
++            type="date"
++            value={toDate}
++            onChange={(e) => setToDate(e.target.value)}
++            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          />
++        </label>
++      </div>
++
++      {errorMessage && <p className="mb-4 text-sm text-red-700">{errorMessage}</p>}
++
++      {workOrders && workOrders.length === 0 && <p className="text-sm text-neutral-500">Geen werkbonnen voor deze filters.</p>}
++
++      {workOrders && workOrders.length > 0 && (
++        <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
++          <table className="w-full text-left text-sm">
++            <thead className="border-b border-neutral-200 bg-neutral-50 text-xs uppercase tracking-wide text-neutral-500">
++              <tr>
++                <th className="px-4 py-3">Werkbon</th>
++                <th className="px-4 py-3">Klant / project</th>
++                <th className="px-4 py-3">Medewerker</th>
++                <th className="px-4 py-3">Datum</th>
++                <th className="px-4 py-3">Uren</th>
++                <th className="px-4 py-3">Status</th>
++                <th className="px-4 py-3">Teamleader</th>
++              </tr>
++            </thead>
++            <tbody className="divide-y divide-neutral-100">
++              {workOrders.map((workOrder) => (
++                <tr key={workOrder.id}>
++                  <td className="px-4 py-3">
++                    <Link to={`/werkbonnen/${workOrder.id}`} className="font-medium text-swatt-gold-dark underline">
++                      {workOrder.workOrderNumber}
++                    </Link>
++                  </td>
++                  <td className="px-4 py-3 text-neutral-600">
++                    {workOrder.customerName} — {workOrder.projectName}
++                  </td>
++                  <td className="px-4 py-3 text-neutral-600">{workOrder.createdByEmployeeDisplayName}</td>
++                  <td className="whitespace-nowrap px-4 py-3 text-neutral-500">{formatDate(workOrder.createdAt)}</td>
++                  <td className="px-4 py-3 text-neutral-600">{formatHm(workOrder.totalSeconds)}</td>
++                  <td className="px-4 py-3">{STATUS_LABELS[workOrder.status]}</td>
++                  <td className="px-4 py-3 text-neutral-600">{TEAMLEADER_UPLOAD_STATUS_LABELS[workOrder.teamleaderUploadStatus]}</td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++    </main>
++  );
++}
++
++function formatDate(iso: string): string {
++  return new Date(iso).toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
++}
++
++function formatHm(totalSeconds: number): string {
++  const hours = Math.floor(totalSeconds / 3600);
++  const minutes = Math.floor((totalSeconds % 3600) / 60);
++  return `${hours}u${String(minutes).padStart(2, '0')}`;
++}
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index e6d459b..08c1f2d 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -717,6 +717,28 @@ export interface ListWorkOrderSyncIssuesResponseBody {
+   workOrders: WorkOrderSyncIssueSummary[];
+ }
+ 
++/**
++ * Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
++ * wanneer gewijzigd heeft". Zie AuditLog in schema.prisma voor de volledige
++ * toelichting bij het datamodel.
++ */
++export interface AuditLogEntrySummary {
++  id: string;
++  /** Naam van de medewerker (of anders het e-mailadres) die de actie uitvoerde — `null` bij een systeemactie (bv. de automatische herinnering). */
++  actorDisplayName: string | null;
++  /** Bv. "WORK_ORDER_SIGNED", "PAYROLL_BATCH_CREATED" — vrije, leesbare code. */
++  action: string;
++  entityType: string;
++  entityId: string;
++  metadata: Record<string, unknown> | null;
++  createdAt: string;
++}
++
++/** Response van GET /admin/audit-log. */
++export interface ListAuditLogResponseBody {
++  entries: AuditLogEntrySummary[];
++}
++
+ /**
+  * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
+  * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — lichtgewicht
+@@ -730,11 +752,46 @@ export interface WorkOrderDraftSummary {
+   totalSeconds: number;
+ }
+ 
++/**
++ * Sectie 20/Fase 11: "Werkbonnenoverzicht" (backoffice) en "Mijn werkbonnen"
++ * (werknemer) — zie WorkOrderService.listForAdmin()/listForEmployee() voor
++ * de volledige toelichting.
++ */
++export interface WorkOrderOverviewItemSummary {
++  id: string;
++  workOrderNumber: string;
++  status: WorkOrderStatus;
++  createdAt: string;
++  projectId: string;
++  projectName: string;
++  projectNumber: string | null;
++  customerName: string;
++  createdByEmployeeDisplayName: string;
++  totalSeconds: number;
++  /** `null` zolang niet ondertekend (status DRAFT). */
++  signedAt: string | null;
++  teamleaderUploadStatus: WorkOrderTeamleaderUploadStatus;
++}
++
++/** Response van GET /work-orders/mine en GET /admin/work-orders. */
++export interface ListWorkOrdersOverviewResponseBody {
++  workOrders: WorkOrderOverviewItemSummary[];
++}
++
+ /** Response van GET /work-orders/drafts?projectId=... */
+ export interface ListWorkOrderDraftsResponseBody {
+   workOrders: WorkOrderDraftSummary[];
+ }
+ 
++/**
++ * Op vraag (3/9/2026): "PDF via een knop naar de klant sturen". Response van
++ * POST /work-orders/:id/send-to-customer.
++ */
++export interface SendWorkOrderPdfResponseBody {
++  sentAt: string;
++  customerEmail: string;
++}
++
+ /**
+  * Response van POST /work-orders/:id/sync/retry — handmatige herstelactie
+  * (sectie 13: "Administrator moet handmatig: Opnieuw synchroniseren kunnen

@@ -1,5 +1,6 @@
 import type { PendingWeekResponseBody, SignWeekResponseBody, WeeklyApprovalSummary } from '@swatt/shared-types';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthErrors } from '../../errors';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
@@ -23,6 +24,7 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
   const storage: StorageService = new DatabaseStorageService(app.prisma);
   const workOrderService = new WorkOrderService(app.prisma);
   const companySettingsService = new CompanySettingsService(app.prisma);
+  const auditLogService = new AuditLogService(app.prisma);
   const pdfService = new WorkOrderPdfService(app.prisma, storage, workOrderService, companySettingsService);
   const service = new WeeklyApprovalService(app.prisma, storage, companySettingsService);
 
@@ -71,6 +73,13 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
         ipAddress: request.ip ?? null,
         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
       });
+      await auditLogService.record({
+        actorUserId: userId,
+        action: 'WEEKLY_APPROVAL_SIGNED',
+        entityType: 'WeeklyApproval',
+        entityId: weeklyApproval.id,
+        metadata: { signerName: body.signerName, workOrderCount: weeklyApproval.workOrderIds.length },
+      });
 
       // Zelfde volgorde/redenering als bij een individuele /work-orders/:id/sign
       // (zie work-order.routes.ts): PDF-generatie gebeurt best-effort en
@@ -102,6 +111,12 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
     async (request) => {
       const params = weeklyApprovalIdParamsSchema.parse(request.params);
       await service.reopen(params.id);
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'WEEKLY_APPROVAL_REOPENED',
+        entityType: 'WeeklyApproval',
+        entityId: params.id,
+      });
       return { success: true };
     },
   );

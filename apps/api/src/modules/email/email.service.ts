@@ -6,6 +6,14 @@ export interface SendEmailParams {
   subject: string;
   /** Volledige HTML-body — zie auth-emails.ts voor de opgemaakte sjablonen. */
   html: string;
+  /**
+   * Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — Resend
+   * ondersteunt bijlagen als base64-gecodeerde inhoud (max. 40MB per e-mail
+   * na base64-codering — geverifieerd via resend.com/docs/api-reference/
+   * emails/send-email). Optioneel, want de meeste bestaande e-mails
+   * (uitnodiging, wachtwoord-reset) hebben er geen nodig.
+   */
+  attachments?: Array<{ filename: string; content: string }>;
 }
 
 export interface EmailService {
@@ -40,6 +48,7 @@ export class ResendEmailService implements EmailService {
         to: params.to,
         subject: params.subject,
         html: params.html,
+        ...(params.attachments ? { attachments: params.attachments } : {}),
       }),
     });
 

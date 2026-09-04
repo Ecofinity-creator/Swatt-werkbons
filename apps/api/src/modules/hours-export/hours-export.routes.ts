@@ -1,5 +1,6 @@
 import type { HoursExportOverviewResponseBody, MarkHoursExportedResponseBody } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
 import { requireRole } from '../rbac/rbac.middleware';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
@@ -18,6 +19,7 @@ import { renderSubcontractorStatementPdf } from './subcontractor-statement-docum
  */
 export default async function hoursExportRoutes(app: FastifyInstance): Promise<void> {
   const service = new HoursExportService(app.prisma);
+  const auditLogService = new AuditLogService(app.prisma);
   const storage: StorageService = new DatabaseStorageService(app.prisma);
   const companySettings = new CompanySettingsService(app.prisma);
 
@@ -44,6 +46,13 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
     async (request): Promise<MarkHoursExportedResponseBody> => {
       const body = markHoursExportedBodySchema.parse(request.body);
       const markedCount = await service.markExported(body.employeeId, body.period);
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'HOURS_EXPORT_MARKED_EXPORTED',
+        entityType: 'Employee',
+        entityId: body.employeeId,
+        metadata: { period: body.period, markedCount },
+      });
       return { markedCount };
     },
   );

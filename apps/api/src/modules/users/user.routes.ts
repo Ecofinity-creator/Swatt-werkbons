@@ -11,6 +11,7 @@ import type {
 import { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { TeamleaderErrors, UserErrors } from '../../errors';
 import { buildInviteEmail } from '../auth/auth-emails';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
@@ -34,6 +35,7 @@ const userIdParamsSchema = z.object({ id: z.string().uuid() });
  */
 export default async function userRoutes(app: FastifyInstance): Promise<void> {
   const companySettingsService = new CompanySettingsService(app.prisma);
+  const auditLogService = new AuditLogService(app.prisma);
 
   app.get(
     '/admin/users',
@@ -77,6 +79,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
           employee: { create: { displayName: body.displayName, phone: body.phone ?? null } },
         },
         include: { employee: true },
+      });
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'USER_CREATED',
+        entityType: 'User',
+        entityId: user.id,
+        metadata: { email: body.email, role: body.role, displayName: body.displayName },
       });
 
       // Account blijft sowieso aangemaakt, zelfs als de uitnodigingsmail
@@ -127,6 +136,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
             ...(body.role !== undefined ? { role: body.role } : {}),
             ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
           },
+        });
+        await auditLogService.record({
+          actorUserId: request.currentUser?.id ?? null,
+          action: body.isActive === false ? 'USER_DEACTIVATED' : body.isActive === true ? 'USER_ACTIVATED' : 'USER_ROLE_CHANGED',
+          entityType: 'User',
+          entityId: params.id,
+          metadata: { newRole: body.role, newIsActive: body.isActive },
         });
 
         // Deactivatie moet meteen effect hebben — bestaande sessies blijven
@@ -262,6 +278,13 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
       // automatisch mee verwijderd (zie schema.prisma).
       await app.prisma.session.deleteMany({ where: { userId: params.id } });
       await app.prisma.user.delete({ where: { id: params.id } });
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'USER_DELETED',
+        entityType: 'User',
+        entityId: params.id,
+        metadata: { email: user.email, displayName: user.employee?.displayName ?? null },
+      });
 
       reply.code(204);
       return null;
