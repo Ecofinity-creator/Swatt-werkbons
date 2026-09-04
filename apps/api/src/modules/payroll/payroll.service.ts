@@ -336,7 +336,16 @@ function toBatchRecord(batch: Prisma.PayrollBatchGetPayload<typeof WITH_LINES_DE
       .map((line) => ({
         id: line.id,
         timeEntryId: line.timeEntryId,
-        projectName: line.timeEntry.project.name,
+        // `timeEntry.project` is sinds de Belgische-urenregistratie-uitbreiding
+        // (4/9/2026) nullable in het schema (een niet-projectgebonden
+        // registratie, zie TimeEntry.activityType) — maar een PayrollBatchLine
+        // bestaat enkel voor een ONDERTEKENDE, dus per definitie
+        // projectgebonden werkbon-tijdregistratie (fetchPayableEntries()
+        // selecteert enkel entries met een workOrderLink, en een werkbon kan
+        // uitsluitend uit projectgebonden entries bestaan — zie
+        // WorkOrderService.create()). `project` is hier dus altijd effectief
+        // gezet; de `!` erkent dat aan TypeScript.
+        projectName: line.timeEntry.project!.name,
         // workOrderLink kan in theorie ontbreken (defensief) — in de praktijk
         // niet mogelijk: enkel ondertekende (dus aan een werkbon gekoppelde)
         // tijdregistraties zijn ooit "betaalbaar" geweest, zie fetchPayableEntries().
