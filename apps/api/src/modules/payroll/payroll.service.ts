@@ -307,31 +307,21 @@ function computeLinesForEmployee(entries: PayableTimeEntryRow[]): ComputedLine[]
   return lines;
 }
 
-function toBatchRecord(batch: {
-  id: string;
-  employeeId: string;
-  employee: { displayName: string };
-  periodLabel: string;
-  status: string;
-  totalAmountCents: number;
-  createdAt: Date;
-  closedAt: Date | null;
-  lines: Array<{
-    id: string;
-    timeEntryId: string;
-    normalHours: Prisma.Decimal | number;
-    overtimeHours: Prisma.Decimal | number;
-    premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
-    amountCents: number;
-    timeEntry: {
-      project: { name: string };
-      startedAt: Date;
-      endedAt: Date | null;
-      pausedSeconds: number;
-      workOrderLink: { workOrder: { workOrderNumber: string } } | null;
-    };
-  }>;
-}): PayrollBatchRecord {
+/**
+ * Vertaalt een ruwe Prisma-rij naar het publiek record-type. Het
+ * parametertype wordt bewust rechtstreeks van de Prisma-query zelf afgeleid
+ * (`Prisma.PayrollBatchGetPayload<typeof WITH_LINES_DETAILS>` — het officieel
+ * door Prisma aanbevolen patroon voor exact dit scenario) in plaats van hier
+ * een eigen, handgeschreven kopie van die vorm te onderhouden. Dat
+ * handgeschreven type (bv. `employee: { displayName: string }` i.p.v. de
+ * werkelijke, volledige Employee-rij die `include: { employee: true }`
+ * effectief teruggeeft) leek in de sandbox te werken — de hier nooit vers te
+ * genereren Prisma-client verborg de mismatch — maar faalde in CI, waar wél
+ * een echte, volledige client gegenereerd wordt. Dit patroon maakt zo'n
+ * mismatch structureel onmogelijk: het type volgt automatisch mee zodra
+ * WITH_LINES_DETAILS ooit wijzigt.
+ */
+function toBatchRecord(batch: Prisma.PayrollBatchGetPayload<typeof WITH_LINES_DETAILS>): PayrollBatchRecord {
   return {
     id: batch.id,
     employeeId: batch.employeeId,
