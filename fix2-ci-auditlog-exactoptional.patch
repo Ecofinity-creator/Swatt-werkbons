@@ -1,0 +1,48 @@
+From 86dab3751b59788dc061fa4759579a0fe6b3051e Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Fri, 4 Sep 2026 05:47:04 +0000
+Subject: [PATCH] =?UTF-8?q?Fix=20(2):=20CI-typecheckfout=20in=20AuditLogSe?=
+ =?UTF-8?q?rvice=20=E2=80=94=20sleutel=20weglaten=20i.p.v.=20op=20undefine?=
+ =?UTF-8?q?d=20zetten=20(exactOptionalPropertyTypes)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../modules/audit-log/audit-log.service.ts    | 20 +++++++++++--------
+ 1 file changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/apps/api/src/modules/audit-log/audit-log.service.ts b/apps/api/src/modules/audit-log/audit-log.service.ts
+index 3026149..6ce5771 100644
+--- a/apps/api/src/modules/audit-log/audit-log.service.ts
++++ b/apps/api/src/modules/audit-log/audit-log.service.ts
+@@ -32,14 +32,18 @@ export class AuditLogService {
+           action: entry.action,
+           entityType: entry.entityType,
+           entityId: entry.entityId,
+-          // Cast naar Prisma's eigen JSON-inputtype: `Record<string, unknown>`
+-          // is structureel niet identiek aan `Prisma.InputJsonValue` (dat
+-          // enkel gegarandeerd JSON-serialiseerbare waarden toelaat) — met
+-          // `exactOptionalPropertyTypes: true` accepteert TS dat verschil
+-          // niet stilzwijgend. Veilig hier: elke aanroeper geeft effectief
+-          // platte, JSON-serialiseerbare metadata mee (strings/getallen/
+-          // booleans/geneste objecten), nooit functies/Dates/class-instanties.
+-          metadata: (entry.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
++          // `exactOptionalPropertyTypes: true` verbiedt een sleutel expliciet
++          // op `undefined` te zetten voor een optioneel Prisma-inputveld (dat
++          // is iets anders dan de sleutel gewoon weglaten) — vandaar de
++          // conditionele spread i.p.v. `metadata: entry.metadata ?? undefined`
++          // (zelfde patroon als elders in deze codebase, bv.
++          // company-settings.service.ts se toelichting bij optionele velden).
++          // De cast naar `Prisma.InputJsonValue` blijft nodig omdat
++          // `Record<string, unknown>` structureel niet identiek is aan dat
++          // type (dat enkel gegarandeerd JSON-serialiseerbare waarden
++          // toelaat) — veilig hier, elke aanroeper geeft effectief platte,
++          // JSON-serialiseerbare metadata mee.
++          ...(entry.metadata !== undefined ? { metadata: entry.metadata as Prisma.InputJsonValue } : {}),
+         },
+       });
+     } catch (err) {
+-- 
+2.43.0
+

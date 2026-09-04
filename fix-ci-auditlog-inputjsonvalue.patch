@@ -1,0 +1,59 @@
+From fc368ae72e33320dee2003b4f8adffaab193c7ee Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Fri, 4 Sep 2026 05:43:36 +0000
+Subject: [PATCH] Fix: CI-typecheckfout in AuditLogService
+ (Prisma.InputJsonValue)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+CI (echte, verse Prisma-client) ving een typefout die mijn sandbox niet kon
+vangen (nooit een verse client kunnen genereren voor het nieuwe AuditLog-
+model, zelfde bekende sandboxbeperking als eerder in dit project):
+
+  Type 'Record<string, unknown> | undefined' is not assignable to type
+  'NullableJsonNullValueInput | InputJsonValue | undefined' with
+  'exactOptionalPropertyTypes: true'.
+
+`Record<string, unknown>` is structureel niet identiek aan Prisma's eigen
+`InputJsonValue`-type (dat enkel gegarandeerd JSON-serialiseerbare waarden
+toelaat). Fix: expliciete cast naar `Prisma.InputJsonValue | undefined` —
+geverifieerd als het door Prisma zelf aanbevolen patroon voor exact dit
+scenario ("as Prisma.InputJsonValue at the storage boundary is explicitly
+the intended approach", prisma/orm-discussie #29513). Veilig hier: elke
+aanroeper van AuditLogService.record() geeft effectief platte, JSON-
+serialiseerbare metadata mee (strings/getallen/booleans/geneste objecten),
+nooit functies/Dates/class-instanties.
+---
+ apps/api/src/modules/audit-log/audit-log.service.ts | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/apps/api/src/modules/audit-log/audit-log.service.ts b/apps/api/src/modules/audit-log/audit-log.service.ts
+index 0564730..3026149 100644
+--- a/apps/api/src/modules/audit-log/audit-log.service.ts
++++ b/apps/api/src/modules/audit-log/audit-log.service.ts
+@@ -1,4 +1,4 @@
+-import type { PrismaClient } from '@prisma/client';
++import type { Prisma, PrismaClient } from '@prisma/client';
+ 
+ /**
+  * Op vraag (3/9/2026): "auditlog-scherm, om bij een geschil te zien wie iets
+@@ -32,7 +32,14 @@ export class AuditLogService {
+           action: entry.action,
+           entityType: entry.entityType,
+           entityId: entry.entityId,
+-          metadata: entry.metadata ?? undefined,
++          // Cast naar Prisma's eigen JSON-inputtype: `Record<string, unknown>`
++          // is structureel niet identiek aan `Prisma.InputJsonValue` (dat
++          // enkel gegarandeerd JSON-serialiseerbare waarden toelaat) — met
++          // `exactOptionalPropertyTypes: true` accepteert TS dat verschil
++          // niet stilzwijgend. Veilig hier: elke aanroeper geeft effectief
++          // platte, JSON-serialiseerbare metadata mee (strings/getallen/
++          // booleans/geneste objecten), nooit functies/Dates/class-instanties.
++          metadata: (entry.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
+         },
+       });
+     } catch (err) {
+-- 
+2.43.0
+

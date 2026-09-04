@@ -7,6 +7,8 @@ import type {
   CreateInvoiceBatchBody,
   CreateInvoiceBatchResponseBody,
   CreateManualTimeEntryBody,
+  ListGeneralTimeEntriesResponseBody,
+  StartGeneralTimeEntryBody,
   CreateTeamleaderDraftInvoiceResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
@@ -298,6 +300,11 @@ export const timeEntriesApi = {
   /** Sectie 6 — "manueel tijd toevoegen indien toegestaan": vaste start-/eindtijd i.p.v. de timer. */
   createManual: (body: CreateManualTimeEntryBody) =>
     request<TimeEntryResponseBody>('/time-entries/manual', { method: 'POST', body: JSON.stringify(body) }),
+  /** Op vraag (4/9/2026, Belgische verplichte urenregistratie vanaf 1/1/2027): niet-projectgebonden arbeidstijd — zie GeneralTimeEntryPage.tsx. */
+  startGeneral: (body: StartGeneralTimeEntryBody) =>
+    request<TimeEntryResponseBody>('/time-entries/start-general', { method: 'POST', body: JSON.stringify(body) }),
+  /** Eigen, al gestopte niet-projectgebonden registraties — zie MyWorkOrdersPage.tsx. */
+  listMineGeneral: () => request<ListGeneralTimeEntriesResponseBody>('/time-entries/mine-general', { method: 'GET' }),
 };
 
 /**

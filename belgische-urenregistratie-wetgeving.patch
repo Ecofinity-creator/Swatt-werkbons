@@ -1,0 +1,878 @@
+diff --git a/apps/api/prisma/migrations/20260904090000_general_time_entries/migration.sql b/apps/api/prisma/migrations/20260904090000_general_time_entries/migration.sql
+new file mode 100644
+index 0000000..a66dd4b
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260904090000_general_time_entries/migration.sql
+@@ -0,0 +1,13 @@
++-- Op vraag (4/9/2026, in het kader van de Belgische verplichte urenregistratie
++-- vanaf 1/1/2027): niet-projectgebonden arbeidstijd moet ook registreerbaar
++-- zijn (verplaatsing, interne vergadering, opleiding, overige) — niet enkel
++-- klant-facturabele projecturen. project_id wordt daarom nullable.
++
++CREATE TYPE "time_entry_activity_type" AS ENUM ('PROJECT_WORK', 'TRAVEL', 'INTERNAL', 'TRAINING', 'OTHER');
++
++ALTER TABLE "time_entry" ADD COLUMN "activity_type" "time_entry_activity_type" NOT NULL DEFAULT 'PROJECT_WORK';
++
++-- project_id nullable maken: eerst de bestaande NOT NULL-constraint droppen,
++-- de foreign key zelf blijft (Prisma's @relation met optionele projectId
++-- vereist geen wijziging aan de FK-constraint zelf, enkel aan de kolom).
++ALTER TABLE "time_entry" ALTER COLUMN "project_id" DROP NOT NULL;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index e216fb0..0422dd0 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -57,6 +57,20 @@ enum TimeEntryStatus {
+   @@map("time_entry_status")
+ }
+ 
++/// Op vraag (4/9/2026) — zie de toelichting bij TimeEntry.activityType.
++/// PROJECT_WORK is de standaard (bestaande gedrag, klant-facturabele uren op
++/// een project). De overige waarden zijn niet-projectgebonden arbeidstijd die
++/// niettemin onder de Belgische verplichte urenregistratie valt.
++enum TimeEntryActivityType {
++  PROJECT_WORK
++  TRAVEL
++  INTERNAL
++  TRAINING
++  OTHER
++
++  @@map("time_entry_activity_type")
++}
++
+ /// Phase 5 — werkbonnen (basis). Statusnamen matchen het overzicht uit sectie 20
+ /// van de projectbrief. Deze ronde gebruikt enkel DRAFT (een werkbon wordt
+ /// automatisch aangemaakt zodra de timer gestopt wordt); de volledige enum
+@@ -689,7 +703,18 @@ model ProjectAssignment {
+ model TimeEntry {
+   id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+   employeeId String           @map("employee_id") @db.Uuid
+-  projectId  String           @map("project_id") @db.Uuid
++  /// Op vraag (4/9/2026, in het kader van de Belgische verplichte
++  /// urenregistratie vanaf 1/1/2027 — "objectief, betrouwbaar en toegankelijk
++  /// systeem" moet ALLE arbeidstijd omvatten, niet enkel klant-facturabele
++  /// uren): nullable geworden. `null` enkel toegestaan wanneer activityType
++  /// != PROJECT_WORK hieronder (verplaatsing/interne vergadering/opleiding/
++  /// overige) — zie TimeEntryService.startGeneral(). Zo'n registratie wordt
++  /// NOOIT in een werkbon opgenomen (geen klant om te laten tekenen) en
++  /// blijft dus permanent op TimeEntry zelf staan, zichtbaar in "Mijn
++  /// werkbonnen"/het bredere urenoverzicht.
++  projectId  String?          @map("project_id") @db.Uuid
++  /// Zie de toelichting bij projectId hierboven.
++  activityType TimeEntryActivityType @default(PROJECT_WORK) @map("activity_type")
+   status     TimeEntryStatus  @default(RUNNING)
+ 
+   startedAt DateTime  @map("started_at") @db.Timestamptz
+@@ -748,7 +773,7 @@ model TimeEntry {
+   syncError                String?             @map("sync_error")
+ 
+   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+-  project  Project  @relation(fields: [projectId], references: [id], onDelete: Restrict)
++  project  Project? @relation(fields: [projectId], references: [id], onDelete: Restrict)
+ 
+   /// Gezet zodra deze registratie in een werkbon is opgenomen (Phase 5) — een
+   /// gestopte tijdsregistratie hoort bij hoogstens één werkbon, zie
+diff --git a/apps/api/src/modules/time-entries/time-entry.routes.ts b/apps/api/src/modules/time-entries/time-entry.routes.ts
+index cf9caf6..ba6ed9c 100644
+--- a/apps/api/src/modules/time-entries/time-entry.routes.ts
++++ b/apps/api/src/modules/time-entries/time-entry.routes.ts
+@@ -1,16 +1,19 @@
+ import {
+   roleAtLeast,
+   type ActiveTimeEntryResponseBody,
++  type ListGeneralTimeEntriesResponseBody,
+   type TimeEntryResponseBody,
+   type TimeEntrySummary,
+ } from '@swatt/shared-types';
+ import type { FastifyInstance, FastifyRequest } from 'fastify';
++import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors } from '../../errors';
+ import type { TimeEntryRecord } from './time-entry.service';
+ import { TimeEntryService } from './time-entry.service';
+ import {
+   correctTimeEntryBodySchema,
+   createManualTimeEntryBodySchema,
++  startGeneralTimeEntryBodySchema,
+   startTimeEntryBodySchema,
+   stopTimeEntryBodySchema,
+   timeEntryIdParamsSchema,
+@@ -18,6 +21,7 @@ import {
+ 
+ export default async function timeEntryRoutes(app: FastifyInstance): Promise<void> {
+   const service = new TimeEntryService(app.prisma);
++  const auditLogService = new AuditLogService(app.prisma);
+ 
+   app.get('/time-entries/active', { preHandler: [app.authenticate] }, async (request): Promise<ActiveTimeEntryResponseBody> => {
+     const employeeId = requireEmployeeId(request);
+@@ -33,6 +37,20 @@ export default async function timeEntryRoutes(app: FastifyInstance): Promise<voi
+     return { timeEntry: toSummary(entry) };
+   });
+ 
++  /**
++   * Op vraag (4/9/2026, Belgische verplichte urenregistratie vanaf 1/1/2027)
++   * — zie TimeEntryService.startGeneral(). Gebruikt dezelfde PAUZE/STOP-
++   * routes hieronder (die zijn al project-agnostisch, ze werken op de
++   * timeEntryId zelf).
++   */
++  app.post('/time-entries/start-general', { preHandler: [app.authenticate] }, async (request, reply): Promise<TimeEntryResponseBody> => {
++    const employeeId = requireEmployeeId(request);
++    const body = startGeneralTimeEntryBodySchema.parse(request.body);
++    const entry = await service.startGeneral(employeeId, body.activityType, body.description ?? null);
++    reply.code(201);
++    return { timeEntry: toSummary(entry) };
++  });
++
+   app.post('/time-entries/manual', { preHandler: [app.authenticate] }, async (request, reply): Promise<TimeEntryResponseBody> => {
+     const employeeId = requireEmployeeId(request);
+     const body = createManualTimeEntryBodySchema.parse(request.body);
+@@ -81,14 +99,49 @@ export default async function timeEntryRoutes(app: FastifyInstance): Promise<voi
+     }
+     const params = timeEntryIdParamsSchema.parse(request.params);
+     const body = correctTimeEntryBodySchema.parse(request.body);
++
++    // Op vraag (4/9/2026, in het kader van de Belgische verplichte
++    // urenregistratie vanaf 1/1/2027): een manuele tijdscorrectie moet
++    // auditeerbaar zijn (sectie 26 van de oorspronkelijke brief noemde dit
++    // al expliciet: "tijd manueel aangepast" — nooit eerder geïnstrumenteerd).
++    // Oude waarden vóór de correctie eerst ophalen zodat het auditlog een
++    // zinvol oud/nieuw-verschil toont, niet enkel de nieuwe waarde.
++    const before = await app.prisma.timeEntry.findUnique({
++      where: { id: params.id },
++      select: { startedAt: true, endedAt: true, pausedSeconds: true, description: true },
++    });
++
+     const entry = await service.correct(params.id, {
+       startedAt: new Date(body.startedAt),
+       endedAt: new Date(body.endedAt),
+       pausedSeconds: body.pausedMinutes * 60,
+       description: body.description ?? null,
+     });
++
++    await auditLogService.record({
++      actorUserId: user.id,
++      action: 'TIME_ENTRY_CORRECTED',
++      entityType: 'TimeEntry',
++      entityId: params.id,
++      metadata: {
++        before: before ? { startedAt: before.startedAt.toISOString(), endedAt: before.endedAt?.toISOString() ?? null, pausedSeconds: before.pausedSeconds } : null,
++        after: { startedAt: entry.startedAt.toISOString(), endedAt: entry.endedAt?.toISOString() ?? null, pausedSeconds: entry.pausedSeconds },
++      },
++    });
++
+     return { timeEntry: toSummary(entry) };
+   });
++
++  /** Op vraag (4/9/2026) — zie TimeEntryService.listGeneralForEmployee(). */
++  app.get(
++    '/time-entries/mine-general',
++    { preHandler: [app.authenticate] },
++    async (request): Promise<ListGeneralTimeEntriesResponseBody> => {
++      const employeeId = requireEmployeeId(request);
++      const entries = await service.listGeneralForEmployee(employeeId);
++      return { timeEntries: entries.map(toSummary) };
++    },
++  );
+ }
+ 
+ function requireEmployeeId(request: FastifyRequest): string {
+@@ -103,8 +156,9 @@ function toSummary(entry: TimeEntryRecord): TimeEntrySummary {
+   return {
+     id: entry.id,
+     projectId: entry.projectId,
+-    projectName: entry.project.name,
+-    customerName: entry.project.customer.name,
++    projectName: entry.project?.name ?? null,
++    customerName: entry.project?.customer.name ?? null,
++    activityType: entry.activityType,
+     status: entry.status,
+     startedAt: entry.startedAt.toISOString(),
+     endedAt: entry.endedAt ? entry.endedAt.toISOString() : null,
+diff --git a/apps/api/src/modules/time-entries/time-entry.schemas.ts b/apps/api/src/modules/time-entries/time-entry.schemas.ts
+index 20b2a12..1267a7a 100644
+--- a/apps/api/src/modules/time-entries/time-entry.schemas.ts
++++ b/apps/api/src/modules/time-entries/time-entry.schemas.ts
+@@ -10,6 +10,19 @@ export const startTimeEntryBodySchema = z.object({
+ 
+ export type StartTimeEntryBody = z.infer<typeof startTimeEntryBodySchema>;
+ 
++/**
++ * Op vraag (4/9/2026, Belgische verplichte urenregistratie vanaf 1/1/2027) —
++ * zie TimeEntryService.startGeneral(). Vrije omschrijving optioneel (bv. "Rit
++ * naar werf Janssens BV"), niet verplicht — de activityType zelf is al
++ * betekenisvol genoeg voor een objectieve registratie.
++ */
++export const startGeneralTimeEntryBodySchema = z.object({
++  activityType: z.enum(['TRAVEL', 'INTERNAL', 'TRAINING', 'OTHER']),
++  description: z.string().trim().min(1).optional(),
++});
++
++export type StartGeneralTimeEntryBody = z.infer<typeof startGeneralTimeEntryBodySchema>;
++
+ export const stopTimeEntryBodySchema = z.object({
+   description: z.string().trim().min(1).optional(),
+ });
+diff --git a/apps/api/src/modules/time-entries/time-entry.service.ts b/apps/api/src/modules/time-entries/time-entry.service.ts
+index 570bf9a..e6f9460 100644
+--- a/apps/api/src/modules/time-entries/time-entry.service.ts
++++ b/apps/api/src/modules/time-entries/time-entry.service.ts
+@@ -9,7 +9,8 @@ const FUTURE_GRACE_MS = 5 * 60 * 1000;
+ export interface TimeEntryRecord {
+   id: string;
+   employeeId: string;
+-  projectId: string;
++  projectId: string | null;
++  activityType: 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
+   status: 'RUNNING' | 'PAUSED' | 'STOPPED';
+   startedAt: Date;
+   endedAt: Date | null;
+@@ -20,7 +21,7 @@ export interface TimeEntryRecord {
+   project: {
+     name: string;
+     customer: { name: string };
+-  };
++  } | null;
+ }
+ 
+ export interface CreateManualTimeEntryInput {
+@@ -80,7 +81,43 @@ export class TimeEntryService {
+ 
+     try {
+       return await this.prisma.timeEntry.create({
+-        data: { employeeId, projectId, status: 'RUNNING', startedAt: new Date() },
++        data: { employeeId, projectId, activityType: 'PROJECT_WORK', status: 'RUNNING', startedAt: new Date() },
++        ...WITH_PROJECT,
++      });
++    } catch (err) {
++      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
++        throw TimeEntryErrors.alreadyActive();
++      }
++      throw err;
++    }
++  }
++
++  /**
++   * Op vraag (4/9/2026, in het kader van de Belgische verplichte
++   * urenregistratie vanaf 1/1/2027): niet elke gewerkte minuut is aan een
++   * klantproject gekoppeld (verplaatsing tussen werven, interne vergadering,
++   * opleiding, administratie...) — toch valt dit onder de wettelijke
++   * verplichting om ALLE arbeidstijd te registreren via een objectief,
++   * betrouwbaar systeem. Deze registratie doorloopt dezelfde PAUZE/STOP-flow
++   * als een projectgebonden timer, maar wordt NOOIT in een werkbon
++   * opgenomen (geen klant om te laten tekenen) — zie
++   * WorkOrderService.create(), dat enkel timeEntryIds accepteert die al op
++   * hetzelfde project + dezelfde werknemer zitten, wat voor een
++   * niet-projectgebonden registratie per definitie nooit het geval is.
++   */
++  async startGeneral(
++    employeeId: string,
++    activityType: Exclude<TimeEntryRecord['activityType'], 'PROJECT_WORK'>,
++    description: string | null,
++  ): Promise<TimeEntryRecord> {
++    const active = await this.getActive(employeeId);
++    if (active) {
++      throw TimeEntryErrors.alreadyActive();
++    }
++
++    try {
++      return await this.prisma.timeEntry.create({
++        data: { employeeId, projectId: null, activityType, status: 'RUNNING', startedAt: new Date(), description },
+         ...WITH_PROJECT,
+       });
+     } catch (err) {
+@@ -264,6 +301,22 @@ export class TimeEntryService {
+     }
+     return entry;
+   }
++
++  /**
++   * Op vraag (4/9/2026): "Mijn werkbonnen" toont enkel klant-werkbonnen — een
++   * niet-projectgebonden registratie hoort daar niet thuis (geen klant), maar
++   * moet niettemin voor de werknemer zelf toegankelijk/naspeurbaar blijven
++   * (wettelijk vereiste: "toegankelijk systeem"). Enkel gestopte registraties
++   * (een actieve staat al op het algemene-tijdregistratiescherm zelf).
++   */
++  async listGeneralForEmployee(employeeId: string): Promise<TimeEntryRecord[]> {
++    return this.prisma.timeEntry.findMany({
++      where: { employeeId, projectId: null, status: 'STOPPED' },
++      orderBy: { startedAt: 'desc' },
++      take: 100,
++      ...WITH_PROJECT,
++    });
++  }
+ }
+ 
+ function secondsBetween(from: Date, to: Date): number {
+diff --git a/apps/api/test/time-entry.service.test.ts b/apps/api/test/time-entry.service.test.ts
+index e27a7c4..41e850e 100644
+--- a/apps/api/test/time-entry.service.test.ts
++++ b/apps/api/test/time-entry.service.test.ts
+@@ -6,10 +6,12 @@ import { TimeEntryService } from '../src/modules/time-entries/time-entry.service
+  * Unit-tests met een minimale fake-Prisma (geen echte database/gegenereerde
+  * client nodig — zelfde patroon als teamleader-auth.service.test.ts). Dekt de
+  * kritieke business rules uit sectie 24 van de projectbrief: "één werknemer
+- * kan maar één actieve timer hebben" en de pauze/hervat-tijdrekenkunde
+- * (regel 2: een timer moet altijd aan een project gekoppeld zijn, afgedwongen
+- * doordat `start()` een verplichte projectId-parameter heeft — er bestaat
+- * geen enkel pad om een TimeEntry zonder project aan te maken).
++ * kan maar één actieve timer hebben" en de pauze/hervat-tijdrekenkunde.
++ * Sinds 4/9/2026 (Belgische verplichte urenregistratie vanaf 1/1/2027) kan
++ * `start()` ook via `startGeneral()` een niet-projectgebonden registratie
++ * aanmaken (verplaatsing/interne vergadering/opleiding/overige) — de
++ * oorspronkelijke, hier ietwat verouderde tekst "er bestaat geen enkel pad
++ * om een TimeEntry zonder project aan te maken" gold enkel vóór die datum.
+  */
+ 
+ interface FakeProject {
+@@ -22,7 +24,8 @@ interface FakeProject {
+ interface FakeTimeEntry {
+   id: string;
+   employeeId: string;
+-  projectId: string;
++  projectId: string | null;
++  activityType: 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
+   status: 'RUNNING' | 'PAUSED' | 'STOPPED';
+   startedAt: Date;
+   endedAt: Date | null;
+@@ -54,10 +57,10 @@ function createFakePrisma(
+   let idCounter = 0;
+ 
+   function toRecord(entry: FakeTimeEntry) {
+-    const project = projects.get(entry.projectId);
++    const project = entry.projectId ? projects.get(entry.projectId) : undefined;
+     return {
+       ...entry,
+-      project: { name: project?.name ?? 'Onbekend project', customer: { name: project?.customerName ?? 'Onbekende klant' } },
++      project: entry.projectId ? { name: project?.name ?? 'Onbekend project', customer: { name: project?.customerName ?? 'Onbekende klant' } } : null,
+     };
+   }
+ 
+@@ -87,7 +90,8 @@ function createFakePrisma(
+       }: {
+         data: {
+           employeeId: string;
+-          projectId: string;
++          projectId: string | null;
++          activityType?: 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
+           status: 'RUNNING' | 'STOPPED';
+           startedAt: Date;
+           endedAt?: Date | null;
+@@ -101,6 +105,7 @@ function createFakePrisma(
+           id,
+           employeeId: data.employeeId,
+           projectId: data.projectId,
++          activityType: data.activityType ?? 'PROJECT_WORK',
+           status: data.status,
+           startedAt: data.startedAt,
+           endedAt: data.endedAt ?? null,
+@@ -621,4 +626,61 @@ describe('TimeEntryService', () => {
+       ).rejects.toMatchObject({ code: 'TIME_ENTRY_CORRECTION_END_BEFORE_START' });
+     });
+   });
++
++  describe('startGeneral() — op vraag (4/9/2026, Belgische verplichte urenregistratie vanaf 1/1/2027): niet-projectgebonden arbeidstijd registreren', () => {
++    it('start een registratie zonder project, met het opgegeven activiteitstype', async () => {
++      const { prisma } = createFakePrisma();
++      const service = new TimeEntryService(prisma);
++
++      const entry = await service.startGeneral('employee-1', 'TRAVEL', 'Rit naar werf Janssens BV');
++
++      expect(entry.projectId).toBeNull();
++      expect(entry.project).toBeNull();
++      expect(entry.activityType).toBe('TRAVEL');
++      expect(entry.status).toBe('RUNNING');
++      expect(entry.description).toBe('Rit naar werf Janssens BV');
++    });
++
++    it('weigert een tweede actieve registratie te starten, ongeacht of de eerste projectgebonden is of niet (business rule 1 blijft gelden)', async () => {
++      const projects = [{ id: 'project-1', isArchivedInTl: false, name: 'Onderhoud', customerName: 'Janssens BV' }];
++      const { prisma } = createFakePrisma({ projects, assignments: [['project-1', 'employee-1']] });
++      const service = new TimeEntryService(prisma);
++
++      await service.startGeneral('employee-1', 'INTERNAL', null);
++
++      await expect(service.start('employee-1', 'project-1')).rejects.toMatchObject({ code: 'TIME_ENTRY_ALREADY_ACTIVE' });
++      await expect(service.startGeneral('employee-1', 'TRAINING', null)).rejects.toMatchObject({ code: 'TIME_ENTRY_ALREADY_ACTIVE' });
++    });
++
++    it('kan gepauzeerd, hervat en gestopt worden via dezelfde flow als een projectgebonden registratie', async () => {
++      const { prisma } = createFakePrisma();
++      const service = new TimeEntryService(prisma);
++
++      const started = await service.startGeneral('employee-1', 'OTHER', 'Administratie');
++      const paused = await service.pause('employee-1', started.id);
++      expect(paused.status).toBe('PAUSED');
++      const resumed = await service.resume('employee-1', started.id);
++      expect(resumed.status).toBe('RUNNING');
++      const stopped = await service.stop('employee-1', started.id, 'Administratie afgerond');
++      expect(stopped.status).toBe('STOPPED');
++      expect(stopped.projectId).toBeNull();
++    });
++
++    it('een niet-projectgebonden registratie is vrij corrigeerbaar (geen werkbonkoppeling mogelijk)', async () => {
++      const { prisma } = createFakePrisma();
++      const service = new TimeEntryService(prisma);
++      const started = await service.startGeneral('employee-1', 'TRAVEL', null);
++      const stopped = await service.stop('employee-1', started.id, null);
++
++      const corrected = await service.correct(stopped.id, {
++        startedAt: new Date('2026-08-20T08:00:00Z'),
++        endedAt: new Date('2026-08-20T08:45:00Z'),
++        pausedSeconds: 0,
++        description: 'Verplaatsing gecorrigeerd',
++      });
++
++      expect(corrected.description).toBe('Verplaatsing gecorrigeerd');
++      expect(corrected.projectId).toBeNull();
++    });
++  });
+ });
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 1519226..23f7954 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -20,6 +20,7 @@ import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
+ import { AuditLogPage } from './pages/admin/AuditLogPage';
+ import { WorkOrdersOverviewPage } from './pages/admin/WorkOrdersOverviewPage';
+ import { MyWorkOrdersPage } from './pages/MyWorkOrdersPage';
++import { GeneralTimeEntryPage } from './pages/GeneralTimeEntryPage';
+ import { UserDetailPage } from './pages/admin/UserDetailPage';
+ import { UsersPage } from './pages/admin/UsersPage';
+ 
+@@ -164,6 +165,14 @@ export function App() {
+           </RequireAuth>
+         }
+       />
++      <Route
++        path="/algemene-tijdregistratie"
++        element={
++          <RequireAuth>
++            <GeneralTimeEntryPage />
++          </RequireAuth>
++        }
++      />
+       <Route
+         path="/backoffice/facturatie"
+         element={
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 0579887..f8cf69f 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -7,6 +7,8 @@ import type {
+   CreateInvoiceBatchBody,
+   CreateInvoiceBatchResponseBody,
+   CreateManualTimeEntryBody,
++  ListGeneralTimeEntriesResponseBody,
++  StartGeneralTimeEntryBody,
+   CreateTeamleaderDraftInvoiceResponseBody,
+   CreateUserBody,
+   CreateUserResponseBody,
+@@ -298,6 +300,11 @@ export const timeEntriesApi = {
+   /** Sectie 6 — "manueel tijd toevoegen indien toegestaan": vaste start-/eindtijd i.p.v. de timer. */
+   createManual: (body: CreateManualTimeEntryBody) =>
+     request<TimeEntryResponseBody>('/time-entries/manual', { method: 'POST', body: JSON.stringify(body) }),
++  /** Op vraag (4/9/2026, Belgische verplichte urenregistratie vanaf 1/1/2027): niet-projectgebonden arbeidstijd — zie GeneralTimeEntryPage.tsx. */
++  startGeneral: (body: StartGeneralTimeEntryBody) =>
++    request<TimeEntryResponseBody>('/time-entries/start-general', { method: 'POST', body: JSON.stringify(body) }),
++  /** Eigen, al gestopte niet-projectgebonden registraties — zie MyWorkOrdersPage.tsx. */
++  listMineGeneral: () => request<ListGeneralTimeEntriesResponseBody>('/time-entries/mine-general', { method: 'GET' }),
+ };
+ 
+ /**
+diff --git a/apps/web/src/pages/GeneralTimeEntryPage.tsx b/apps/web/src/pages/GeneralTimeEntryPage.tsx
+new file mode 100644
+index 0000000..da7df02
+--- /dev/null
++++ b/apps/web/src/pages/GeneralTimeEntryPage.tsx
+@@ -0,0 +1,231 @@
++import type { TimeEntryActivityType, TimeEntrySummary } from '@swatt/shared-types';
++import { useEffect, useMemo, useState } from 'react';
++import { Link } from 'react-router-dom';
++import { timeEntriesApi } from '../api/client';
++import { ApiRequestError } from '../auth/AuthContext';
++
++/**
++ * Op vraag (4/9/2026, in het kader van de Belgische verplichte
++ * urenregistratie vanaf 1/1/2027 — "objectief, betrouwbaar en toegankelijk
++ * systeem" moet ALLE arbeidstijd omvatten, niet enkel klant-facturabele
++ * projecturen): verplaatsing tussen werven, interne vergadering, opleiding
++ * en overige niet-projectgebonden arbeidstijd. Zelfde START/PAUZE/STOP-
++ * timerflow als ProjectTimerPage.tsx, bewust vereenvoudigd (geen foto's,
++ * geen klant-ondertekening — er is immers geen klant) en zonder werkbon:
++ * de registratie wordt gewoon permanent bewaard op TimeEntry zelf, zichtbaar
++ * op "Mijn werkbonnen".
++ */
++const ACTIVITY_TYPE_OPTIONS: { value: Exclude<TimeEntryActivityType, 'PROJECT_WORK'>; label: string }[] = [
++  { value: 'TRAVEL', label: 'Verplaatsing tussen werven' },
++  { value: 'INTERNAL', label: 'Interne vergadering / administratie' },
++  { value: 'TRAINING', label: 'Opleiding' },
++  { value: 'OTHER', label: 'Overige' },
++];
++
++export function GeneralTimeEntryPage() {
++  const [activeEntry, setActiveEntry] = useState<TimeEntrySummary | null | undefined>(undefined);
++  const [selectedType, setSelectedType] = useState<Exclude<TimeEntryActivityType, 'PROJECT_WORK'>>('TRAVEL');
++  const [description, setDescription] = useState('');
++  const [isSubmitting, setIsSubmitting] = useState(false);
++  const [errorMessage, setErrorMessage] = useState<string | null>(null);
++  const [nowMs, setNowMs] = useState(() => Date.now());
++
++  useEffect(() => {
++    timeEntriesApi
++      .active()
++      .then((response) => setActiveEntry(response.timeEntry))
++      .catch(() => setActiveEntry(null));
++  }, []);
++
++  useEffect(() => {
++    if (activeEntry?.status !== 'RUNNING') return;
++    const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
++    return () => window.clearInterval(interval);
++  }, [activeEntry?.status]);
++
++  const elapsedSeconds = useMemo(() => (activeEntry ? computeElapsedSeconds(activeEntry, nowMs) : 0), [activeEntry, nowMs]);
++  const isGeneralEntry = activeEntry != null && activeEntry.activityType !== 'PROJECT_WORK';
++  const isProjectEntry = activeEntry != null && activeEntry.activityType === 'PROJECT_WORK';
++
++  async function handleStart() {
++    setErrorMessage(null);
++    setIsSubmitting(true);
++    try {
++      const response = await timeEntriesApi.startGeneral({ activityType: selectedType, description: description.trim() || undefined });
++      setActiveEntry(response.timeEntry);
++    } catch (err) {
++      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Starten is mislukt.');
++    } finally {
++      setIsSubmitting(false);
++    }
++  }
++
++  async function handlePause() {
++    if (!activeEntry) return;
++    setIsSubmitting(true);
++    try {
++      setActiveEntry((await timeEntriesApi.pause(activeEntry.id)).timeEntry);
++    } catch (err) {
++      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Pauzeren is mislukt.');
++    } finally {
++      setIsSubmitting(false);
++    }
++  }
++
++  async function handleResume() {
++    if (!activeEntry) return;
++    setIsSubmitting(true);
++    try {
++      setActiveEntry((await timeEntriesApi.resume(activeEntry.id)).timeEntry);
++    } catch (err) {
++      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Hervatten is mislukt.');
++    } finally {
++      setIsSubmitting(false);
++    }
++  }
++
++  async function handleStop() {
++    if (!activeEntry) return;
++    setIsSubmitting(true);
++    try {
++      await timeEntriesApi.stop(activeEntry.id, description.trim() || undefined);
++      setActiveEntry(null);
++      setDescription('');
++    } catch (err) {
++      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Stoppen is mislukt.');
++    } finally {
++      setIsSubmitting(false);
++    }
++  }
++
++  return (
++    <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
++      <header className="mb-6 flex items-center justify-between">
++        <h1 className="text-xl font-bold">Algemene tijdregistratie</h1>
++        <Link to="/" className="text-sm text-neutral-400 underline">
++          Terug
++        </Link>
++      </header>
++
++      <p className="mb-6 text-sm text-neutral-400">
++        Voor arbeidstijd die niet aan één klantproject gekoppeld is — verplaatsing, interne vergadering, opleiding of
++        overige.
++      </p>
++
++      {errorMessage && (
++        <p className="mb-4 rounded-lg border border-red-900 bg-red-950 px-4 py-3 text-sm text-red-200">{errorMessage}</p>
++      )}
++
++      {activeEntry === undefined && <p className="text-neutral-400">Laden...</p>}
++
++      {isProjectEntry && (
++        <div className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-4 text-sm text-swatt-gold">
++          Je hebt al een actieve tijdsregistratie lopen op <strong>{activeEntry.projectName}</strong>. Stop deze eerst
++          voor je hier een algemene registratie kan starten.
++          <Link to={`/projecten/${activeEntry.projectId}`} className="mt-3 block underline">
++            Naar dat project
++          </Link>
++        </div>
++      )}
++
++      {!isProjectEntry && isGeneralEntry && (
++        <div className="rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-6 text-center">
++          <p className="mb-1 text-sm text-neutral-400">
++            {ACTIVITY_TYPE_OPTIONS.find((o) => o.value === activeEntry.activityType)?.label}
++          </p>
++          <p className="mb-4 text-4xl font-bold tabular-nums text-swatt-gold">{formatHms(elapsedSeconds)}</p>
++          <div className="flex gap-3">
++            {activeEntry.status === 'RUNNING' ? (
++              <button
++                type="button"
++                onClick={() => void handlePause()}
++                disabled={isSubmitting}
++                className="flex-1 rounded-lg border border-neutral-700 py-3 text-sm font-semibold text-neutral-200 disabled:opacity-50"
++              >
++                Pauzeren
++              </button>
++            ) : (
++              <button
++                type="button"
++                onClick={() => void handleResume()}
++                disabled={isSubmitting}
++                className="flex-1 rounded-lg border border-neutral-700 py-3 text-sm font-semibold text-neutral-200 disabled:opacity-50"
++              >
++                Hervatten
++              </button>
++            )}
++            <button
++              type="button"
++              onClick={() => void handleStop()}
++              disabled={isSubmitting}
++              className="flex-1 rounded-lg bg-swatt-gold py-3 text-sm font-bold text-swatt-black disabled:opacity-50"
++            >
++              Stoppen
++            </button>
++          </div>
++        </div>
++      )}
++
++      {!isProjectEntry && !isGeneralEntry && activeEntry !== undefined && (
++        <>
++          <p className="mb-2 text-sm font-semibold text-neutral-300">Type activiteit</p>
++          <div className="mb-4 space-y-2">
++            {ACTIVITY_TYPE_OPTIONS.map((option) => (
++              <label
++                key={option.value}
++                className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-3"
++              >
++                <input
++                  type="radio"
++                  name="activityType"
++                  checked={selectedType === option.value}
++                  onChange={() => setSelectedType(option.value)}
++                  className="h-4 w-4 accent-swatt-gold"
++                />
++                {option.label}
++              </label>
++            ))}
++          </div>
++
++          <label className="mb-6 block text-sm text-neutral-300">
++            Omschrijving (optioneel)
++            <textarea
++              value={description}
++              onChange={(e) => setDescription(e.target.value)}
++              rows={2}
++              className="mt-1 w-full rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-white outline-none focus:border-swatt-gold"
++            />
++          </label>
++
++          <button
++            type="button"
++            onClick={() => void handleStart()}
++            disabled={isSubmitting}
++            className="rounded-lg bg-swatt-gold py-4 text-center text-base font-bold text-swatt-black disabled:opacity-50"
++          >
++            {isSubmitting ? 'Bezig...' : 'START'}
++          </button>
++        </>
++      )}
++    </main>
++  );
++}
++
++function computeElapsedSeconds(entry: TimeEntrySummary, nowMs: number): number {
++  const startedMs = new Date(entry.startedAt).getTime();
++  if (entry.status === 'RUNNING') {
++    return Math.max(0, Math.floor((nowMs - startedMs) / 1000) - entry.pausedSeconds);
++  }
++  if (entry.status === 'PAUSED' && entry.currentPauseStartedAt) {
++    const pauseStartedMs = new Date(entry.currentPauseStartedAt).getTime();
++    return Math.max(0, Math.floor((pauseStartedMs - startedMs) / 1000) - entry.pausedSeconds);
++  }
++  return Math.max(0, Math.floor((nowMs - startedMs) / 1000) - entry.pausedSeconds);
++}
++
++function formatHms(totalSeconds: number): string {
++  const hours = Math.floor(totalSeconds / 3600);
++  const minutes = Math.floor((totalSeconds % 3600) / 60);
++  const seconds = totalSeconds % 60;
++  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
++}
+diff --git a/apps/web/src/pages/HomePage.tsx b/apps/web/src/pages/HomePage.tsx
+index c11121c..6ba3cff 100644
+--- a/apps/web/src/pages/HomePage.tsx
++++ b/apps/web/src/pages/HomePage.tsx
+@@ -81,6 +81,13 @@ export function HomePage() {
+         Mijn werkbonnen
+       </Link>
+ 
++      <Link
++        to="/algemene-tijdregistratie"
++        className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
++      >
++        Algemene tijdregistratie
++      </Link>
++
+       <Link
+         to="/app-toegang"
+         className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+diff --git a/apps/web/src/pages/MyWorkOrdersPage.tsx b/apps/web/src/pages/MyWorkOrdersPage.tsx
+index 80e995d..536b9b5 100644
+--- a/apps/web/src/pages/MyWorkOrdersPage.tsx
++++ b/apps/web/src/pages/MyWorkOrdersPage.tsx
+@@ -1,7 +1,7 @@
+-import type { WorkOrderOverviewItemSummary } from '@swatt/shared-types';
++import type { TimeEntrySummary, WorkOrderOverviewItemSummary } from '@swatt/shared-types';
+ import { useCallback, useEffect, useState } from 'react';
+ import { Link } from 'react-router-dom';
+-import { workOrdersApi } from '../api/client';
++import { timeEntriesApi, workOrdersApi } from '../api/client';
+ import { ApiRequestError } from '../auth/AuthContext';
+ 
+ /**
+@@ -11,15 +11,23 @@ import { ApiRequestError } from '../auth/AuthContext';
+  * beperkt tot DRAFT-werkbonnen van één project): hier ziet een installateur
+  * ook zijn al ondertekende/gefactureerde werkbonnen terug, over alle
+  * projecten heen.
++ *
++ * Sinds 4/9/2026 (Belgische verplichte urenregistratie vanaf 1/1/2027) ook
++ * de eigen niet-projectgebonden registraties (verplaatsing/interne
++ * vergadering/opleiding/overige) — een wettelijk vereist "toegankelijk
++ * systeem" betekent dat een werknemer ALLE eigen geregistreerde arbeidstijd
++ * moet kunnen terugvinden, niet enkel klant-werkbonnen.
+  */
+ export function MyWorkOrdersPage() {
+   const [workOrders, setWorkOrders] = useState<WorkOrderOverviewItemSummary[] | null>(null);
++  const [generalEntries, setGeneralEntries] = useState<TimeEntrySummary[] | null>(null);
+   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+ 
+   const load = useCallback(async () => {
+     try {
+-      const response = await workOrdersApi.listMine();
+-      setWorkOrders(response.workOrders);
++      const [workOrdersResponse, generalResponse] = await Promise.all([workOrdersApi.listMine(), timeEntriesApi.listMineGeneral()]);
++      setWorkOrders(workOrdersResponse.workOrders);
++      setGeneralEntries(generalResponse.timeEntries);
+       setErrorMessage(null);
+     } catch (err) {
+       setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon je werkbonnen niet ophalen.');
+@@ -68,10 +76,40 @@ export function MyWorkOrdersPage() {
+           ))}
+         </ul>
+       )}
++
++      {generalEntries && generalEntries.length > 0 && (
++        <section className="mt-8 border-t border-neutral-800 pt-6">
++          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-400">
++            Overige geregistreerde uren
++          </h2>
++          <p className="mb-3 text-xs text-neutral-500">
++            Verplaatsing, interne vergadering, opleiding en overige — niet aan een klantproject gekoppeld.
++          </p>
++          <ul className="space-y-2">
++            {generalEntries.map((entry) => (
++              <li key={entry.id} className="rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-3">
++                <span className="block text-sm font-semibold">{ACTIVITY_TYPE_LABELS[entry.activityType]}</span>
++                <span className="block text-xs text-neutral-400">
++                  {formatDate(entry.startedAt)} · {formatTime(entry.startedAt)}–{entry.endedAt ? formatTime(entry.endedAt) : '?'}
++                </span>
++                {entry.description && <span className="block text-xs text-neutral-500">{entry.description}</span>}
++              </li>
++            ))}
++          </ul>
++        </section>
++      )}
+     </main>
+   );
+ }
+ 
++const ACTIVITY_TYPE_LABELS: Record<TimeEntrySummary['activityType'], string> = {
++  PROJECT_WORK: 'Projectwerk',
++  TRAVEL: 'Verplaatsing tussen werven',
++  INTERNAL: 'Interne vergadering / administratie',
++  TRAINING: 'Opleiding',
++  OTHER: 'Overige',
++};
++
+ /** Zelfde mensentaal-labels als het backoffice-overzicht (WorkOrdersOverviewPage.tsx) — bewust hier lokaal herhaald i.p.v. gedeeld, zie de toelichting in dat bestand. */
+ const STATUS_LABELS: Record<WorkOrderOverviewItemSummary['status'], string> = {
+   DRAFT: 'Concept',
+@@ -101,3 +139,7 @@ function StatusBadge({ status }: { status: WorkOrderOverviewItemSummary['status'
+ function formatDate(iso: string): string {
+   return new Date(iso).toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+ }
++
++function formatTime(iso: string): string {
++  return new Date(iso).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
++}
+diff --git a/apps/web/src/pages/admin/AuditLogPage.tsx b/apps/web/src/pages/admin/AuditLogPage.tsx
+index 2e4ced4..b7a36cc 100644
+--- a/apps/web/src/pages/admin/AuditLogPage.tsx
++++ b/apps/web/src/pages/admin/AuditLogPage.tsx
+@@ -13,6 +13,7 @@ import { ApiRequestError } from '../../auth/AuthContext';
+  * van financiële/status-wijzigingen, niet elke mogelijke actie in de app).
+  */
+ const ACTION_LABELS: Record<string, string> = {
++  TIME_ENTRY_CORRECTED: 'Tijd manueel gecorrigeerd',
+   WORK_ORDER_SIGNED: 'Werkbon ondertekend',
+   WORK_ORDER_SENT_TO_CUSTOMER: 'Werkbon-PDF naar klant gestuurd',
+   WORK_ORDER_REMINDER_SENT: 'Herinnering verstuurd',
+@@ -33,6 +34,7 @@ const ACTION_LABELS: Record<string, string> = {
+ 
+ const ENTITY_TYPE_OPTIONS = [
+   { value: '', label: 'Alle types' },
++  { value: 'TimeEntry', label: 'Tijdregistratie' },
+   { value: 'WorkOrder', label: 'Werkbon' },
+   { value: 'WeeklyApproval', label: 'Weekgoedkeuring' },
+   { value: 'PayrollBatch', label: 'Personeelsuitbetaling' },
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 08c1f2d..09c5471 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -340,11 +340,27 @@ export type TimeEntryStatus = (typeof TIME_ENTRY_STATUSES)[number];
+  * verouderd zijn. De frontend berekent en toont de live tellende tijd zelf
+  * (zie ProjectTimerPage.tsx), op basis van deze velden + het huidige moment.
+  */
++/** Op vraag (4/9/2026) — zie TimeEntry.activityType in schema.prisma. */
++export type TimeEntryActivityType = 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
++
++/** Body van POST /time-entries/start-general — zie TimeEntryService.startGeneral(). */
++export interface StartGeneralTimeEntryBody {
++  activityType: Exclude<TimeEntryActivityType, 'PROJECT_WORK'>;
++  description?: string;
++}
++
++/** Response van GET /time-entries/mine-general — zie TimeEntryService.listGeneralForEmployee(). */
++export interface ListGeneralTimeEntriesResponseBody {
++  timeEntries: TimeEntrySummary[];
++}
++
+ export interface TimeEntrySummary {
+   id: string;
+-  projectId: string;
+-  projectName: string;
+-  customerName: string;
++  /** `null` bij een niet-projectgebonden registratie (activityType != PROJECT_WORK) — zie TimeEntryService.startGeneral(). */
++  projectId: string | null;
++  projectName: string | null;
++  customerName: string | null;
++  activityType: TimeEntryActivityType;
+   status: TimeEntryStatus;
+   startedAt: string;
+   endedAt: string | null;

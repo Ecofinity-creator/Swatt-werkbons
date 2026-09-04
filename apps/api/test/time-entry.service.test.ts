@@ -6,10 +6,12 @@ import { TimeEntryService } from '../src/modules/time-entries/time-entry.service
  * Unit-tests met een minimale fake-Prisma (geen echte database/gegenereerde
  * client nodig — zelfde patroon als teamleader-auth.service.test.ts). Dekt de
  * kritieke business rules uit sectie 24 van de projectbrief: "één werknemer
- * kan maar één actieve timer hebben" en de pauze/hervat-tijdrekenkunde
- * (regel 2: een timer moet altijd aan een project gekoppeld zijn, afgedwongen
- * doordat `start()` een verplichte projectId-parameter heeft — er bestaat
- * geen enkel pad om een TimeEntry zonder project aan te maken).
+ * kan maar één actieve timer hebben" en de pauze/hervat-tijdrekenkunde.
+ * Sinds 4/9/2026 (Belgische verplichte urenregistratie vanaf 1/1/2027) kan
+ * `start()` ook via `startGeneral()` een niet-projectgebonden registratie
+ * aanmaken (verplaatsing/interne vergadering/opleiding/overige) — de
+ * oorspronkelijke, hier ietwat verouderde tekst "er bestaat geen enkel pad
+ * om een TimeEntry zonder project aan te maken" gold enkel vóór die datum.
  */
 
 interface FakeProject {
@@ -22,7 +24,8 @@ interface FakeProject {
 interface FakeTimeEntry {
   id: string;
   employeeId: string;
-  projectId: string;
+  projectId: string | null;
+  activityType: 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
   status: 'RUNNING' | 'PAUSED' | 'STOPPED';
   startedAt: Date;
   endedAt: Date | null;
@@ -54,10 +57,10 @@ function createFakePrisma(
   let idCounter = 0;
 
   function toRecord(entry: FakeTimeEntry) {
-    const project = projects.get(entry.projectId);
+    const project = entry.projectId ? projects.get(entry.projectId) : undefined;
     return {
       ...entry,
-      project: { name: project?.name ?? 'Onbekend project', customer: { name: project?.customerName ?? 'Onbekende klant' } },
+      project: entry.projectId ? { name: project?.name ?? 'Onbekend project', customer: { name: project?.customerName ?? 'Onbekende klant' } } : null,
     };
   }
 
@@ -87,7 +90,8 @@ function createFakePrisma(
       }: {
         data: {
           employeeId: string;
-          projectId: string;
+          projectId: string | null;
+          activityType?: 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
           status: 'RUNNING' | 'STOPPED';
           startedAt: Date;
           endedAt?: Date | null;
@@ -101,6 +105,7 @@ function createFakePrisma(
           id,
           employeeId: data.employeeId,
           projectId: data.projectId,
+          activityType: data.activityType ?? 'PROJECT_WORK',
           status: data.status,
           startedAt: data.startedAt,
           endedAt: data.endedAt ?? null,
@@ -619,6 +624,63 @@ describe('TimeEntryService', () => {
           description: null,
         }),
       ).rejects.toMatchObject({ code: 'TIME_ENTRY_CORRECTION_END_BEFORE_START' });
+    });
+  });
+
+  describe('startGeneral() — op vraag (4/9/2026, Belgische verplichte urenregistratie vanaf 1/1/2027): niet-projectgebonden arbeidstijd registreren', () => {
+    it('start een registratie zonder project, met het opgegeven activiteitstype', async () => {
+      const { prisma } = createFakePrisma();
+      const service = new TimeEntryService(prisma);
+
+      const entry = await service.startGeneral('employee-1', 'TRAVEL', 'Rit naar werf Janssens BV');
+
+      expect(entry.projectId).toBeNull();
+      expect(entry.project).toBeNull();
+      expect(entry.activityType).toBe('TRAVEL');
+      expect(entry.status).toBe('RUNNING');
+      expect(entry.description).toBe('Rit naar werf Janssens BV');
+    });
+
+    it('weigert een tweede actieve registratie te starten, ongeacht of de eerste projectgebonden is of niet (business rule 1 blijft gelden)', async () => {
+      const projects = [{ id: 'project-1', isArchivedInTl: false, name: 'Onderhoud', customerName: 'Janssens BV' }];
+      const { prisma } = createFakePrisma({ projects, assignments: [['project-1', 'employee-1']] });
+      const service = new TimeEntryService(prisma);
+
+      await service.startGeneral('employee-1', 'INTERNAL', null);
+
+      await expect(service.start('employee-1', 'project-1')).rejects.toMatchObject({ code: 'TIME_ENTRY_ALREADY_ACTIVE' });
+      await expect(service.startGeneral('employee-1', 'TRAINING', null)).rejects.toMatchObject({ code: 'TIME_ENTRY_ALREADY_ACTIVE' });
+    });
+
+    it('kan gepauzeerd, hervat en gestopt worden via dezelfde flow als een projectgebonden registratie', async () => {
+      const { prisma } = createFakePrisma();
+      const service = new TimeEntryService(prisma);
+
+      const started = await service.startGeneral('employee-1', 'OTHER', 'Administratie');
+      const paused = await service.pause('employee-1', started.id);
+      expect(paused.status).toBe('PAUSED');
+      const resumed = await service.resume('employee-1', started.id);
+      expect(resumed.status).toBe('RUNNING');
+      const stopped = await service.stop('employee-1', started.id, 'Administratie afgerond');
+      expect(stopped.status).toBe('STOPPED');
+      expect(stopped.projectId).toBeNull();
+    });
+
+    it('een niet-projectgebonden registratie is vrij corrigeerbaar (geen werkbonkoppeling mogelijk)', async () => {
+      const { prisma } = createFakePrisma();
+      const service = new TimeEntryService(prisma);
+      const started = await service.startGeneral('employee-1', 'TRAVEL', null);
+      const stopped = await service.stop('employee-1', started.id, null);
+
+      const corrected = await service.correct(stopped.id, {
+        startedAt: new Date('2026-08-20T08:00:00Z'),
+        endedAt: new Date('2026-08-20T08:45:00Z'),
+        pausedSeconds: 0,
+        description: 'Verplaatsing gecorrigeerd',
+      });
+
+      expect(corrected.description).toBe('Verplaatsing gecorrigeerd');
+      expect(corrected.projectId).toBeNull();
     });
   });
 });

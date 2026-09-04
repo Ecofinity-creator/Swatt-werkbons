@@ -340,11 +340,27 @@ export type TimeEntryStatus = (typeof TIME_ENTRY_STATUSES)[number];
  * verouderd zijn. De frontend berekent en toont de live tellende tijd zelf
  * (zie ProjectTimerPage.tsx), op basis van deze velden + het huidige moment.
  */
+/** Op vraag (4/9/2026) — zie TimeEntry.activityType in schema.prisma. */
+export type TimeEntryActivityType = 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
+
+/** Body van POST /time-entries/start-general — zie TimeEntryService.startGeneral(). */
+export interface StartGeneralTimeEntryBody {
+  activityType: Exclude<TimeEntryActivityType, 'PROJECT_WORK'>;
+  description?: string;
+}
+
+/** Response van GET /time-entries/mine-general — zie TimeEntryService.listGeneralForEmployee(). */
+export interface ListGeneralTimeEntriesResponseBody {
+  timeEntries: TimeEntrySummary[];
+}
+
 export interface TimeEntrySummary {
   id: string;
-  projectId: string;
-  projectName: string;
-  customerName: string;
+  /** `null` bij een niet-projectgebonden registratie (activityType != PROJECT_WORK) — zie TimeEntryService.startGeneral(). */
+  projectId: string | null;
+  projectName: string | null;
+  customerName: string | null;
+  activityType: TimeEntryActivityType;
   status: TimeEntryStatus;
   startedAt: string;
   endedAt: string | null;

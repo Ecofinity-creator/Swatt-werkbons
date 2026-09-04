@@ -9,7 +9,8 @@ const FUTURE_GRACE_MS = 5 * 60 * 1000;
 export interface TimeEntryRecord {
   id: string;
   employeeId: string;
-  projectId: string;
+  projectId: string | null;
+  activityType: 'PROJECT_WORK' | 'TRAVEL' | 'INTERNAL' | 'TRAINING' | 'OTHER';
   status: 'RUNNING' | 'PAUSED' | 'STOPPED';
   startedAt: Date;
   endedAt: Date | null;
@@ -20,7 +21,7 @@ export interface TimeEntryRecord {
   project: {
     name: string;
     customer: { name: string };
-  };
+  } | null;
 }
 
 export interface CreateManualTimeEntryInput {
@@ -80,7 +81,43 @@ export class TimeEntryService {
 
     try {
       return await this.prisma.timeEntry.create({
-        data: { employeeId, projectId, status: 'RUNNING', startedAt: new Date() },
+        data: { employeeId, projectId, activityType: 'PROJECT_WORK', status: 'RUNNING', startedAt: new Date() },
+        ...WITH_PROJECT,
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw TimeEntryErrors.alreadyActive();
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Op vraag (4/9/2026, in het kader van de Belgische verplichte
+   * urenregistratie vanaf 1/1/2027): niet elke gewerkte minuut is aan een
+   * klantproject gekoppeld (verplaatsing tussen werven, interne vergadering,
+   * opleiding, administratie...) — toch valt dit onder de wettelijke
+   * verplichting om ALLE arbeidstijd te registreren via een objectief,
+   * betrouwbaar systeem. Deze registratie doorloopt dezelfde PAUZE/STOP-flow
+   * als een projectgebonden timer, maar wordt NOOIT in een werkbon
+   * opgenomen (geen klant om te laten tekenen) — zie
+   * WorkOrderService.create(), dat enkel timeEntryIds accepteert die al op
+   * hetzelfde project + dezelfde werknemer zitten, wat voor een
+   * niet-projectgebonden registratie per definitie nooit het geval is.
+   */
+  async startGeneral(
+    employeeId: string,
+    activityType: Exclude<TimeEntryRecord['activityType'], 'PROJECT_WORK'>,
+    description: string | null,
+  ): Promise<TimeEntryRecord> {
+    const active = await this.getActive(employeeId);
+    if (active) {
+      throw TimeEntryErrors.alreadyActive();
+    }
+
+    try {
+      return await this.prisma.timeEntry.create({
+        data: { employeeId, projectId: null, activityType, status: 'RUNNING', startedAt: new Date(), description },
         ...WITH_PROJECT,
       });
     } catch (err) {
@@ -263,6 +300,22 @@ export class TimeEntryService {
       throw TimeEntryErrors.notFound();
     }
     return entry;
+  }
+
+  /**
+   * Op vraag (4/9/2026): "Mijn werkbonnen" toont enkel klant-werkbonnen — een
+   * niet-projectgebonden registratie hoort daar niet thuis (geen klant), maar
+   * moet niettemin voor de werknemer zelf toegankelijk/naspeurbaar blijven
+   * (wettelijk vereiste: "toegankelijk systeem"). Enkel gestopte registraties
+   * (een actieve staat al op het algemene-tijdregistratiescherm zelf).
+   */
+  async listGeneralForEmployee(employeeId: string): Promise<TimeEntryRecord[]> {
+    return this.prisma.timeEntry.findMany({
+      where: { employeeId, projectId: null, status: 'STOPPED' },
+      orderBy: { startedAt: 'desc' },
+      take: 100,
+      ...WITH_PROJECT,
+    });
   }
 }
 

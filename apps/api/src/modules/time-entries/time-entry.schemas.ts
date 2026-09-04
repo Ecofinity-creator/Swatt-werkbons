@@ -10,6 +10,19 @@ export const startTimeEntryBodySchema = z.object({
 
 export type StartTimeEntryBody = z.infer<typeof startTimeEntryBodySchema>;
 
+/**
+ * Op vraag (4/9/2026, Belgische verplichte urenregistratie vanaf 1/1/2027) —
+ * zie TimeEntryService.startGeneral(). Vrije omschrijving optioneel (bv. "Rit
+ * naar werf Janssens BV"), niet verplicht — de activityType zelf is al
+ * betekenisvol genoeg voor een objectieve registratie.
+ */
+export const startGeneralTimeEntryBodySchema = z.object({
+  activityType: z.enum(['TRAVEL', 'INTERNAL', 'TRAINING', 'OTHER']),
+  description: z.string().trim().min(1).optional(),
+});
+
+export type StartGeneralTimeEntryBody = z.infer<typeof startGeneralTimeEntryBodySchema>;
+
 export const stopTimeEntryBodySchema = z.object({
   description: z.string().trim().min(1).optional(),
 });

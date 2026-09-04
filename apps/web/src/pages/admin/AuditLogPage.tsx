@@ -13,6 +13,7 @@ import { ApiRequestError } from '../../auth/AuthContext';
  * van financiële/status-wijzigingen, niet elke mogelijke actie in de app).
  */
 const ACTION_LABELS: Record<string, string> = {
+  TIME_ENTRY_CORRECTED: 'Tijd manueel gecorrigeerd',
   WORK_ORDER_SIGNED: 'Werkbon ondertekend',
   WORK_ORDER_SENT_TO_CUSTOMER: 'Werkbon-PDF naar klant gestuurd',
   WORK_ORDER_REMINDER_SENT: 'Herinnering verstuurd',
@@ -33,6 +34,7 @@ const ACTION_LABELS: Record<string, string> = {
 
 const ENTITY_TYPE_OPTIONS = [
   { value: '', label: 'Alle types' },
+  { value: 'TimeEntry', label: 'Tijdregistratie' },
   { value: 'WorkOrder', label: 'Werkbon' },
   { value: 'WeeklyApproval', label: 'Weekgoedkeuring' },
   { value: 'PayrollBatch', label: 'Personeelsuitbetaling' },

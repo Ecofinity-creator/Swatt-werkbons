@@ -1,7 +1,7 @@
-import type { WorkOrderOverviewItemSummary } from '@swatt/shared-types';
+import type { TimeEntrySummary, WorkOrderOverviewItemSummary } from '@swatt/shared-types';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { workOrdersApi } from '../api/client';
+import { timeEntriesApi, workOrdersApi } from '../api/client';
 import { ApiRequestError } from '../auth/AuthContext';
 
 /**
@@ -11,15 +11,23 @@ import { ApiRequestError } from '../auth/AuthContext';
  * beperkt tot DRAFT-werkbonnen van één project): hier ziet een installateur
  * ook zijn al ondertekende/gefactureerde werkbonnen terug, over alle
  * projecten heen.
+ *
+ * Sinds 4/9/2026 (Belgische verplichte urenregistratie vanaf 1/1/2027) ook
+ * de eigen niet-projectgebonden registraties (verplaatsing/interne
+ * vergadering/opleiding/overige) — een wettelijk vereist "toegankelijk
+ * systeem" betekent dat een werknemer ALLE eigen geregistreerde arbeidstijd
+ * moet kunnen terugvinden, niet enkel klant-werkbonnen.
  */
 export function MyWorkOrdersPage() {
   const [workOrders, setWorkOrders] = useState<WorkOrderOverviewItemSummary[] | null>(null);
+  const [generalEntries, setGeneralEntries] = useState<TimeEntrySummary[] | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const response = await workOrdersApi.listMine();
-      setWorkOrders(response.workOrders);
+      const [workOrdersResponse, generalResponse] = await Promise.all([workOrdersApi.listMine(), timeEntriesApi.listMineGeneral()]);
+      setWorkOrders(workOrdersResponse.workOrders);
+      setGeneralEntries(generalResponse.timeEntries);
       setErrorMessage(null);
     } catch (err) {
       setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon je werkbonnen niet ophalen.');
@@ -68,9 +76,39 @@ export function MyWorkOrdersPage() {
           ))}
         </ul>
       )}
+
+      {generalEntries && generalEntries.length > 0 && (
+        <section className="mt-8 border-t border-neutral-800 pt-6">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-400">
+            Overige geregistreerde uren
+          </h2>
+          <p className="mb-3 text-xs text-neutral-500">
+            Verplaatsing, interne vergadering, opleiding en overige — niet aan een klantproject gekoppeld.
+          </p>
+          <ul className="space-y-2">
+            {generalEntries.map((entry) => (
+              <li key={entry.id} className="rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-3">
+                <span className="block text-sm font-semibold">{ACTIVITY_TYPE_LABELS[entry.activityType]}</span>
+                <span className="block text-xs text-neutral-400">
+                  {formatDate(entry.startedAt)} · {formatTime(entry.startedAt)}–{entry.endedAt ? formatTime(entry.endedAt) : '?'}
+                </span>
+                {entry.description && <span className="block text-xs text-neutral-500">{entry.description}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </main>
   );
 }
+
+const ACTIVITY_TYPE_LABELS: Record<TimeEntrySummary['activityType'], string> = {
+  PROJECT_WORK: 'Projectwerk',
+  TRAVEL: 'Verplaatsing tussen werven',
+  INTERNAL: 'Interne vergadering / administratie',
+  TRAINING: 'Opleiding',
+  OTHER: 'Overige',
+};
 
 /** Zelfde mensentaal-labels als het backoffice-overzicht (WorkOrdersOverviewPage.tsx) — bewust hier lokaal herhaald i.p.v. gedeeld, zie de toelichting in dat bestand. */
 const STATUS_LABELS: Record<WorkOrderOverviewItemSummary['status'], string> = {
@@ -100,4 +138,8 @@ function StatusBadge({ status }: { status: WorkOrderOverviewItemSummary['status'
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('nl-BE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
 }

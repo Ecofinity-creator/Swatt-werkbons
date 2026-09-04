@@ -57,6 +57,20 @@ enum TimeEntryStatus {
   @@map("time_entry_status")
 }
 
+/// Op vraag (4/9/2026) — zie de toelichting bij TimeEntry.activityType.
+/// PROJECT_WORK is de standaard (bestaande gedrag, klant-facturabele uren op
+/// een project). De overige waarden zijn niet-projectgebonden arbeidstijd die
+/// niettemin onder de Belgische verplichte urenregistratie valt.
+enum TimeEntryActivityType {
+  PROJECT_WORK
+  TRAVEL
+  INTERNAL
+  TRAINING
+  OTHER
+
+  @@map("time_entry_activity_type")
+}
+
 /// Phase 5 — werkbonnen (basis). Statusnamen matchen het overzicht uit sectie 20
 /// van de projectbrief. Deze ronde gebruikt enkel DRAFT (een werkbon wordt
 /// automatisch aangemaakt zodra de timer gestopt wordt); de volledige enum
@@ -689,7 +703,18 @@ model ProjectAssignment {
 model TimeEntry {
   id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   employeeId String           @map("employee_id") @db.Uuid
-  projectId  String           @map("project_id") @db.Uuid
+  /// Op vraag (4/9/2026, in het kader van de Belgische verplichte
+  /// urenregistratie vanaf 1/1/2027 — "objectief, betrouwbaar en toegankelijk
+  /// systeem" moet ALLE arbeidstijd omvatten, niet enkel klant-facturabele
+  /// uren): nullable geworden. `null` enkel toegestaan wanneer activityType
+  /// != PROJECT_WORK hieronder (verplaatsing/interne vergadering/opleiding/
+  /// overige) — zie TimeEntryService.startGeneral(). Zo'n registratie wordt
+  /// NOOIT in een werkbon opgenomen (geen klant om te laten tekenen) en
+  /// blijft dus permanent op TimeEntry zelf staan, zichtbaar in "Mijn
+  /// werkbonnen"/het bredere urenoverzicht.
+  projectId  String?          @map("project_id") @db.Uuid
+  /// Zie de toelichting bij projectId hierboven.
+  activityType TimeEntryActivityType @default(PROJECT_WORK) @map("activity_type")
   status     TimeEntryStatus  @default(RUNNING)
 
   startedAt DateTime  @map("started_at") @db.Timestamptz
@@ -748,7 +773,7 @@ model TimeEntry {
   syncError                String?             @map("sync_error")
 
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  project  Project  @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  project  Project? @relation(fields: [projectId], references: [id], onDelete: Restrict)
 
   /// Gezet zodra deze registratie in een werkbon is opgenomen (Phase 5) — een
   /// gestopte tijdsregistratie hoort bij hoogstens één werkbon, zie

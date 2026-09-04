@@ -20,6 +20,7 @@ import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
 import { AuditLogPage } from './pages/admin/AuditLogPage';
 import { WorkOrdersOverviewPage } from './pages/admin/WorkOrdersOverviewPage';
 import { MyWorkOrdersPage } from './pages/MyWorkOrdersPage';
+import { GeneralTimeEntryPage } from './pages/GeneralTimeEntryPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { UsersPage } from './pages/admin/UsersPage';
 
@@ -161,6 +162,14 @@ export function App() {
         element={
           <RequireAuth>
             <MyWorkOrdersPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/algemene-tijdregistratie"
+        element={
+          <RequireAuth>
+            <GeneralTimeEntryPage />
           </RequireAuth>
         }
       />
