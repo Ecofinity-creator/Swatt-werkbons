@@ -13,8 +13,9 @@ import {
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthErrors, WorkOrderErrors } from '../../errors';
+import type { PrismaClient } from '@prisma/client';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
-import { computeKmAmountCents } from '../distance/distance.service';
+import { computeKmAmountCents, type DistanceService } from '../distance/distance.service';
 import { requireRole } from '../rbac/rbac.middleware';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
 import type { WorkOrderOverviewItemRecord, WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
@@ -54,7 +55,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
     const body = createWorkOrderBodySchema.parse(request.body);
     const workOrder = await service.create(employeeId, body.projectId, body.timeEntryIds, body.description ?? null);
     reply.code(201);
-    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+    return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
   });
 
   /**
@@ -125,7 +126,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
     const params = workOrderIdParamsSchema.parse(request.params);
     const workOrder = await service.get(params.id);
     requireWorkOrderAccess(request, workOrder);
-    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+    return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
   });
 
   app.post(
@@ -145,7 +146,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
 
       const workOrder = await service.get(params.id);
       reply.code(201);
-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
     },
   );
 
@@ -159,7 +160,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
       await photoService.remove(employeeId, params.id, params.photoId);
 
       const workOrder = await service.get(params.id);
-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
     },
   );
 
@@ -206,7 +207,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
 
       const workOrder = await service.get(params.id);
       reply.code(201);
-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
     },
   );
 
@@ -235,7 +236,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
       await app.syncJobService.retry(params.id);
 
       const refreshed = await service.get(params.id);
-      return { workOrder: await toSummary(storage, refreshed, companySettingsService) };
+      return { workOrder: await toSummary(storage, refreshed, companySettingsService, app.distanceService, app.prisma) };
     },
   );
 
@@ -275,7 +276,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
       await pdfService.generate(params.id);
 
       const workOrder = await service.get(params.id);
-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
     },
   );
 
@@ -425,6 +426,8 @@ async function toSummary(
   storage: StorageService,
   workOrder: WorkOrderRecord,
   companySettingsService: CompanySettingsService,
+  distanceService: DistanceService | null,
+  prisma: PrismaClient,
 ): Promise<WorkOrderSummary> {
   const photos = await Promise.all(workOrder.photos.map((photo) => toPhotoSummary(storage, photo)));
 
@@ -448,7 +451,33 @@ async function toSummary(
   // na ondertekening geeft dit hetzelfde bevroren bedrag terug, dus geen
   // waargenomen "sprong" tussen het onderteken- en het PDF-scherm.
   const companySettingsForKm = await companySettingsService.get();
-  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
+  let projectKmDistanceOneWayMeters = workOrder.project.kmDistanceOneWayMeters;
+
+  // Op vraag (7/9/2026): bij 1500+ projecten in Teamleader kan de bulk-
+  // "Synchroniseer projecten" (begrensd tot MAX_KM_RECOMPUTES_PER_SYNC_RUN
+  // per klik, zie ProjectSyncService — nodig om Render's requesttimeout te
+  // vermijden) tientallen tot honderden klikken nodig hebben vóór een
+  // specifiek project toevallig aan de beurt komt. Vandaar hier een ON-
+  // DEMAND aanvulling: enkel voor DIT ENE project, op het moment dat de
+  // werkbon effectief geopend wordt — snel genoeg (2-3 externe calls) om
+  // geen enkel timeout-risico te lopen, en de klant hoeft niet te wachten
+  // op een toevallige bulk-beurt. Faalt bewust stil richting de gebruiker
+  // (enkel loggen): de rest van het werkbon-scherm mag hier nooit door
+  // vastlopen.
+  if (projectKmDistanceOneWayMeters === null && distanceService && companySettingsForKm.addressLine && workOrder.project.address) {
+    try {
+      const meters = await distanceService.getDrivingDistanceMetersOneWay(companySettingsForKm.addressLine, workOrder.project.address);
+      await prisma.project.update({ where: { id: workOrder.projectId }, data: { kmDistanceOneWayMeters: meters } });
+      projectKmDistanceOneWayMeters = meters;
+      // eslint-disable-next-line no-console
+      console.log(`Km-afstand on-demand berekend bij het openen van werkbon ${workOrder.workOrderNumber} (project ${workOrder.projectId}): ${meters}m enkele rit.`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`Km-afstand on-demand berekenen mislukt voor project ${workOrder.projectId} (adres "${workOrder.project.address}"):`, err);
+    }
+  }
+
+  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(projectKmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
 
   return {
     id: workOrder.id,
@@ -462,7 +491,7 @@ async function toSummary(
     kmAmountCents,
     // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
     kmDebug: {
-      projectKmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
+      projectKmDistanceOneWayMeters,
       companyKmRateCents: companySettingsForKm.kmRateCents,
     },
     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,

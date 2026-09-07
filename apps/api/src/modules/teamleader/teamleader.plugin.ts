@@ -3,7 +3,7 @@ import fp from 'fastify-plugin';
 import { getDistanceServiceApiKey, isDistanceServiceConfigured } from '../../config/env';
 import { SyncJobService } from '../sync/sync-job.service';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
-import { OpenRouteServiceDistanceProvider } from '../distance/distance.service';
+import { OpenRouteServiceDistanceProvider, type DistanceService } from '../distance/distance.service';
 import { FileSyncService } from './file-sync.service';
 import { MilestoneSyncService } from './milestone-sync.service';
 import { ProjectSyncService } from './project-sync.service';
@@ -22,6 +22,8 @@ declare module 'fastify' {
     teamleaderClient: TeamleaderClient;
     /** Phase 3 (slice) — synct Teamleader-projecten + hun klant naar de lokale cache. */
     projectSyncService: ProjectSyncService;
+    /** Phase 12, deel D — geocodering/routeberekening voor de km-vergoeding (OpenRouteService), `null` zonder OPENROUTESERVICE_API_KEY. Ook decoreerd op app-niveau (niet enkel intern aan ProjectSyncService) zodat andere routes (bv. work-order.routes.ts) een ontbrekende afstand on-demand kunnen aanvullen, i.p.v. te moeten wachten tot de eerstvolgende bulk-"Synchroniseer projecten" die dit specifieke project toevallig bereikt. */
+    distanceService: DistanceService | null;
     /** Phase 9 — live users.list-opvraging voor de medewerker↔Teamleader-gebruiker-koppeling. */
     teamleaderUserService: TeamleaderUserService;
     /** Phase 9 — legacy-milestones per project (zie milestone-sync.service.ts). */
@@ -65,6 +67,7 @@ export default fp(async function teamleaderPlugin(app: FastifyInstance) {
     );
   }
   const distanceService = distanceServiceConfigured ? new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey()) : null;
+  app.decorate('distanceService', distanceService);
   const companySettingsService = new CompanySettingsService(app.prisma);
   app.decorate('projectSyncService', new ProjectSyncService(app.prisma, teamleaderClient, distanceService, companySettingsService));
   app.decorate('teamleaderUserService', new TeamleaderUserService(teamleaderClient));

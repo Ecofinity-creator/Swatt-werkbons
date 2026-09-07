@@ -1,0 +1,212 @@
+From 30c41777521f93ba7e54fc6bcd3bd2ce449795e9 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 13:57:07 +0000
+Subject: [PATCH] =?UTF-8?q?Km-afstand=20on-demand=20berekenen=20bij=20het?=
+ =?UTF-8?q?=20openen=20van=20een=20werkbon=20=E2=80=94=20cruciaal=20bij=20?=
+ =?UTF-8?q?1500+=20projecten=20in=20Teamleader?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Doorslaggevende ontdekking (7/9/2026, 9e ronde): het Teamleader-account
+telt 1507 projecten (zichtbaar op de Teamleader-integratiepagina zelf).
+De bulk-"Synchroniseer projecten" verwerkt begrensd tot
+MAX_KM_RECOMPUTES_PER_SYNC_RUN (15) projecten per klik — nodig om
+Render's requesttimeout te vermijden (zie eerdere commits) — maar bij
+1507 projecten zou dit voor een specifiek testproject honderden klikken
+kunnen vergen vóór het toevallig aan de beurt komt. Dit verklaart
+waarom "afstand = onbekend" bleef staan ondanks een correct adres en
+correct tarief: niet elke fix tot nu toe was fout, het project had
+gewoon simpelweg nog geen beurt gehad in de willekeurige volgorde van de
+bulkverwerking.
+
+Structurele oplossing: WorkOrderService/work-order.routes.ts berekent de
+km-afstand nu ON-DEMAND bij het openen van een werkbon, wanneer
+Project.kmDistanceOneWayMeters nog `null` is — enkel voor DIT ENE
+project (2-3 externe API-calls, ruim binnen elke timeout), niet voor de
+hele backlog. De klant hoeft niet meer te wachten op een toevallige
+bulk-beurt: de eerste keer dat een werkbon van een project geopend
+wordt, wordt de afstand meteen berekend en opgeslagen — elke volgende
+keer is ze dan al gekend.
+
+- app.distanceService: nieuwe Fastify-decoratie (naast het reeds
+  bestaande, enkel intern aan ProjectSyncService bereikbare exemplaar),
+  zodat ook work-order.routes.ts hiervan gebruik kan maken.
+- toSummary() berekent en persisteert de afstand meteen wanneer ze nog
+  ontbreekt, vóór de kmAmountCents-preview zelf berekend wordt — dus
+  zichtbaar op hetzelfde schermbezoek, geen herlaad nodig.
+- Faalt bewust stil richting de gebruiker (enkel loggen, zelfde
+  business-rule-9-principe als de bulkversie): een mislukte on-demand
+  berekening mag het werkbon-scherm zelf nooit laten vastlopen.
+
+Verificatie: backend-testsuite 227 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../modules/teamleader/teamleader.plugin.ts   |  5 +-
+ .../modules/work-orders/work-order.routes.ts  | 49 +++++++++++++++----
+ 2 files changed, 43 insertions(+), 11 deletions(-)
+
+diff --git a/apps/api/src/modules/teamleader/teamleader.plugin.ts b/apps/api/src/modules/teamleader/teamleader.plugin.ts
+index 97fbf44..f55dcf8 100644
+--- a/apps/api/src/modules/teamleader/teamleader.plugin.ts
++++ b/apps/api/src/modules/teamleader/teamleader.plugin.ts
+@@ -3,7 +3,7 @@ import fp from 'fastify-plugin';
+ import { getDistanceServiceApiKey, isDistanceServiceConfigured } from '../../config/env';
+ import { SyncJobService } from '../sync/sync-job.service';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+-import { OpenRouteServiceDistanceProvider } from '../distance/distance.service';
++import { OpenRouteServiceDistanceProvider, type DistanceService } from '../distance/distance.service';
+ import { FileSyncService } from './file-sync.service';
+ import { MilestoneSyncService } from './milestone-sync.service';
+ import { ProjectSyncService } from './project-sync.service';
+@@ -22,6 +22,8 @@ declare module 'fastify' {
+     teamleaderClient: TeamleaderClient;
+     /** Phase 3 (slice) — synct Teamleader-projecten + hun klant naar de lokale cache. */
+     projectSyncService: ProjectSyncService;
++    /** Phase 12, deel D — geocodering/routeberekening voor de km-vergoeding (OpenRouteService), `null` zonder OPENROUTESERVICE_API_KEY. Ook decoreerd op app-niveau (niet enkel intern aan ProjectSyncService) zodat andere routes (bv. work-order.routes.ts) een ontbrekende afstand on-demand kunnen aanvullen, i.p.v. te moeten wachten tot de eerstvolgende bulk-"Synchroniseer projecten" die dit specifieke project toevallig bereikt. */
++    distanceService: DistanceService | null;
+     /** Phase 9 — live users.list-opvraging voor de medewerker↔Teamleader-gebruiker-koppeling. */
+     teamleaderUserService: TeamleaderUserService;
+     /** Phase 9 — legacy-milestones per project (zie milestone-sync.service.ts). */
+@@ -65,6 +67,7 @@ export default fp(async function teamleaderPlugin(app: FastifyInstance) {
+     );
+   }
+   const distanceService = distanceServiceConfigured ? new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey()) : null;
++  app.decorate('distanceService', distanceService);
+   const companySettingsService = new CompanySettingsService(app.prisma);
+   app.decorate('projectSyncService', new ProjectSyncService(app.prisma, teamleaderClient, distanceService, companySettingsService));
+   app.decorate('teamleaderUserService', new TeamleaderUserService(teamleaderClient));
+diff --git a/apps/api/src/modules/work-orders/work-order.routes.ts b/apps/api/src/modules/work-orders/work-order.routes.ts
+index bfaadd7..2d8822f 100644
+--- a/apps/api/src/modules/work-orders/work-order.routes.ts
++++ b/apps/api/src/modules/work-orders/work-order.routes.ts
+@@ -13,8 +13,9 @@ import {
+ import type { FastifyInstance, FastifyRequest } from 'fastify';
+ import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors, WorkOrderErrors } from '../../errors';
++import type { PrismaClient } from '@prisma/client';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+-import { computeKmAmountCents } from '../distance/distance.service';
++import { computeKmAmountCents, type DistanceService } from '../distance/distance.service';
+ import { requireRole } from '../rbac/rbac.middleware';
+ import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+ import type { WorkOrderOverviewItemRecord, WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
+@@ -54,7 +55,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+     const body = createWorkOrderBodySchema.parse(request.body);
+     const workOrder = await service.create(employeeId, body.projectId, body.timeEntryIds, body.description ?? null);
+     reply.code(201);
+-    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
++    return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
+   });
+ 
+   /**
+@@ -125,7 +126,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+     const params = workOrderIdParamsSchema.parse(request.params);
+     const workOrder = await service.get(params.id);
+     requireWorkOrderAccess(request, workOrder);
+-    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
++    return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
+   });
+ 
+   app.post(
+@@ -145,7 +146,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+ 
+       const workOrder = await service.get(params.id);
+       reply.code(201);
+-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
+     },
+   );
+ 
+@@ -159,7 +160,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+       await photoService.remove(employeeId, params.id, params.photoId);
+ 
+       const workOrder = await service.get(params.id);
+-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
+     },
+   );
+ 
+@@ -206,7 +207,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+ 
+       const workOrder = await service.get(params.id);
+       reply.code(201);
+-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
+     },
+   );
+ 
+@@ -235,7 +236,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+       await app.syncJobService.retry(params.id);
+ 
+       const refreshed = await service.get(params.id);
+-      return { workOrder: await toSummary(storage, refreshed, companySettingsService) };
++      return { workOrder: await toSummary(storage, refreshed, companySettingsService, app.distanceService, app.prisma) };
+     },
+   );
+ 
+@@ -275,7 +276,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+       await pdfService.generate(params.id);
+ 
+       const workOrder = await service.get(params.id);
+-      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService, app.distanceService, app.prisma) };
+     },
+   );
+ 
+@@ -425,6 +426,8 @@ async function toSummary(
+   storage: StorageService,
+   workOrder: WorkOrderRecord,
+   companySettingsService: CompanySettingsService,
++  distanceService: DistanceService | null,
++  prisma: PrismaClient,
+ ): Promise<WorkOrderSummary> {
+   const photos = await Promise.all(workOrder.photos.map((photo) => toPhotoSummary(storage, photo)));
+ 
+@@ -448,7 +451,33 @@ async function toSummary(
+   // na ondertekening geeft dit hetzelfde bevroren bedrag terug, dus geen
+   // waargenomen "sprong" tussen het onderteken- en het PDF-scherm.
+   const companySettingsForKm = await companySettingsService.get();
+-  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
++  let projectKmDistanceOneWayMeters = workOrder.project.kmDistanceOneWayMeters;
++
++  // Op vraag (7/9/2026): bij 1500+ projecten in Teamleader kan de bulk-
++  // "Synchroniseer projecten" (begrensd tot MAX_KM_RECOMPUTES_PER_SYNC_RUN
++  // per klik, zie ProjectSyncService — nodig om Render's requesttimeout te
++  // vermijden) tientallen tot honderden klikken nodig hebben vóór een
++  // specifiek project toevallig aan de beurt komt. Vandaar hier een ON-
++  // DEMAND aanvulling: enkel voor DIT ENE project, op het moment dat de
++  // werkbon effectief geopend wordt — snel genoeg (2-3 externe calls) om
++  // geen enkel timeout-risico te lopen, en de klant hoeft niet te wachten
++  // op een toevallige bulk-beurt. Faalt bewust stil richting de gebruiker
++  // (enkel loggen): de rest van het werkbon-scherm mag hier nooit door
++  // vastlopen.
++  if (projectKmDistanceOneWayMeters === null && distanceService && companySettingsForKm.addressLine && workOrder.project.address) {
++    try {
++      const meters = await distanceService.getDrivingDistanceMetersOneWay(companySettingsForKm.addressLine, workOrder.project.address);
++      await prisma.project.update({ where: { id: workOrder.projectId }, data: { kmDistanceOneWayMeters: meters } });
++      projectKmDistanceOneWayMeters = meters;
++      // eslint-disable-next-line no-console
++      console.log(`Km-afstand on-demand berekend bij het openen van werkbon ${workOrder.workOrderNumber} (project ${workOrder.projectId}): ${meters}m enkele rit.`);
++    } catch (err) {
++      // eslint-disable-next-line no-console
++      console.error(`Km-afstand on-demand berekenen mislukt voor project ${workOrder.projectId} (adres "${workOrder.project.address}"):`, err);
++    }
++  }
++
++  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(projectKmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
+ 
+   return {
+     id: workOrder.id,
+@@ -462,7 +491,7 @@ async function toSummary(
+     kmAmountCents,
+     // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
+     kmDebug: {
+-      projectKmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
++      projectKmDistanceOneWayMeters,
+       companyKmRateCents: companySettingsForKm.kmRateCents,
+     },
+     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
+-- 
+2.43.0
+
