@@ -287,26 +287,18 @@ export class ProjectSyncService {
       data: { isArchivedInTl: true },
     });
 
-    // Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten",
-    // ook na de eerdere begrensd-parallelle fix): elke synchrone poging om
-    // de km-berekeningen binnen dezelfde HTTP-aanvraag te laten meelopen
-    // blijft kwetsbaar voor Render's proxy-timeout zodra er genoeg
-    // projecten tegelijk een herberekening nodig hebben — begrensde
-    // parallelliteit verkleint dat risico, maar sluit het niet uit. Deze app
-    // vermijdt bewust een aparte, betaalde Redis/BullMQ-achtergrondwerker
-    // voor kleinere klanten (zie RUN_SYNC_WORKER_INLINE elders in de code) —
-    // dus i.p.v. een echte job-queue op te tuigen enkel hiervoor: bewust
-    // NIET awaiten. De HTTP-respons van "Synchroniseer projecten" keert zo
-    // terug zodra het (snelle) project-/klant-gedeelte klaar is; de km-
-    // berekeningen lopen gewoon door in hetzelfde, lang-lopende Node-proces
-    // (een Render Web Service herstart niet tussen requests), zonder de
-    // aanvraag zelf te blokkeren. Een mislukking hier wordt nog steeds
-    // gelogd (zie recomputeKmDistance()) maar kan de sync-respons per
-    // definitie niet meer laten falen.
-    this.recomputeKmDistancesBounded(projectsNeedingKmRecompute).catch((err: unknown) => {
-      // eslint-disable-next-line no-console
-      console.error('recomputeKmDistancesBounded() op de achtergrond onverwacht gefaald:', err);
-    });
+    // Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten" —
+    // met dank aan de ontdekking dat de Render-service op het gratis plan
+    // draait en dus kan "in slapen" gaan bij inactiviteit): dit wordt bewust
+    // WEL afgewacht binnen dezelfde HTTP-aanvraag. Een eerdere versie liet
+    // dit als fire-and-forget-achtergrondtaak doorlopen ná de HTTP-respons,
+    // maar dat is onbetrouwbaar op een gratis instance die kan stilvallen
+    // vóór die taak klaar is. recomputeKmDistancesBounded() begrenst zelf
+    // hoeveel projecten er per aanroep verwerkt worden (MAX_KM_RECOMPUTES_
+    // PER_SYNC_RUN), zodat de totale wachttijd hier voorspelbaar kort
+    // blijft, ook bij een grote initiële achterstand — zie de toelichting
+    // daar voor het volledige verhaal.
+    await this.recomputeKmDistancesBounded(projectsNeedingKmRecompute);
 
     return {
       module,
@@ -424,34 +416,42 @@ export class ProjectSyncService {
   }
 
   /**
-   * Phase 12, deel D (sectie 5) — herberekent `Project.kmDistanceOneWayMeters`
-   * tussen het Swatt-adres (CompanySettings.addressLine) en dit projectadres.
-   * Faalt bewust stil (loggen, niet gooien): een niet-geocodeerbaar adres of
-   * een tijdelijk onbereikbare OpenRouteService mag de rest van de
-   * projectsync nooit blokkeren (business rule 9) — een volgende sync
-   * (of een adreswijziging) probeert het gewoon opnieuw.
-   */
-  /**
    * Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten"): de
    * eerdere bugfix ("herbereken ook wanneer nog nooit berekend") betekent
    * dat bij de allereerste sync met een correct ingestelde
    * OPENROUTESERVICE_API_KEY mogelijk TIENTALLEN projecten in één klap hun
    * afstand moeten laten berekenen. Elke berekening kost 2-3 externe
    * HTTP-aanroepen (geocoderen bedrijfsadres + geocoderen projectadres +
-   * routeberekening) — volledig sequentieel liep dit al snel op tot ruim een
-   * minuut, boven Render's proxy-timeout. Deze methode:
-   * 1) haalt het bedrijfsadres/de instellingen ÉÉN keer op (i.p.v. per
-   *    project — was voorheen ook al onnodig herhaald werk);
-   * 2) verwerkt de projecten in begrensde, parallelle batches (i.p.v. één
-   *    voor één wachten) — snel genoeg om binnen een normale requesttimeout
-   *    te blijven, maar niet zo agressief parallel dat OpenRouteService's
-   *    eigen rate limiting (HTTP 429) voortdurend zou afvuren;
-   * business rule 9 blijft gelden: één mislukte berekening (netwerk,
+   * routeberekening).
+   *
+   * Deze methode verwerkt daarom hooguit MAX_PER_SYNC_RUN projecten per
+   * aanroep, in begrensde parallelle batches, en wordt VOLLEDIG AWAIT binnen
+   * dezelfde HTTP-aanvraag afgewerkt (zie syncAll() hieronder) — bewust GEEN
+   * fire-and-forget-achtergrondtaak (een eerdere versie van deze fix deed
+   * dat wel, maar bleek onbetrouwbaar op Render's gratis instance-tier: die
+   * kan bij inactiviteit "in slaap" gaan, ook meteen ná het versturen van de
+   * HTTP-respons — een taak die dan nog op de achtergrond zou moeten
+   * doorlopen, kan zo halverwege afgebroken worden, zonder enige melding).
+   * Bij een backlog groter dan MAX_PER_SYNC_RUN blijven de overige projecten
+   * gewoon `null` staan tot een volgende klik op "Synchroniseer projecten"
+   * — vandaar de expliciete log hieronder die dat aangeeft.
+   *
+   * Business rule 9 blijft gelden: één mislukte berekening (netwerk,
    * niet-geocodeerbaar adres) blokkeert de andere nooit en laat de rest van
    * de sync-run nooit falen.
    */
-  private async recomputeKmDistancesBounded(projects: Array<{ projectTeamleaderId: string; projectAddress: string }>): Promise<void> {
-    if (projects.length === 0 || !this.distanceService || !this.companySettingsService) return;
+  private static readonly MAX_KM_RECOMPUTES_PER_SYNC_RUN = 15;
+
+  private async recomputeKmDistancesBounded(allProjects: Array<{ projectTeamleaderId: string; projectAddress: string }>): Promise<void> {
+    if (allProjects.length === 0 || !this.distanceService || !this.companySettingsService) return;
+
+    const projects = allProjects.slice(0, ProjectSyncService.MAX_KM_RECOMPUTES_PER_SYNC_RUN);
+    if (allProjects.length > projects.length) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `Km-afstand: ${allProjects.length} project(en) hebben een herberekening nodig, deze sync-run verwerkt er ${projects.length} (begrensd om binnen de requesttimeout te blijven). Klik nogmaals op "Synchroniseer projecten" om de rest bij te werken.`,
+      );
+    }
 
     const settings = await this.companySettingsService.get();
     if (!settings.addressLine) {

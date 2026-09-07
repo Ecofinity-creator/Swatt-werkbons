@@ -204,16 +204,18 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
   // Bewust POST, geen GET: dit voert een actie uit (roept Teamleader aan,
   // schrijft naar onze eigen database) — geen idempotente resource-fetch.
   //
-  // MVP-beperking: het project-/klantgedeelte draait nog synchroon binnen de
-  // request (nog geen BullMQ-achtergrondwerker — die komt pas in Phase
-  // 9/11 van de roadmap). Bij een groot aantal projecten kan dit een tijdje
-  // duren; de admin-UI toont dan ook gewoon "Bezig..." tot de aanvraag
-  // klaar is. Geen dataverlies-risico: deze sync is zuiver read-only
-  // richting onze database (business rule 9). Sinds 7/9/2026: de km-
-  // afstandsberekeningen (die zelf een reeks trage externe HTTP-aanroepen
-  // kosten) lopen NIET meer mee binnen deze aanvraag — zie de toelichting
-  // bij ProjectSyncService.syncAll() — dus deze respons keert nu terug
-  // zodra enkel het project-/klantgedeelte klaar is.
+  // MVP-beperking: dit draait volledig synchroon binnen de request (nog
+  // geen BullMQ-achtergrondwerker — die komt pas in Phase 9/11 van de
+  // roadmap; bewust ook niet enkel hiervoor opgetuigd, zie
+  // ProjectSyncService se toelichting bij recomputeKmDistancesBounded()).
+  // Bij een groot aantal projecten (of een grote km-herberekenings-
+  // achterstand) kan dit een tijdje duren; de admin-UI toont dan ook gewoon
+  // "Bezig..." tot de aanvraag klaar is. Geen dataverlies-risico: deze sync
+  // is zuiver read-only richting onze database (business rule 9). De km-
+  // afstandsberekeningen zelf zijn begrensd tot een vast maximum per klik
+  // (MAX_KM_RECOMPUTES_PER_SYNC_RUN) om de totale wachttijd voorspelbaar te
+  // houden — bij een grotere achterstand toont een volgende klik gewoon de
+  // volgende portie.
   app.post(
     '/admin/teamleader/sync/projects',
     { preHandler: [app.authenticate, requireRole('ADMIN')] },
