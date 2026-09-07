@@ -1,0 +1,208 @@
+From bd82a8c748a96ac423c1f39055effc9f79c130c9 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 08:55:39 +0000
+Subject: [PATCH] =?UTF-8?q?Fix=20(2e=20ronde):=20HTTP=20502=20bij=20"Synch?=
+ =?UTF-8?q?roniseer=20projecten"=20=E2=80=94=20km-berekeningen=20lopen=20n?=
+ =?UTF-8?q?u=20volledig=20los=20van=20de=20HTTP-aanvraag?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+De vorige fix (begrensd parallel i.p.v. sequentieel) verkleinde het risico,
+maar sloot het niet uit: bij genoeg projecten met een nog-nooit-berekende
+afstand kan zelfs 5-tegelijk nog altijd bij Render's proxy-timeout
+uitkomen. Bevestigd doordat de HTTP 502 na de vorige fix bleef optreden.
+
+Structurele fix: ProjectSyncService.syncAll() awaitet
+recomputeKmDistancesBounded() niet langer. De HTTP-respons van
+"Synchroniseer projecten" keert nu terug zodra het (snelle) project-/
+klantgedeelte klaar is; de km-berekeningen lopen gewoon door op de
+achtergrond in hetzelfde, lang-lopende Node-proces (een Render Web Service
+herstart niet tussen requests). Bewust GEEN BullMQ/Redis-achtergrondtaak
+opgetuigd enkel hiervoor — deze app vermijdt dat bewust voor kleinere
+klanten (RUN_SYNC_WORKER_INLINE), en "niet awaiten" volstaat hier
+volledig zonder nieuwe infrastructuur.
+
+Een mislukking in de achtergrond blijft gelogd (console.error, zie de
+vorige commit) maar kan de sync-respons per definitie niet meer laten
+falen — business rule 9 blijft volledig gelden.
+
+Tests: alle bestaande scenario's aangevuld met een korte
+flushBackgroundKmWork()-wachttijd ná syncAll(), zodat de (in tests
+uitsluitend gemockte, ogenblikkelijke) achtergrondtaak effectief afgerond
+is vóór de assertions het resultaat controleren.
+
+Praktisch gevolg voor de gebruiker: na het klikken op "Synchroniseer
+projecten" kan het een paar seconden duren vóór de km-vergoeding
+zichtbaar wordt op een werkbon van een project dat nog nooit een afstand
+had — de melding zelf verschijnt wél meteen.
+
+Verificatie: backend-testsuite 224 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../teamleader/project-sync.service.ts        | 35 +++++++++++--------
+ .../modules/teamleader/teamleader.routes.ts   | 15 +++++---
+ .../api/test/project-sync-km-distance.test.ts | 19 ++++++++++
+ 3 files changed, 50 insertions(+), 19 deletions(-)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 150a1ab..3897525 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -263,20 +263,6 @@ export class ProjectSyncService {
+       }
+     }
+ 
+-    // Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten"):
+-    // de bugfix hierboven ("herbereken ook wanneer nog nooit berekend")
+-    // betekende in de praktijk dat na de allereerste sync met een correct
+-    // ingestelde OPENROUTESERVICE_API_KEY, ALLE bestaande projecten in één
+-    // klap hun afstand moesten laten berekenen — elk daarvan 2-3 externe
+-    // HTTP-aanroepen (geocoderen + routeberekening), voorheen volledig
+-    // SEQUENTIEEL binnen deze ene HTTP-aanvraag. Bij enkele tientallen
+-    // projecten liep dit al snel op tot ruim een minuut, boven Render's
+-    // proxy-timeout (vandaar de HTTP 502 — de aanvraag zelf liep wél
+-    // gewoon door op de achtergrond, enkel de HTTP-respons kwam te laat).
+-    // Nu: begrensd parallel (business rule 9 blijft gelden — één mislukte
+-    // berekening blokkeert de andere nooit, zie recomputeKmDistance()).
+-    await this.recomputeKmDistancesBounded(projectsNeedingKmRecompute);
+-
+     // Business rule 8: een project dat niet meer in Teamleader voorkomt wordt
+     // gearchiveerd, nooit verwijderd — bestaande werkbon-historiek blijft intact.
+     const archived = await this.prisma.project.updateMany({
+@@ -288,6 +274,27 @@ export class ProjectSyncService {
+       data: { isArchivedInTl: true },
+     });
+ 
++    // Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten",
++    // ook na de eerdere begrensd-parallelle fix): elke synchrone poging om
++    // de km-berekeningen binnen dezelfde HTTP-aanvraag te laten meelopen
++    // blijft kwetsbaar voor Render's proxy-timeout zodra er genoeg
++    // projecten tegelijk een herberekening nodig hebben — begrensde
++    // parallelliteit verkleint dat risico, maar sluit het niet uit. Deze app
++    // vermijdt bewust een aparte, betaalde Redis/BullMQ-achtergrondwerker
++    // voor kleinere klanten (zie RUN_SYNC_WORKER_INLINE elders in de code) —
++    // dus i.p.v. een echte job-queue op te tuigen enkel hiervoor: bewust
++    // NIET awaiten. De HTTP-respons van "Synchroniseer projecten" keert zo
++    // terug zodra het (snelle) project-/klant-gedeelte klaar is; de km-
++    // berekeningen lopen gewoon door in hetzelfde, lang-lopende Node-proces
++    // (een Render Web Service herstart niet tussen requests), zonder de
++    // aanvraag zelf te blokkeren. Een mislukking hier wordt nog steeds
++    // gelogd (zie recomputeKmDistance()) maar kan de sync-respons per
++    // definitie niet meer laten falen.
++    this.recomputeKmDistancesBounded(projectsNeedingKmRecompute).catch((err: unknown) => {
++      // eslint-disable-next-line no-console
++      console.error('recomputeKmDistancesBounded() op de achtergrond onverwacht gefaald:', err);
++    });
++
+     return {
+       module,
+       syncedCount: seenTeamleaderIds.length,
+diff --git a/apps/api/src/modules/teamleader/teamleader.routes.ts b/apps/api/src/modules/teamleader/teamleader.routes.ts
+index 59f73d5..88c9508 100644
+--- a/apps/api/src/modules/teamleader/teamleader.routes.ts
++++ b/apps/api/src/modules/teamleader/teamleader.routes.ts
+@@ -204,11 +204,16 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
+   // Bewust POST, geen GET: dit voert een actie uit (roept Teamleader aan,
+   // schrijft naar onze eigen database) — geen idempotente resource-fetch.
+   //
+-    // MVP-beperking: dit draait synchroon binnen de request (nog geen BullMQ-
+-  // achtergrondwerker — die komt pas in Phase 9/11 van de roadmap). Bij een
+-  // groot aantal projecten kan dit een tijdje duren; de admin-UI toont dan
+-  // ook gewoon "Bezig..." tot de aanvraag klaar is. Geen dataverlies-risico:
+-  // deze sync is zuiver read-only richting onze database (business rule 9).
++  // MVP-beperking: het project-/klantgedeelte draait nog synchroon binnen de
++  // request (nog geen BullMQ-achtergrondwerker — die komt pas in Phase
++  // 9/11 van de roadmap). Bij een groot aantal projecten kan dit een tijdje
++  // duren; de admin-UI toont dan ook gewoon "Bezig..." tot de aanvraag
++  // klaar is. Geen dataverlies-risico: deze sync is zuiver read-only
++  // richting onze database (business rule 9). Sinds 7/9/2026: de km-
++  // afstandsberekeningen (die zelf een reeks trage externe HTTP-aanroepen
++  // kosten) lopen NIET meer mee binnen deze aanvraag — zie de toelichting
++  // bij ProjectSyncService.syncAll() — dus deze respons keert nu terug
++  // zodra enkel het project-/klantgedeelte klaar is.
+   app.post(
+     '/admin/teamleader/sync/projects',
+     { preHandler: [app.authenticate, requireRole('ADMIN')] },
+diff --git a/apps/api/test/project-sync-km-distance.test.ts b/apps/api/test/project-sync-km-distance.test.ts
+index b5a4f09..d4f8093 100644
+--- a/apps/api/test/project-sync-km-distance.test.ts
++++ b/apps/api/test/project-sync-km-distance.test.ts
+@@ -5,6 +5,18 @@ import type { TeamleaderClient } from '../src/modules/teamleader/teamleader-clie
+ import type { DistanceService } from '../src/modules/distance/distance.service';
+ import type { CompanySettingsService } from '../src/modules/company-settings/company-settings.service';
+ 
++/**
++ * Op vraag (7/9/2026, 2e HTTP 502-ronde): syncAll() awaitet de km-
++ * herberekeningen bewust niet meer (fire-and-forget, zie de toelichting in
++ * project-sync.service.ts) — de tests moeten daarom expliciet even wachten
++ * tot die achtergrondtaak (met in deze tests uitsluitend gemockte, vrijwel
++ * ogenblikkelijke aanroepen) effectief afgerond is vóór ze het resultaat
++ * controleren.
++ */
++async function flushBackgroundKmWork(): Promise<void> {
++  await new Promise((resolve) => setTimeout(resolve, 20));
++}
++
+ /**
+  * Phase 12, deel D — gericht op de km-afstandsberekening zelf (recomputeKmDistance()),
+  * niet op de volledige ProjectSyncService-logica (die had voorheen geen eigen
+@@ -77,6 +89,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+ 
+     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+     await service.syncAll();
++    await flushBackgroundKmWork();
+ 
+     expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledWith('Swatt-adres 1, 2000 Antwerpen', 'Kerkstraat 1, 2000 Antwerpen');
+     expect(projectRow.kmDistanceOneWayMeters).toBe(12345);
+@@ -91,6 +104,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+ 
+     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+     await service.syncAll();
++    await flushBackgroundKmWork();
+ 
+     expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
+     expect(projectRow.kmDistanceOneWayMeters).toBe(12345); // ongewijzigd gebleven, niet overschreven met de (niet-aangeroepen) nieuwe waarde
+@@ -105,6 +119,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+ 
+     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+     await service.syncAll();
++    await flushBackgroundKmWork();
+ 
+     expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledWith('Swatt-adres 1, 2000 Antwerpen', 'Kerkstraat 1, 2000 Antwerpen');
+     expect(projectRow.kmDistanceOneWayMeters).toBe(12345);
+@@ -166,6 +181,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+ 
+     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+     await service.syncAll();
++    await flushBackgroundKmWork();
+ 
+     expect(companySettingsGetSpy).toHaveBeenCalledTimes(1);
+     expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledTimes(3);
+@@ -184,6 +200,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+ 
+     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+     const result = await service.syncAll(); // gooit niet, ondanks de mislukte km-berekening
++    await flushBackgroundKmWork();
+ 
+     expect(result.syncedCount).toBe(1);
+     expect(projectRow.kmDistanceOneWayMeters).toBeNull(); // bleef ongewijzigd, geen halve/foute waarde
+@@ -197,6 +214,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+ 
+     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+     await service.syncAll();
++    await flushBackgroundKmWork();
+ 
+     expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
+     expect(projectRow.kmDistanceOneWayMeters).toBeNull();
+@@ -208,6 +226,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+ 
+     const service = new ProjectSyncService(prisma, client); // geen distanceService/companySettingsService meegegeven
+     const result = await service.syncAll();
++    await flushBackgroundKmWork();
+ 
+     expect(result.syncedCount).toBe(1);
+     expect(projectRow.kmDistanceOneWayMeters).toBeNull();
+-- 
+2.43.0
+

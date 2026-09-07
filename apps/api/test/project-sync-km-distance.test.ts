@@ -6,6 +6,18 @@ import type { DistanceService } from '../src/modules/distance/distance.service';
 import type { CompanySettingsService } from '../src/modules/company-settings/company-settings.service';
 
 /**
+ * Op vraag (7/9/2026, 2e HTTP 502-ronde): syncAll() awaitet de km-
+ * herberekeningen bewust niet meer (fire-and-forget, zie de toelichting in
+ * project-sync.service.ts) — de tests moeten daarom expliciet even wachten
+ * tot die achtergrondtaak (met in deze tests uitsluitend gemockte, vrijwel
+ * ogenblikkelijke aanroepen) effectief afgerond is vóór ze het resultaat
+ * controleren.
+ */
+async function flushBackgroundKmWork(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+/**
  * Phase 12, deel D — gericht op de km-afstandsberekening zelf (recomputeKmDistance()),
  * niet op de volledige ProjectSyncService-logica (die had voorheen geen eigen
  * testbestand — buiten scope om dat hier retroactief te bouwen). Minimale
@@ -77,6 +89,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
 
     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
     await service.syncAll();
+    await flushBackgroundKmWork();
 
     expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledWith('Swatt-adres 1, 2000 Antwerpen', 'Kerkstraat 1, 2000 Antwerpen');
     expect(projectRow.kmDistanceOneWayMeters).toBe(12345);
@@ -91,6 +104,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
 
     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
     await service.syncAll();
+    await flushBackgroundKmWork();
 
     expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
     expect(projectRow.kmDistanceOneWayMeters).toBe(12345); // ongewijzigd gebleven, niet overschreven met de (niet-aangeroepen) nieuwe waarde
@@ -105,6 +119,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
 
     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
     await service.syncAll();
+    await flushBackgroundKmWork();
 
     expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledWith('Swatt-adres 1, 2000 Antwerpen', 'Kerkstraat 1, 2000 Antwerpen');
     expect(projectRow.kmDistanceOneWayMeters).toBe(12345);
@@ -166,6 +181,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
 
     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
     await service.syncAll();
+    await flushBackgroundKmWork();
 
     expect(companySettingsGetSpy).toHaveBeenCalledTimes(1);
     expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledTimes(3);
@@ -184,6 +200,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
 
     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
     const result = await service.syncAll(); // gooit niet, ondanks de mislukte km-berekening
+    await flushBackgroundKmWork();
 
     expect(result.syncedCount).toBe(1);
     expect(projectRow.kmDistanceOneWayMeters).toBeNull(); // bleef ongewijzigd, geen halve/foute waarde
@@ -197,6 +214,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
 
     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
     await service.syncAll();
+    await flushBackgroundKmWork();
 
     expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
     expect(projectRow.kmDistanceOneWayMeters).toBeNull();
@@ -208,6 +226,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
 
     const service = new ProjectSyncService(prisma, client); // geen distanceService/companySettingsService meegegeven
     const result = await service.syncAll();
+    await flushBackgroundKmWork();
 
     expect(result.syncedCount).toBe(1);
     expect(projectRow.kmDistanceOneWayMeters).toBeNull();

@@ -263,20 +263,6 @@ export class ProjectSyncService {
       }
     }
 
-    // Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten"):
-    // de bugfix hierboven ("herbereken ook wanneer nog nooit berekend")
-    // betekende in de praktijk dat na de allereerste sync met een correct
-    // ingestelde OPENROUTESERVICE_API_KEY, ALLE bestaande projecten in één
-    // klap hun afstand moesten laten berekenen — elk daarvan 2-3 externe
-    // HTTP-aanroepen (geocoderen + routeberekening), voorheen volledig
-    // SEQUENTIEEL binnen deze ene HTTP-aanvraag. Bij enkele tientallen
-    // projecten liep dit al snel op tot ruim een minuut, boven Render's
-    // proxy-timeout (vandaar de HTTP 502 — de aanvraag zelf liep wél
-    // gewoon door op de achtergrond, enkel de HTTP-respons kwam te laat).
-    // Nu: begrensd parallel (business rule 9 blijft gelden — één mislukte
-    // berekening blokkeert de andere nooit, zie recomputeKmDistance()).
-    await this.recomputeKmDistancesBounded(projectsNeedingKmRecompute);
-
     // Business rule 8: een project dat niet meer in Teamleader voorkomt wordt
     // gearchiveerd, nooit verwijderd — bestaande werkbon-historiek blijft intact.
     const archived = await this.prisma.project.updateMany({
@@ -286,6 +272,27 @@ export class ProjectSyncService {
         teamleaderId: { notIn: seenTeamleaderIds.length > 0 ? seenTeamleaderIds : ['__none_synced_this_run__'] },
       },
       data: { isArchivedInTl: true },
+    });
+
+    // Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten",
+    // ook na de eerdere begrensd-parallelle fix): elke synchrone poging om
+    // de km-berekeningen binnen dezelfde HTTP-aanvraag te laten meelopen
+    // blijft kwetsbaar voor Render's proxy-timeout zodra er genoeg
+    // projecten tegelijk een herberekening nodig hebben — begrensde
+    // parallelliteit verkleint dat risico, maar sluit het niet uit. Deze app
+    // vermijdt bewust een aparte, betaalde Redis/BullMQ-achtergrondwerker
+    // voor kleinere klanten (zie RUN_SYNC_WORKER_INLINE elders in de code) —
+    // dus i.p.v. een echte job-queue op te tuigen enkel hiervoor: bewust
+    // NIET awaiten. De HTTP-respons van "Synchroniseer projecten" keert zo
+    // terug zodra het (snelle) project-/klant-gedeelte klaar is; de km-
+    // berekeningen lopen gewoon door in hetzelfde, lang-lopende Node-proces
+    // (een Render Web Service herstart niet tussen requests), zonder de
+    // aanvraag zelf te blokkeren. Een mislukking hier wordt nog steeds
+    // gelogd (zie recomputeKmDistance()) maar kan de sync-respons per
+    // definitie niet meer laten falen.
+    this.recomputeKmDistancesBounded(projectsNeedingKmRecompute).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error('recomputeKmDistancesBounded() op de achtergrond onverwacht gefaald:', err);
     });
 
     return {
