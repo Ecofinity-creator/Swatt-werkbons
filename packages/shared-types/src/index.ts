@@ -275,6 +275,16 @@ export interface PendingWeekResponseBody {
   workOrderIds: string[];
   /** Detail van ALLE openstaande werkbonnen/tijdregistraties van de week op dit project — voor het overzicht vóór ondertekenen. */
   entries: PendingWeekEntrySummary[];
+  /**
+   * Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
+   * getoond aan de klant" — km-vergoeding PER werkbon (elke werkbon bevriest
+   * bij ondertekenen zijn eigen bedrag, zie WorkOrder.kmAmountCents); `null`
+   * wanneer niet van toepassing. Vermenigvuldig met pendingWorkOrderCount
+   * voor het totaal dat deze ene handtekening zal bevestigen.
+   */
+  kmAmountCentsPerWorkOrder: number | null;
+  /** Aantal openstaande werkbonnen deze week op dit project (over alle medewerkers heen) — zie de toelichting bij kmAmountCentsPerWorkOrder. */
+  pendingWorkOrderCount: number;
 }
 
 /** Body van POST /weekly-approvals/:projectId/sign — zelfde velden als het bestaande /work-orders/:id/sign, nu voor de hele lopende week. */
@@ -573,6 +583,16 @@ export interface WorkOrderSummary {
   customerName: string;
   status: WorkOrderStatus;
   description: string | null;
+  /**
+   * Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
+   * getoond aan de klant" — vóór ondertekening is dit een LEVENDE preview
+   * (herberekend op basis van Project.kmDistanceOneWayMeters +
+   * CompanySettings.kmRateCents), na ondertekening het effectief bevroren
+   * bedrag (WorkOrder.kmAmountCents) — beide via dezelfde formule
+   * (computeKmAmountCents()), dus geen waargenomen "sprong" voor de klant.
+   * `null` wanneer er geen km-vergoeding van toepassing is.
+   */
+  kmAmountCents: number | null;
   createdByEmployeeDisplayName: string;
   createdAt: string;
   timeEntries: WorkOrderTimeEntrySummary[];

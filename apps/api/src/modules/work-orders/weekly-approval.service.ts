@@ -95,7 +95,15 @@ export class WeeklyApprovalService {
   async listPendingForEmployee(
     employeeId: string,
     projectId: string,
-  ): Promise<{ weekStartDate: Date; weekEndDate: Date; workOrderIds: string[]; entries: PendingWeekEntry[] }> {
+  ): Promise<{
+    weekStartDate: Date;
+    weekEndDate: Date;
+    workOrderIds: string[];
+    entries: PendingWeekEntry[];
+    /** Op vraag (4/9/2026) — zie de toelichting bij PendingWeekResponseBody in shared-types. */
+    kmAmountCentsPerWorkOrder: number | null;
+    pendingWorkOrderCount: number;
+  }> {
     const { weekStartDate, weekEndDate } = WeeklyApprovalService.weekBoundsOf();
     const rows = await this.fetchPendingWorkOrders(projectId, weekStartDate, weekEndDate);
     const mine = rows.filter(
@@ -121,7 +129,18 @@ export class WeeklyApprovalService {
     );
     entries.sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
 
-    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries };
+    // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
+    // getoond aan de klant" — elke afzonderlijke werkbon bevriest bij het
+    // tekenen zijn EIGEN kmAmountCents (zie signCurrentWeek() hieronder),
+    // dus met bv. 2 openstaande werkbonnen deze week wordt de vergoeding
+    // ook 2 keer aangerekend (2 aparte interventies/verplaatsingen). Hier
+    // tonen we daarom het bedrag PER werkbon, plus het aantal — de
+    // frontend kan zelf vermenigvuldigen voor een totaal.
+    const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { kmDistanceOneWayMeters: true } });
+    const settings = await this.companySettingsService.get();
+    const kmAmountCentsPerWorkOrder = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, settings.kmRateCents);
+
+    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries, kmAmountCentsPerWorkOrder, pendingWorkOrderCount: rows.length };
   }
 
   /**

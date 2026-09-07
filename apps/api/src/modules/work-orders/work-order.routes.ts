@@ -14,6 +14,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthErrors, WorkOrderErrors } from '../../errors';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
+import { computeKmAmountCents } from '../distance/distance.service';
 import { requireRole } from '../rbac/rbac.middleware';
 import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
 import type { WorkOrderOverviewItemRecord, WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
@@ -53,7 +54,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
     const body = createWorkOrderBodySchema.parse(request.body);
     const workOrder = await service.create(employeeId, body.projectId, body.timeEntryIds, body.description ?? null);
     reply.code(201);
-    return { workOrder: await toSummary(storage, workOrder) };
+    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
   });
 
   /**
@@ -124,7 +125,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
     const params = workOrderIdParamsSchema.parse(request.params);
     const workOrder = await service.get(params.id);
     requireWorkOrderAccess(request, workOrder);
-    return { workOrder: await toSummary(storage, workOrder) };
+    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
   });
 
   app.post(
@@ -144,7 +145,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
 
       const workOrder = await service.get(params.id);
       reply.code(201);
-      return { workOrder: await toSummary(storage, workOrder) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
     },
   );
 
@@ -158,7 +159,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
       await photoService.remove(employeeId, params.id, params.photoId);
 
       const workOrder = await service.get(params.id);
-      return { workOrder: await toSummary(storage, workOrder) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
     },
   );
 
@@ -205,7 +206,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
 
       const workOrder = await service.get(params.id);
       reply.code(201);
-      return { workOrder: await toSummary(storage, workOrder) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
     },
   );
 
@@ -234,7 +235,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
       await app.syncJobService.retry(params.id);
 
       const refreshed = await service.get(params.id);
-      return { workOrder: await toSummary(storage, refreshed) };
+      return { workOrder: await toSummary(storage, refreshed, companySettingsService) };
     },
   );
 
@@ -274,7 +275,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
       await pdfService.generate(params.id);
 
       const workOrder = await service.get(params.id);
-      return { workOrder: await toSummary(storage, workOrder) };
+      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
     },
   );
 
@@ -420,7 +421,11 @@ async function toPhotoSummary(storage: StorageService, photo: WorkOrderPhotoReco
   };
 }
 
-async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): Promise<WorkOrderSummary> {
+async function toSummary(
+  storage: StorageService,
+  workOrder: WorkOrderRecord,
+  companySettingsService: CompanySettingsService,
+): Promise<WorkOrderSummary> {
   const photos = await Promise.all(workOrder.photos.map((photo) => toPhotoSummary(storage, photo)));
 
   let signature: WorkOrderSummary['signature'] = null;
@@ -434,6 +439,21 @@ async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): P
     };
   }
 
+  // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
+  // getoond aan de klant" — vóór ondertekening staat WorkOrder.kmAmountCents
+  // nog op `null` (die wordt pas bevroren op het moment van tekenen, zie
+  // WorkOrderSignatureService/WeeklyApprovalService). Om de klant vóór het
+  // tekenen toch te tonen wat er verrekend ZAL worden, berekenen we hier een
+  // levende PREVIEW met exact dezelfde formule (computeKmAmountCents()) —
+  // na ondertekening geeft dit hetzelfde bevroren bedrag terug, dus geen
+  // waargenomen "sprong" tussen het onderteken- en het PDF-scherm.
+  const kmAmountCents =
+    workOrder.kmAmountCents ??
+    (await (async () => {
+      const settings = await companySettingsService.get();
+      return computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, settings.kmRateCents);
+    })());
+
   return {
     id: workOrder.id,
     workOrderNumber: workOrder.workOrderNumber,
@@ -443,6 +463,7 @@ async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): P
     customerName: workOrder.project.customer.name,
     status: workOrder.status,
     description: workOrder.description,
+    kmAmountCents,
     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
     createdAt: workOrder.createdAt.toISOString(),
     timeEntries: workOrder.timeEntries.map((link) => ({

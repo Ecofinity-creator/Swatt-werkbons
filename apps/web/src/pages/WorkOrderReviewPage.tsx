@@ -61,6 +61,8 @@ export function WorkOrderReviewPage() {
   const [pendingWeekCount, setPendingWeekCount] = useState<number | null>(null);
   // Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt".
   const [pendingWeekEntries, setPendingWeekEntries] = useState<PendingWeekEntrySummary[] | null>(null);
+  // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet getoond aan de klant".
+  const [pendingWeekKmInfo, setPendingWeekKmInfo] = useState<{ kmAmountCentsPerWorkOrder: number | null; pendingWorkOrderCount: number } | null>(null);
 
   const load = useCallback(async () => {
     if (!workOrderId) return;
@@ -86,6 +88,7 @@ export function WorkOrderReviewPage() {
     if (step !== 'sign' || !workOrder || workOrder.projectSigningMode !== 'WEEKLY') {
       setPendingWeekCount(null);
       setPendingWeekEntries(null);
+      setPendingWeekKmInfo(null);
       return;
     }
     weeklyApprovalApi
@@ -93,10 +96,15 @@ export function WorkOrderReviewPage() {
       .then((response) => {
         setPendingWeekCount(response.workOrderIds.length);
         setPendingWeekEntries(response.entries);
+        setPendingWeekKmInfo({
+          kmAmountCentsPerWorkOrder: response.kmAmountCentsPerWorkOrder,
+          pendingWorkOrderCount: response.pendingWorkOrderCount,
+        });
       })
       .catch(() => {
         setPendingWeekCount(null);
         setPendingWeekEntries(null);
+        setPendingWeekKmInfo(null);
       });
   }, [step, workOrder]);
 
@@ -304,6 +312,7 @@ export function WorkOrderReviewPage() {
           workOrder={workOrder}
           pendingWeekCount={pendingWeekCount}
           pendingWeekEntries={pendingWeekEntries}
+          pendingWeekKmInfo={pendingWeekKmInfo}
           signerName={signerName}
           onSignerNameChange={setSignerName}
           signerFunction={signerFunction}
@@ -466,6 +475,7 @@ function SignStep({
   workOrder,
   pendingWeekCount,
   pendingWeekEntries,
+  pendingWeekKmInfo,
   signerName,
   onSignerNameChange,
   signerFunction,
@@ -485,6 +495,8 @@ function SignStep({
   pendingWeekCount: number | null;
   /** Detail van alle tijdregistraties die samen met deze week ondertekend worden — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt". */
   pendingWeekEntries: PendingWeekEntrySummary[] | null;
+  /** Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet getoond aan de klant" — km-vergoeding per werkbon + aantal werkbonnen deze week. */
+  pendingWeekKmInfo: { kmAmountCentsPerWorkOrder: number | null; pendingWorkOrderCount: number } | null;
   signerName: string;
   onSignerNameChange: (value: string) => void;
   signerFunction: string;
@@ -535,6 +547,13 @@ function SignStep({
                 </tbody>
               </table>
             </div>
+          )}
+          {pendingWeekKmInfo && pendingWeekKmInfo.kmAmountCentsPerWorkOrder !== null && pendingWeekKmInfo.kmAmountCentsPerWorkOrder > 0 && (
+            <p className="mt-3 text-xs text-swatt-gold/80">
+              Verplaatsingskosten: {formatEuroCents(pendingWeekKmInfo.kmAmountCentsPerWorkOrder)} per werkbon ×{' '}
+              {pendingWeekKmInfo.pendingWorkOrderCount} werkbon{pendingWeekKmInfo.pendingWorkOrderCount === 1 ? '' : 'nen'} = totaal{' '}
+              {formatEuroCents(pendingWeekKmInfo.kmAmountCentsPerWorkOrder * pendingWeekKmInfo.pendingWorkOrderCount)}
+            </p>
           )}
         </div>
       )}
@@ -855,8 +874,16 @@ function WorkOrderSummaryCard({ workOrder }: { workOrder: WorkOrderSummary }) {
       </div>
 
       <p className="mt-3 text-right text-sm font-semibold text-swatt-gold">Totaal: {formatDuration(totalSeconds)}</p>
+      {/* Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet getoond aan de klant" — nu zichtbaar vóór het tekenen, niet enkel op de PDF achteraf. */}
+      {workOrder.kmAmountCents !== null && workOrder.kmAmountCents > 0 && (
+        <p className="mt-1 text-right text-xs text-neutral-400">Verplaatsingskosten: {formatEuroCents(workOrder.kmAmountCents)}</p>
+      )}
     </div>
   );
+}
+
+function formatEuroCents(cents: number): string {
+  return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatDuration(totalSeconds: number): string {

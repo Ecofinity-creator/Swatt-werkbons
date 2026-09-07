@@ -1,0 +1,62 @@
+From 3f9a48dbccb7bcc053093c85104659f7142a685c Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Fri, 4 Sep 2026 06:58:27 +0000
+Subject: [PATCH] Fix (CI, 2e ronde): timeEntry.project is nullable sinds de
+ Belgische urenregistratie-uitbreiding
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+CI toonde een nieuwe, echte fout die rechtstreeks voortvloeit uit de vorige
+CI-fix (Prisma.PayrollBatchGetPayload i.p.v. een handgeschreven type): nu
+TypeScript het échte, gegenereerde type gebruikt, blijkt `timeEntry.project`
+nullable te zijn — logisch, want TimeEntry.projectId is sinds de Belgische
+urenregistratie-uitbreiding (4/9/2026, "algemene tijdregistratie") nullable
+in het schema.
+
+In de praktijk kan dit hier nooit `null` zijn: een PayrollBatchLine bestaat
+uitsluitend voor een ONDERTEKENDE werkbon-tijdregistratie
+(fetchPayableEntries() selecteert enkel entries met een workOrderLink), en
+een werkbon kan uitsluitend uit projectgebonden tijdregistraties bestaan
+(WorkOrderService.create() vereist een matchend projectId). Vandaar een
+niet-null-assertion met toelichting, i.p.v. een overbodige runtime-check.
+
+Ter info: fetchPayableEntries()'s eigen resultaat gebruikt elders in dit
+bestand een `as unknown as PayableTimeEntryRow[]`-cast, die deze specifieke
+mismatch daar had gemaskeerd (geen CI-fout op die plek) — bewust niet
+aangepast in deze fix, want dat is een apart, groter type-veiligheids-
+vraagstuk (zie de toelichting in de vorige CI-fix-commit over het bredere
+patroon elders in de codebase).
+
+Verificatie: typecheck toont geen nieuwe fout meer op deze regel (enkel de
+bekende, al eerder gedocumenteerde sandbox-Prisma-stub-cascade), lint
+schoon, bestaande payroll-tests (9) slagen nog steeds.
+---
+ apps/api/src/modules/payroll/payroll.service.ts | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/apps/api/src/modules/payroll/payroll.service.ts b/apps/api/src/modules/payroll/payroll.service.ts
+index bed97e3..704b91f 100644
+--- a/apps/api/src/modules/payroll/payroll.service.ts
++++ b/apps/api/src/modules/payroll/payroll.service.ts
+@@ -336,7 +336,16 @@ function toBatchRecord(batch: Prisma.PayrollBatchGetPayload<typeof WITH_LINES_DE
+       .map((line) => ({
+         id: line.id,
+         timeEntryId: line.timeEntryId,
+-        projectName: line.timeEntry.project.name,
++        // `timeEntry.project` is sinds de Belgische-urenregistratie-uitbreiding
++        // (4/9/2026) nullable in het schema (een niet-projectgebonden
++        // registratie, zie TimeEntry.activityType) — maar een PayrollBatchLine
++        // bestaat enkel voor een ONDERTEKENDE, dus per definitie
++        // projectgebonden werkbon-tijdregistratie (fetchPayableEntries()
++        // selecteert enkel entries met een workOrderLink, en een werkbon kan
++        // uitsluitend uit projectgebonden entries bestaan — zie
++        // WorkOrderService.create()). `project` is hier dus altijd effectief
++        // gezet; de `!` erkent dat aan TypeScript.
++        projectName: line.timeEntry.project!.name,
+         // workOrderLink kan in theorie ontbreken (defensief) — in de praktijk
+         // niet mogelijk: enkel ondertekende (dus aan een werkbon gekoppelde)
+         // tijdregistraties zijn ooit "betaalbaar" geweest, zie fetchPayableEntries().
+-- 
+2.43.0
+

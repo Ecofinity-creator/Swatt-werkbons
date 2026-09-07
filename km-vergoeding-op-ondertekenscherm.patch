@@ -1,0 +1,365 @@
+From da433e5f21abfe64b053765ca7c74efd5d5196d9 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Fri, 4 Sep 2026 17:00:06 +0000
+Subject: [PATCH] =?UTF-8?q?Km-vergoeding=20tonen=20op=20het=20ondertekensc?=
+ =?UTF-8?q?herm=20zelf,=20v=C3=B3=C3=B3r=20het=20tekenen?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Op vraag (4/9/2026): "bij het ondertekenen van de werkbons wordt nog steeds
+niet de verplaatsing getoond aan de klant". De vorige patch toonde de km-
+vergoeding correct op het PDF-document (ná ondertekening), maar niet op het
+ondertekenscherm zelf — het scherm dat de klant effectief bekijkt vóór hij
+tekent. De klant zag de kost dus pas achteraf, niet op het moment dat hij
+zijn akkoord geeft.
+
+Individuele werkbon (WorkOrderSummaryCard)
+- WorkOrderSummary.kmAmountCents (nieuw veld): vóór ondertekening een
+  LEVENDE preview (herberekend via computeKmAmountCents() op basis van
+  Project.kmDistanceOneWayMeters + CompanySettings.kmRateCents, want
+  WorkOrder.kmAmountCents zelf staat pas op een waarde na het tekenen), na
+  ondertekening het effectief bevroren bedrag — beide via exact dezelfde
+  formule, dus geen waargenomen "sprong" voor de klant tussen het
+  onderteken- en het PDF-scherm.
+- Nieuwe regel "Verplaatsingskosten: € X" onder het urentotaal.
+
+Weekondertekening (de tabel uit sectie 2/Fase 12 deel B)
+- WeeklyApprovalService.listPendingForEmployee() geeft nu ook
+  kmAmountCentsPerWorkOrder + pendingWorkOrderCount terug — elke
+  afzonderlijke werkbon bevriest bij het tekenen zijn EIGEN kmAmountCents
+  (dus met bv. 2 openstaande werkbonnen wordt de vergoeding ook 2 keer
+  aangerekend, 2 aparte interventies), vandaar het bedrag PER werkbon +
+  aantal i.p.v. één vast totaal.
+- Nieuwe regel onder de week-tabel: "Verplaatsingskosten: € X per werkbon ×
+  Y werkbonnen = totaal € Z".
+
+Verificatie: backend-testsuite 222 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, sandbox-beperkingen, geen regressies),
+typecheck/lint backend+frontend schoon, frontend-productiebuild slaagt.
+---
+ .../work-orders/weekly-approval.routes.ts     |  5 ++-
+ .../work-orders/weekly-approval.service.ts    | 23 +++++++++++-
+ .../modules/work-orders/work-order.routes.ts  | 37 +++++++++++++++----
+ apps/web/src/pages/WorkOrderReviewPage.tsx    | 27 ++++++++++++++
+ packages/shared-types/src/index.ts            | 20 ++++++++++
+ 5 files changed, 101 insertions(+), 11 deletions(-)
+
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.routes.ts b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+index 2021cf3..70e838b 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.routes.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+@@ -34,7 +34,8 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+     async (request): Promise<PendingWeekResponseBody> => {
+       const employeeId = requireEmployeeId(request);
+       const query = pendingWeekQuerySchema.parse(request.query);
+-      const { weekStartDate, weekEndDate, workOrderIds, entries } = await service.listPendingForEmployee(employeeId, query.projectId);
++      const { weekStartDate, weekEndDate, workOrderIds, entries, kmAmountCentsPerWorkOrder, pendingWorkOrderCount } =
++        await service.listPendingForEmployee(employeeId, query.projectId);
+       return {
+         weekStartDate: weekStartDate.toISOString(),
+         weekEndDate: weekEndDate.toISOString(),
+@@ -47,6 +48,8 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+           endedAt: entry.endedAt.toISOString(),
+           pausedSeconds: entry.pausedSeconds,
+         })),
++        kmAmountCentsPerWorkOrder,
++        pendingWorkOrderCount,
+       };
+     },
+   );
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.service.ts b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+index 14590f1..e775309 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.service.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+@@ -95,7 +95,15 @@ export class WeeklyApprovalService {
+   async listPendingForEmployee(
+     employeeId: string,
+     projectId: string,
+-  ): Promise<{ weekStartDate: Date; weekEndDate: Date; workOrderIds: string[]; entries: PendingWeekEntry[] }> {
++  ): Promise<{
++    weekStartDate: Date;
++    weekEndDate: Date;
++    workOrderIds: string[];
++    entries: PendingWeekEntry[];
++    /** Op vraag (4/9/2026) — zie de toelichting bij PendingWeekResponseBody in shared-types. */
++    kmAmountCentsPerWorkOrder: number | null;
++    pendingWorkOrderCount: number;
++  }> {
+     const { weekStartDate, weekEndDate } = WeeklyApprovalService.weekBoundsOf();
+     const rows = await this.fetchPendingWorkOrders(projectId, weekStartDate, weekEndDate);
+     const mine = rows.filter(
+@@ -121,7 +129,18 @@ export class WeeklyApprovalService {
+     );
+     entries.sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+ 
+-    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries };
++    // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
++    // getoond aan de klant" — elke afzonderlijke werkbon bevriest bij het
++    // tekenen zijn EIGEN kmAmountCents (zie signCurrentWeek() hieronder),
++    // dus met bv. 2 openstaande werkbonnen deze week wordt de vergoeding
++    // ook 2 keer aangerekend (2 aparte interventies/verplaatsingen). Hier
++    // tonen we daarom het bedrag PER werkbon, plus het aantal — de
++    // frontend kan zelf vermenigvuldigen voor een totaal.
++    const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { kmDistanceOneWayMeters: true } });
++    const settings = await this.companySettingsService.get();
++    const kmAmountCentsPerWorkOrder = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, settings.kmRateCents);
++
++    return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries, kmAmountCentsPerWorkOrder, pendingWorkOrderCount: rows.length };
+   }
+ 
+   /**
+diff --git a/apps/api/src/modules/work-orders/work-order.routes.ts b/apps/api/src/modules/work-orders/work-order.routes.ts
+index eb64891..32f239b 100644
+--- a/apps/api/src/modules/work-orders/work-order.routes.ts
++++ b/apps/api/src/modules/work-orders/work-order.routes.ts
+@@ -14,6 +14,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
+ import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors, WorkOrderErrors } from '../../errors';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
++import { computeKmAmountCents } from '../distance/distance.service';
+ import { requireRole } from '../rbac/rbac.middleware';
+ import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+ import type { WorkOrderOverviewItemRecord, WorkOrderPhotoRecord, WorkOrderRecord } from './work-order.service';
+@@ -53,7 +54,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+     const body = createWorkOrderBodySchema.parse(request.body);
+     const workOrder = await service.create(employeeId, body.projectId, body.timeEntryIds, body.description ?? null);
+     reply.code(201);
+-    return { workOrder: await toSummary(storage, workOrder) };
++    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+   });
+ 
+   /**
+@@ -124,7 +125,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+     const params = workOrderIdParamsSchema.parse(request.params);
+     const workOrder = await service.get(params.id);
+     requireWorkOrderAccess(request, workOrder);
+-    return { workOrder: await toSummary(storage, workOrder) };
++    return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+   });
+ 
+   app.post(
+@@ -144,7 +145,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+ 
+       const workOrder = await service.get(params.id);
+       reply.code(201);
+-      return { workOrder: await toSummary(storage, workOrder) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+     },
+   );
+ 
+@@ -158,7 +159,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+       await photoService.remove(employeeId, params.id, params.photoId);
+ 
+       const workOrder = await service.get(params.id);
+-      return { workOrder: await toSummary(storage, workOrder) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+     },
+   );
+ 
+@@ -205,7 +206,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+ 
+       const workOrder = await service.get(params.id);
+       reply.code(201);
+-      return { workOrder: await toSummary(storage, workOrder) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+     },
+   );
+ 
+@@ -234,7 +235,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+       await app.syncJobService.retry(params.id);
+ 
+       const refreshed = await service.get(params.id);
+-      return { workOrder: await toSummary(storage, refreshed) };
++      return { workOrder: await toSummary(storage, refreshed, companySettingsService) };
+     },
+   );
+ 
+@@ -274,7 +275,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+       await pdfService.generate(params.id);
+ 
+       const workOrder = await service.get(params.id);
+-      return { workOrder: await toSummary(storage, workOrder) };
++      return { workOrder: await toSummary(storage, workOrder, companySettingsService) };
+     },
+   );
+ 
+@@ -420,7 +421,11 @@ async function toPhotoSummary(storage: StorageService, photo: WorkOrderPhotoReco
+   };
+ }
+ 
+-async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): Promise<WorkOrderSummary> {
++async function toSummary(
++  storage: StorageService,
++  workOrder: WorkOrderRecord,
++  companySettingsService: CompanySettingsService,
++): Promise<WorkOrderSummary> {
+   const photos = await Promise.all(workOrder.photos.map((photo) => toPhotoSummary(storage, photo)));
+ 
+   let signature: WorkOrderSummary['signature'] = null;
+@@ -434,6 +439,21 @@ async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): P
+     };
+   }
+ 
++  // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
++  // getoond aan de klant" — vóór ondertekening staat WorkOrder.kmAmountCents
++  // nog op `null` (die wordt pas bevroren op het moment van tekenen, zie
++  // WorkOrderSignatureService/WeeklyApprovalService). Om de klant vóór het
++  // tekenen toch te tonen wat er verrekend ZAL worden, berekenen we hier een
++  // levende PREVIEW met exact dezelfde formule (computeKmAmountCents()) —
++  // na ondertekening geeft dit hetzelfde bevroren bedrag terug, dus geen
++  // waargenomen "sprong" tussen het onderteken- en het PDF-scherm.
++  const kmAmountCents =
++    workOrder.kmAmountCents ??
++    (await (async () => {
++      const settings = await companySettingsService.get();
++      return computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, settings.kmRateCents);
++    })());
++
+   return {
+     id: workOrder.id,
+     workOrderNumber: workOrder.workOrderNumber,
+@@ -443,6 +463,7 @@ async function toSummary(storage: StorageService, workOrder: WorkOrderRecord): P
+     customerName: workOrder.project.customer.name,
+     status: workOrder.status,
+     description: workOrder.description,
++    kmAmountCents,
+     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
+     createdAt: workOrder.createdAt.toISOString(),
+     timeEntries: workOrder.timeEntries.map((link) => ({
+diff --git a/apps/web/src/pages/WorkOrderReviewPage.tsx b/apps/web/src/pages/WorkOrderReviewPage.tsx
+index 831dd7e..058f729 100644
+--- a/apps/web/src/pages/WorkOrderReviewPage.tsx
++++ b/apps/web/src/pages/WorkOrderReviewPage.tsx
+@@ -61,6 +61,8 @@ export function WorkOrderReviewPage() {
+   const [pendingWeekCount, setPendingWeekCount] = useState<number | null>(null);
+   // Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt".
+   const [pendingWeekEntries, setPendingWeekEntries] = useState<PendingWeekEntrySummary[] | null>(null);
++  // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet getoond aan de klant".
++  const [pendingWeekKmInfo, setPendingWeekKmInfo] = useState<{ kmAmountCentsPerWorkOrder: number | null; pendingWorkOrderCount: number } | null>(null);
+ 
+   const load = useCallback(async () => {
+     if (!workOrderId) return;
+@@ -86,6 +88,7 @@ export function WorkOrderReviewPage() {
+     if (step !== 'sign' || !workOrder || workOrder.projectSigningMode !== 'WEEKLY') {
+       setPendingWeekCount(null);
+       setPendingWeekEntries(null);
++      setPendingWeekKmInfo(null);
+       return;
+     }
+     weeklyApprovalApi
+@@ -93,10 +96,15 @@ export function WorkOrderReviewPage() {
+       .then((response) => {
+         setPendingWeekCount(response.workOrderIds.length);
+         setPendingWeekEntries(response.entries);
++        setPendingWeekKmInfo({
++          kmAmountCentsPerWorkOrder: response.kmAmountCentsPerWorkOrder,
++          pendingWorkOrderCount: response.pendingWorkOrderCount,
++        });
+       })
+       .catch(() => {
+         setPendingWeekCount(null);
+         setPendingWeekEntries(null);
++        setPendingWeekKmInfo(null);
+       });
+   }, [step, workOrder]);
+ 
+@@ -304,6 +312,7 @@ export function WorkOrderReviewPage() {
+           workOrder={workOrder}
+           pendingWeekCount={pendingWeekCount}
+           pendingWeekEntries={pendingWeekEntries}
++          pendingWeekKmInfo={pendingWeekKmInfo}
+           signerName={signerName}
+           onSignerNameChange={setSignerName}
+           signerFunction={signerFunction}
+@@ -466,6 +475,7 @@ function SignStep({
+   workOrder,
+   pendingWeekCount,
+   pendingWeekEntries,
++  pendingWeekKmInfo,
+   signerName,
+   onSignerNameChange,
+   signerFunction,
+@@ -485,6 +495,8 @@ function SignStep({
+   pendingWeekCount: number | null;
+   /** Detail van alle tijdregistraties die samen met deze week ondertekend worden — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt". */
+   pendingWeekEntries: PendingWeekEntrySummary[] | null;
++  /** Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet getoond aan de klant" — km-vergoeding per werkbon + aantal werkbonnen deze week. */
++  pendingWeekKmInfo: { kmAmountCentsPerWorkOrder: number | null; pendingWorkOrderCount: number } | null;
+   signerName: string;
+   onSignerNameChange: (value: string) => void;
+   signerFunction: string;
+@@ -536,6 +548,13 @@ function SignStep({
+               </table>
+             </div>
+           )}
++          {pendingWeekKmInfo && pendingWeekKmInfo.kmAmountCentsPerWorkOrder !== null && pendingWeekKmInfo.kmAmountCentsPerWorkOrder > 0 && (
++            <p className="mt-3 text-xs text-swatt-gold/80">
++              Verplaatsingskosten: {formatEuroCents(pendingWeekKmInfo.kmAmountCentsPerWorkOrder)} per werkbon ×{' '}
++              {pendingWeekKmInfo.pendingWorkOrderCount} werkbon{pendingWeekKmInfo.pendingWorkOrderCount === 1 ? '' : 'nen'} = totaal{' '}
++              {formatEuroCents(pendingWeekKmInfo.kmAmountCentsPerWorkOrder * pendingWeekKmInfo.pendingWorkOrderCount)}
++            </p>
++          )}
+         </div>
+       )}
+ 
+@@ -855,10 +874,18 @@ function WorkOrderSummaryCard({ workOrder }: { workOrder: WorkOrderSummary }) {
+       </div>
+ 
+       <p className="mt-3 text-right text-sm font-semibold text-swatt-gold">Totaal: {formatDuration(totalSeconds)}</p>
++      {/* Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet getoond aan de klant" — nu zichtbaar vóór het tekenen, niet enkel op de PDF achteraf. */}
++      {workOrder.kmAmountCents !== null && workOrder.kmAmountCents > 0 && (
++        <p className="mt-1 text-right text-xs text-neutral-400">Verplaatsingskosten: {formatEuroCents(workOrder.kmAmountCents)}</p>
++      )}
+     </div>
+   );
+ }
+ 
++function formatEuroCents(cents: number): string {
++  return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
++}
++
+ function formatDuration(totalSeconds: number): string {
+   const hours = Math.floor(totalSeconds / 3600);
+   const minutes = Math.floor((totalSeconds % 3600) / 60);
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 09c5471..be51fcc 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -275,6 +275,16 @@ export interface PendingWeekResponseBody {
+   workOrderIds: string[];
+   /** Detail van ALLE openstaande werkbonnen/tijdregistraties van de week op dit project — voor het overzicht vóór ondertekenen. */
+   entries: PendingWeekEntrySummary[];
++  /**
++   * Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
++   * getoond aan de klant" — km-vergoeding PER werkbon (elke werkbon bevriest
++   * bij ondertekenen zijn eigen bedrag, zie WorkOrder.kmAmountCents); `null`
++   * wanneer niet van toepassing. Vermenigvuldig met pendingWorkOrderCount
++   * voor het totaal dat deze ene handtekening zal bevestigen.
++   */
++  kmAmountCentsPerWorkOrder: number | null;
++  /** Aantal openstaande werkbonnen deze week op dit project (over alle medewerkers heen) — zie de toelichting bij kmAmountCentsPerWorkOrder. */
++  pendingWorkOrderCount: number;
+ }
+ 
+ /** Body van POST /weekly-approvals/:projectId/sign — zelfde velden als het bestaande /work-orders/:id/sign, nu voor de hele lopende week. */
+@@ -573,6 +583,16 @@ export interface WorkOrderSummary {
+   customerName: string;
+   status: WorkOrderStatus;
+   description: string | null;
++  /**
++   * Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
++   * getoond aan de klant" — vóór ondertekening is dit een LEVENDE preview
++   * (herberekend op basis van Project.kmDistanceOneWayMeters +
++   * CompanySettings.kmRateCents), na ondertekening het effectief bevroren
++   * bedrag (WorkOrder.kmAmountCents) — beide via dezelfde formule
++   * (computeKmAmountCents()), dus geen waargenomen "sprong" voor de klant.
++   * `null` wanneer er geen km-vergoeding van toepassing is.
++   */
++  kmAmountCents: number | null;
+   createdByEmployeeDisplayName: string;
+   createdAt: string;
+   timeEntries: WorkOrderTimeEntrySummary[];
+-- 
+2.43.0
+
