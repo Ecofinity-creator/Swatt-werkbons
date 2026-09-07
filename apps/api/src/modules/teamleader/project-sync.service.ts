@@ -331,6 +331,22 @@ export class ProjectSyncService {
         : Promise.resolve<CompanyInfoRow[]>([]),
     ]);
 
+    // Op vraag (7/9/2026, diagnose): een contactpersoon met een zichtbaar
+    // volledig adres in Teamleader ("Ruben Mazzier") kreeg toch geen
+    // km-afstand — ondanks dat `primary_address` bevestigd het juiste
+    // veldnamen zijn voor contacts.list/companies.list (Teamleader se eigen
+    // apiary.apib). Tijdelijke, gerichte log van de RUWE respons om te zien
+    // wat er precies binnenkomt, i.p.v. verder te gissen op basis van
+    // documentatie alleen. Bewust enkel de velden die ertoe doen (geen
+    // volledige contactgegevens in de logs).
+    if (contactIds.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `Km-diagnose: ruwe contacts.list-respons (${contactRows.length} van ${contactIds.length} opgevraagd):`,
+        JSON.stringify(contactRows.map((c) => ({ id: c.id, name: `${c.first_name} ${c.last_name}`, primary_address: c.primary_address }))),
+      );
+    }
+
     const result = new Map<string, CustomerDetails>();
     for (const contact of contactRows) {
       result.set(`contact:${contact.id}`, {

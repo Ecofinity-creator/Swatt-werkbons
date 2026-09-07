@@ -1,0 +1,64 @@
+From 02ed71219c53a3af96ba40e50b081c570ea378c6 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 13:40:29 +0000
+Subject: [PATCH] Tijdelijke diagnose: log de ruwe contacts.list-respons van
+ Teamleader
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Gerapporteerd (7/9/2026, 8e ronde): het km-tarief staat correct ingesteld
+(100 cent/km), maar de afstand blijft "onbekend" voor het testproject bij
+contactpersoon "Ruben Mazzier" — ondanks een zichtbaar volledig adres in
+Teamleader zelf (Hundelgemsesteenweg 737, 9820 Merelbeke).
+
+Bevestigd via Teamleader se eigen officiële apiary.apib-documentatie: het
+veld `primary_address` (niet `addresses`) is wel degelijk het juiste
+veld voor contacts.list/companies.list-responses — de code se
+veronderstelling daarover klopt. De oorzaak moet dus elders zitten:
+mogelijk retourneert Teamleader toch een andere structuur dan verwacht
+voor deze specifieke contactpersoon, mogelijk faalt de matching tussen
+project en contact-ID, of iets anders dat enkel zichtbaar wordt met de
+ruwe respons zelf.
+
+Tijdelijke, gerichte log van de ruwe contacts.list-respons (enkel
+id/naam/primary_address, geen volledige contactgegevens) om dit
+definitief vast te stellen zonder verder te gissen op basis van
+documentatie alleen.
+
+Verificatie: backend-testsuite 227 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../modules/teamleader/project-sync.service.ts   | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 671ffb3..4b0ac5b 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -331,6 +331,22 @@ export class ProjectSyncService {
+         : Promise.resolve<CompanyInfoRow[]>([]),
+     ]);
+ 
++    // Op vraag (7/9/2026, diagnose): een contactpersoon met een zichtbaar
++    // volledig adres in Teamleader ("Ruben Mazzier") kreeg toch geen
++    // km-afstand — ondanks dat `primary_address` bevestigd het juiste
++    // veldnamen zijn voor contacts.list/companies.list (Teamleader se eigen
++    // apiary.apib). Tijdelijke, gerichte log van de RUWE respons om te zien
++    // wat er precies binnenkomt, i.p.v. verder te gissen op basis van
++    // documentatie alleen. Bewust enkel de velden die ertoe doen (geen
++    // volledige contactgegevens in de logs).
++    if (contactIds.length > 0) {
++      // eslint-disable-next-line no-console
++      console.log(
++        `Km-diagnose: ruwe contacts.list-respons (${contactRows.length} van ${contactIds.length} opgevraagd):`,
++        JSON.stringify(contactRows.map((c) => ({ id: c.id, name: `${c.first_name} ${c.last_name}`, primary_address: c.primary_address }))),
++      );
++    }
++
+     const result = new Map<string, CustomerDetails>();
+     for (const contact of contactRows) {
+       result.set(`contact:${contact.id}`, {
+-- 
+2.43.0
+
