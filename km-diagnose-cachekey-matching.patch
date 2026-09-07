@@ -1,0 +1,72 @@
+From ad59626fa51e6e85dd7b16312cdd6cba2d9e699d Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 14:14:34 +0000
+Subject: [PATCH] Tijdelijke diagnose (3e ronde): log de cache-key-matching
+ tussen project en klant
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bevestigd (7/9/2026): de ruwe contacts.list-respons voor Ruben Mazzier
+bevat een volledig, correct adres ({"line_1":"Hundelgemsesteenweg
+737","postal_code":"9820","city":"Merelbeke",...}). formatAddress() zou
+hier probleemloos een geldig adres van moeten maken. De oorzaak moet dus
+in de KOPPELING tussen project en klant-ID zitten, niet in de
+adresverwerking zelf — mogelijk verklaart dit ook de eerder gemelde "3
+overgeslagen (geen klant gekoppeld in Teamleader)" uit de sync-samenvatting.
+
+Wanneer `customerDetailsByKey.get(cacheKey)` geen match oplevert, wordt
+een project namelijk volledig overgeslagen (skippedWithoutCustomerCount)
+— zonder dat de klant/het project-adres ooit bijgewerkt wordt, ongeacht
+hoe correct het opgehaalde klantadres elders in dezelfde sync-run is.
+
+Tijdelijke, gerichte log (enkel voor het testproject, herkenbaar aan
+"sanitair" in de naam) die toont welke cacheKey (type:Teamleader-ID)
+opgezocht wordt, en of die effectief gevonden werd in de opgehaalde
+contactgegevens.
+
+Verificatie: backend-testsuite 227 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../modules/teamleader/project-sync.service.ts | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 4b0ac5b..c4a7729 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -140,6 +140,18 @@ export class ProjectSyncService {
+       } else {
+         skippedWithoutCustomerCount += 1;
+       }
++      // Op vraag (7/9/2026, diagnose, 2e helft): het opgehaalde adres voor
++      // contactpersoon "Ruben Mazzier" bleek zelf volledig en correct
++      // ({"line_1":"Hundelgemsesteenweg 737","postal_code":"9820","city":
++      // "Merelbeke",...}) — het probleem moet dus in de koppeling tussen
++      // PROJECT en klant-ID zitten, niet in de adresverwerking zelf. Log
++      // daarom expliciet welke klant-referentie (type + Teamleader-ID) elk
++      // project met "sanitair" in de naam heeft, om te vergelijken met het
++      // bevestigde contact-ID van Ruben Mazzier.
++      if (row.name.toLowerCase().includes('sanitair')) {
++        // eslint-disable-next-line no-console
++        console.log(`Km-diagnose: project "${row.name}" (${row.id}) heeft klant-referentie:`, JSON.stringify(row.customer));
++      }
+     }
+ 
+     let customerDetailsByKey: Map<string, CustomerDetails>;
+@@ -182,6 +194,12 @@ export class ProjectSyncService {
+     for (const { row, customer: ref } of rowsWithCustomer) {
+       const cacheKey = `${ref.type}:${ref.id}`;
+       const details = customerDetailsByKey.get(cacheKey);
++      if (row.name.toLowerCase().includes('sanitair')) {
++        // eslint-disable-next-line no-console
++        console.log(
++          `Km-diagnose: project "${row.name}" zoekt cacheKey "${cacheKey}" op — ${details ? `GEVONDEN (${details.name})` : 'NIET GEVONDEN (dit project wordt overgeslagen als "geen klant gekoppeld")'}.`,
++        );
++      }
+       if (!details) {
+         // Klant stond nog in het project, maar kon niet (meer) opgehaald worden
+         // via contacts.list/companies.list (bv. intussen verwijderd in
+-- 
+2.43.0
+

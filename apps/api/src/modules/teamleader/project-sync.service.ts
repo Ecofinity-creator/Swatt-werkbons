@@ -140,6 +140,18 @@ export class ProjectSyncService {
       } else {
         skippedWithoutCustomerCount += 1;
       }
+      // Op vraag (7/9/2026, diagnose, 2e helft): het opgehaalde adres voor
+      // contactpersoon "Ruben Mazzier" bleek zelf volledig en correct
+      // ({"line_1":"Hundelgemsesteenweg 737","postal_code":"9820","city":
+      // "Merelbeke",...}) — het probleem moet dus in de koppeling tussen
+      // PROJECT en klant-ID zitten, niet in de adresverwerking zelf. Log
+      // daarom expliciet welke klant-referentie (type + Teamleader-ID) elk
+      // project met "sanitair" in de naam heeft, om te vergelijken met het
+      // bevestigde contact-ID van Ruben Mazzier.
+      if (row.name.toLowerCase().includes('sanitair')) {
+        // eslint-disable-next-line no-console
+        console.log(`Km-diagnose: project "${row.name}" (${row.id}) heeft klant-referentie:`, JSON.stringify(row.customer));
+      }
     }
 
     let customerDetailsByKey: Map<string, CustomerDetails>;
@@ -182,6 +194,12 @@ export class ProjectSyncService {
     for (const { row, customer: ref } of rowsWithCustomer) {
       const cacheKey = `${ref.type}:${ref.id}`;
       const details = customerDetailsByKey.get(cacheKey);
+      if (row.name.toLowerCase().includes('sanitair')) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `Km-diagnose: project "${row.name}" zoekt cacheKey "${cacheKey}" op — ${details ? `GEVONDEN (${details.name})` : 'NIET GEVONDEN (dit project wordt overgeslagen als "geen klant gekoppeld")'}.`,
+        );
+      }
       if (!details) {
         // Klant stond nog in het project, maar kon niet (meer) opgehaald worden
         // via contacts.list/companies.list (bv. intussen verwijderd in
