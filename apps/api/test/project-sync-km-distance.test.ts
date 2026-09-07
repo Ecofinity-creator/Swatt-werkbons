@@ -110,6 +110,68 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
     expect(projectRow.kmDistanceOneWayMeters).toBe(12345);
   });
 
+  it('haalt de bedrijfsinstellingen maar ÉÉN keer op, ongeacht hoeveel projecten tegelijk een km-herberekening nodig hebben (fix 7/9/2026 — HTTP 502 bij "Synchroniseer projecten" door onnodig herhaald werk)', async () => {
+    const projectRows = [
+      { id: 'proj-1', teamleaderId: 'tl-proj-1', address: 'Kerkstraat 1, 2000 Antwerpen', kmDistanceOneWayMeters: null as number | null },
+      { id: 'proj-2', teamleaderId: 'tl-proj-2', address: 'Dorpsstraat 2, 3000 Leuven', kmDistanceOneWayMeters: null as number | null },
+      { id: 'proj-3', teamleaderId: 'tl-proj-3', address: 'Marktplein 3, 9000 Gent', kmDistanceOneWayMeters: null as number | null },
+    ];
+    const customerRows = new Map(projectRows.map((p, i) => [`tl-comp-${i + 1}`, { id: `cust-${i + 1}`, address: p.address }]));
+
+    const prisma = {
+      teamleaderConnection: { findUnique: async () => ({ id: 'singleton', projectsModule: 'LEGACY' }) },
+      customer: {
+        upsert: async ({ where }: { where: { teamleaderId: string } }) => customerRows.get(where.teamleaderId)!,
+      },
+      project: {
+        findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: p.kmDistanceOneWayMeters })),
+        upsert: async ({ where }: { where: { teamleaderId: string } }) => projectRows.find((p) => p.teamleaderId === where.teamleaderId)!,
+        updateMany: async () => ({ count: 0 }),
+        update: async ({ where, data }: { where: { teamleaderId: string }; data: { kmDistanceOneWayMeters: number } }) => {
+          const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
+          row.kmDistanceOneWayMeters = data.kmDistanceOneWayMeters;
+          return row;
+        },
+      },
+    } as unknown as PrismaClient;
+
+    const client = {
+      listAll: async (endpoint: string) => {
+        if (endpoint === 'projects.list') {
+          return projectRows.map((p, i) => ({
+            id: p.teamleaderId,
+            reference: `PRO-${i + 1}`,
+            title: `Project ${i + 1}`,
+            description: null,
+            status: 'active',
+            customer: { type: 'company', id: `tl-comp-${i + 1}` },
+          }));
+        }
+        if (endpoint === 'companies.list') {
+          return projectRows.map((p, i) => ({
+            id: `tl-comp-${i + 1}`,
+            name: `Klant ${i + 1}`,
+            vat_number: null,
+            primary_address: { line_1: p.address!.split(',')[0], postal_code: p.address!.split(',')[1]?.trim().split(' ')[0], city: p.address!.split(',')[1]?.trim().split(' ')[1] },
+          }));
+        }
+        if (endpoint === 'contacts.list') return [];
+        throw new Error(`onverwacht endpoint in test: ${endpoint}`);
+      },
+    } as unknown as TeamleaderClient;
+
+    const companySettingsGetSpy = vi.fn(async () => ({ addressLine: 'Swatt-adres 1, 2000 Antwerpen' }));
+    const companySettingsService = { get: companySettingsGetSpy } as unknown as CompanySettingsService;
+    const distanceService: DistanceService = { getDrivingDistanceMetersOneWay: vi.fn(async () => 5000) };
+
+    const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+    await service.syncAll();
+
+    expect(companySettingsGetSpy).toHaveBeenCalledTimes(1);
+    expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledTimes(3);
+    expect(projectRows.every((p) => p.kmDistanceOneWayMeters === 5000)).toBe(true);
+  });
+
   it('een mislukte km-berekening blokkeert de rest van de projectsync niet (business rule 9)', async () => {
     const { prisma, projectRow } = createFakePrisma({ existingAddress: null });
     const client = fakeClient(JANSSENS_ADDRESS);

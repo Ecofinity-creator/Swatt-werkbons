@@ -153,6 +153,8 @@ export class ProjectSyncService {
     // upserts voor dezelfde klant binnen één sync-run — meerdere projecten
     // delen vaak dezelfde klant).
     const localCustomerCache = new Map<string, { id: string; address: string | null }>();
+    // Op vraag (7/9/2026) — zie de toelichting bij recomputeKmDistancesBounded() hieronder.
+    const projectsNeedingKmRecompute: Array<{ projectTeamleaderId: string; projectAddress: string }> = [];
     const seenTeamleaderIds: string[] = [];
 
     // Phase 12, deel D — vooraf ophalen welk adres elk project al had, om na
@@ -256,14 +258,24 @@ export class ProjectSyncService {
       const previousState = previousStateByTeamleaderId.get(row.id);
       const addressChanged = localCustomer.address !== previousState?.address;
       const neverComputed = previousState?.kmDistanceOneWayMeters == null;
-      // Bewust NA de upsert (project bestaat dan zeker) en in een eigen
-      // try/catch binnen recomputeKmDistance(): een mislukte km-berekening
-      // (netwerk, niet-geocodeerbaar adres) mag de rest van de projectsync
-      // nooit blokkeren (business rule 9).
       if (localCustomer.address !== null && (addressChanged || neverComputed)) {
-        await this.recomputeKmDistance(row.id, localCustomer.address);
+        projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectAddress: localCustomer.address });
       }
     }
+
+    // Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten"):
+    // de bugfix hierboven ("herbereken ook wanneer nog nooit berekend")
+    // betekende in de praktijk dat na de allereerste sync met een correct
+    // ingestelde OPENROUTESERVICE_API_KEY, ALLE bestaande projecten in één
+    // klap hun afstand moesten laten berekenen — elk daarvan 2-3 externe
+    // HTTP-aanroepen (geocoderen + routeberekening), voorheen volledig
+    // SEQUENTIEEL binnen deze ene HTTP-aanvraag. Bij enkele tientallen
+    // projecten liep dit al snel op tot ruim een minuut, boven Render's
+    // proxy-timeout (vandaar de HTTP 502 — de aanvraag zelf liep wél
+    // gewoon door op de achtergrond, enkel de HTTP-respons kwam te laat).
+    // Nu: begrensd parallel (business rule 9 blijft gelden — één mislukte
+    // berekening blokkeert de andere nooit, zie recomputeKmDistance()).
+    await this.recomputeKmDistancesBounded(projectsNeedingKmRecompute);
 
     // Business rule 8: een project dat niet meer in Teamleader voorkomt wordt
     // gearchiveerd, nooit verwijderd — bestaande werkbon-historiek blijft intact.
@@ -399,24 +411,61 @@ export class ProjectSyncService {
    * projectsync nooit blokkeren (business rule 9) — een volgende sync
    * (of een adreswijziging) probeert het gewoon opnieuw.
    */
-  private async recomputeKmDistance(projectTeamleaderId: string, projectAddress: string): Promise<void> {
-    if (!this.distanceService || !this.companySettingsService) return;
+  /**
+   * Op vraag (7/9/2026, na een HTTP 502 bij "Synchroniseer projecten"): de
+   * eerdere bugfix ("herbereken ook wanneer nog nooit berekend") betekent
+   * dat bij de allereerste sync met een correct ingestelde
+   * OPENROUTESERVICE_API_KEY mogelijk TIENTALLEN projecten in één klap hun
+   * afstand moeten laten berekenen. Elke berekening kost 2-3 externe
+   * HTTP-aanroepen (geocoderen bedrijfsadres + geocoderen projectadres +
+   * routeberekening) — volledig sequentieel liep dit al snel op tot ruim een
+   * minuut, boven Render's proxy-timeout. Deze methode:
+   * 1) haalt het bedrijfsadres/de instellingen ÉÉN keer op (i.p.v. per
+   *    project — was voorheen ook al onnodig herhaald werk);
+   * 2) verwerkt de projecten in begrensde, parallelle batches (i.p.v. één
+   *    voor één wachten) — snel genoeg om binnen een normale requesttimeout
+   *    te blijven, maar niet zo agressief parallel dat OpenRouteService's
+   *    eigen rate limiting (HTTP 429) voortdurend zou afvuren;
+   * business rule 9 blijft gelden: één mislukte berekening (netwerk,
+   * niet-geocodeerbaar adres) blokkeert de andere nooit en laat de rest van
+   * de sync-run nooit falen.
+   */
+  private async recomputeKmDistancesBounded(projects: Array<{ projectTeamleaderId: string; projectAddress: string }>): Promise<void> {
+    if (projects.length === 0 || !this.distanceService || !this.companySettingsService) return;
+
+    const settings = await this.companySettingsService.get();
+    if (!settings.addressLine) return; // Geen Swatt-adres ingesteld — niets om vanaf te berekenen.
+    const companyAddressLine = settings.addressLine;
+
+    const CONCURRENCY = 5;
+    let cursor = 0;
+    const runNext = async (): Promise<void> => {
+      const index = cursor;
+      cursor += 1;
+      if (index >= projects.length) return;
+      const { projectTeamleaderId, projectAddress } = projects[index]!;
+      await this.recomputeKmDistance(projectTeamleaderId, projectAddress, companyAddressLine);
+      await runNext();
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, projects.length) }, () => runNext()));
+  }
+
+  private async recomputeKmDistance(projectTeamleaderId: string, projectAddress: string, companyAddressLine: string): Promise<void> {
+    if (!this.distanceService) return;
 
     try {
-      const settings = await this.companySettingsService.get();
-      if (!settings.addressLine) return; // Geen Swatt-adres ingesteld — niets om vanaf te berekenen.
-
-      const meters = await this.distanceService.getDrivingDistanceMetersOneWay(settings.addressLine, projectAddress);
+      const meters = await this.distanceService.getDrivingDistanceMetersOneWay(companyAddressLine, projectAddress);
       await this.prisma.project.update({
         where: { teamleaderId: projectTeamleaderId },
         data: { kmDistanceOneWayMeters: meters },
       });
-    } catch {
-      // Bewust geen `console.error`/rethrow hier — deze service heeft geen
-      // request-logger ter beschikking (geen Fastify-instantie), en een
-      // mislukte km-berekening is nooit kritiek genoeg om de sync-run zelf
-      // te laten falen. `Project.kmDistanceOneWayMeters` blijft dan gewoon
-      // op zijn vorige waarde (of `null`) staan tot een latere, geslaagde poging.
+    } catch (err) {
+      // "Stil" betekent hier bewust NIET "onzichtbaar" (zie ook
+      // teamleader.plugin.ts se opstartwaarschuwing bij een ontbrekende
+      // OPENROUTESERVICE_API_KEY) — enkel de sync-run zelf mag er niet door
+      // falen. Render vangt console.error automatisch op in zijn logstream.
+      // eslint-disable-next-line no-console
+      console.error(`Km-afstand herberekenen mislukt voor project ${projectTeamleaderId} (adres "${projectAddress}"):`, err);
     }
   }
 }

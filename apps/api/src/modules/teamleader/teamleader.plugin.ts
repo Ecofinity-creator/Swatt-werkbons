@@ -51,8 +51,20 @@ export default fp(async function teamleaderPlugin(app: FastifyInstance) {
   app.decorate('teamleaderAuthService', teamleaderAuthService);
   app.decorate('teamleaderClient', teamleaderClient);
   // Phase 12, deel D — beide optioneel (zie ProjectSyncService); zonder
-  // OPENROUTESERVICE_API_KEY blijft de projectsync zelf gewoon werken.
-  const distanceService = isDistanceServiceConfigured() ? new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey()) : null;
+  // OPENROUTESERVICE_API_KEY blijft de projectsync zelf gewoon werken, maar
+  // dan wordt de km-vergoeding overal stil overgeslagen. Op vraag (7/9/2026,
+  // na een lang debug-traject rond "km verschijnt nergens"): dit was vroeger
+  // volledig onzichtbaar (geen enkele log-regel) — vandaar deze expliciete
+  // waarschuwing bij opstart, zodat een vergeten omgevingsvariabele
+  // voortaan meteen in de Render-logs zichtbaar is i.p.v. pas na een lang
+  // "waarom werkt dit niet"-onderzoek.
+  const distanceServiceConfigured = isDistanceServiceConfigured();
+  if (!distanceServiceConfigured) {
+    app.log.warn(
+      'OPENROUTESERVICE_API_KEY is niet ingesteld — de km-vergoeding (verplaatsingskosten) blijft daardoor overal uitgeschakeld, ook al staan een km-tarief en bedrijfsadres wél correct ingesteld in Bedrijfsgegevens.',
+    );
+  }
+  const distanceService = distanceServiceConfigured ? new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey()) : null;
   const companySettingsService = new CompanySettingsService(app.prisma);
   app.decorate('projectSyncService', new ProjectSyncService(app.prisma, teamleaderClient, distanceService, companySettingsService));
   app.decorate('teamleaderUserService', new TeamleaderUserService(teamleaderClient));
