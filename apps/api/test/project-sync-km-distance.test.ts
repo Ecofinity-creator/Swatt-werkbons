@@ -13,12 +13,12 @@ import type { CompanySettingsService } from '../src/modules/company-settings/com
  * (LEGACY-module, één company-klant, één project) effectief gebruikt.
  */
 
-function createFakePrisma(opts: { existingAddress: string | null }) {
+function createFakePrisma(opts: { existingAddress: string | null; existingKmDistanceOneWayMeters?: number | null }) {
   const projectRow = {
     id: 'proj-1',
     teamleaderId: 'tl-proj-1',
     address: opts.existingAddress,
-    kmDistanceOneWayMeters: null as number | null,
+    kmDistanceOneWayMeters: opts.existingKmDistanceOneWayMeters ?? (null as number | null),
   };
   const customerRow = { id: 'cust-1', teamleaderId: 'tl-comp-1', address: null as string | null };
 
@@ -33,7 +33,9 @@ function createFakePrisma(opts: { existingAddress: string | null }) {
       },
     },
     project: {
-      findMany: async () => [{ teamleaderId: projectRow.teamleaderId, address: projectRow.address }],
+      findMany: async () => [
+        { teamleaderId: projectRow.teamleaderId, address: projectRow.address, kmDistanceOneWayMeters: projectRow.kmDistanceOneWayMeters },
+      ],
       upsert: async ({ update }: { update: { address: string | null } }) => {
         projectRow.address = update.address;
         return projectRow;
@@ -80,9 +82,23 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
     expect(projectRow.kmDistanceOneWayMeters).toBe(12345);
   });
 
-  it('berekent NIET opnieuw wanneer het adres ongewijzigd is (sectie 28 — geen onnodige externe calls)', async () => {
+  it('berekent NIET opnieuw wanneer het adres ongewijzigd is EN de afstand al eerder succesvol berekend werd (sectie 28 — geen onnodige externe calls)', async () => {
     const unchangedAddress = 'Kerkstraat 1, 2000 Antwerpen';
-    const { prisma, projectRow } = createFakePrisma({ existingAddress: unchangedAddress });
+    const { prisma, projectRow } = createFakePrisma({ existingAddress: unchangedAddress, existingKmDistanceOneWayMeters: 12345 });
+    const client = fakeClient(JANSSENS_ADDRESS);
+    const distanceService: DistanceService = { getDrivingDistanceMetersOneWay: vi.fn(async () => 99999) };
+    const companySettingsService = { get: async () => ({ addressLine: 'Swatt-adres 1, 2000 Antwerpen' }) } as unknown as CompanySettingsService;
+
+    const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+    await service.syncAll();
+
+    expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
+    expect(projectRow.kmDistanceOneWayMeters).toBe(12345); // ongewijzigd gebleven, niet overschreven met de (niet-aangeroepen) nieuwe waarde
+  });
+
+  it('berekent WEL (opnieuw) wanneer het adres ongewijzigd is maar de afstand nog nooit succesvol berekend werd (bugfix 7/9/2026 — een project blijft anders voor altijd zonder km-vergoeding steken)', async () => {
+    const unchangedAddress = 'Kerkstraat 1, 2000 Antwerpen';
+    const { prisma, projectRow } = createFakePrisma({ existingAddress: unchangedAddress, existingKmDistanceOneWayMeters: null });
     const client = fakeClient(JANSSENS_ADDRESS);
     const distanceService: DistanceService = { getDrivingDistanceMetersOneWay: vi.fn(async () => 12345) };
     const companySettingsService = { get: async () => ({ addressLine: 'Swatt-adres 1, 2000 Antwerpen' }) } as unknown as CompanySettingsService;
@@ -90,8 +106,8 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
     const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
     await service.syncAll();
 
-    expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
-    expect(projectRow.kmDistanceOneWayMeters).toBeNull();
+    expect(distanceService.getDrivingDistanceMetersOneWay).toHaveBeenCalledWith('Swatt-adres 1, 2000 Antwerpen', 'Kerkstraat 1, 2000 Antwerpen');
+    expect(projectRow.kmDistanceOneWayMeters).toBe(12345);
   });
 
   it('een mislukte km-berekening blokkeert de rest van de projectsync niet (business rule 9)', async () => {

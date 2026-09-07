@@ -158,14 +158,23 @@ export class ProjectSyncService {
     // Phase 12, deel D — vooraf ophalen welk adres elk project al had, om na
     // de upsert te kunnen bepalen of het effectief gewijzigd is (en dus een
     // nieuwe km-berekening verdient) zonder dat voor elk project een aparte
-    // extra round-trip nodig is.
-    const previousAddressByTeamleaderId = new Map(
+    // extra round-trip nodig is. kmDistanceOneWayMeters wordt hier ook
+    // meegenomen (op vraag, 7/9/2026): een project waarvan de afstand nooit
+    // succesvol berekend werd (bv. de eerste poging faalde stil, of de
+    // functie bestond nog niet toen dit project voor het eerst
+    // gesynchroniseerd werd) mag niet voor altijd `null` blijven enkel omdat
+    // het adres nadien niet meer wijzigt — "het adres is ongewijzigd"
+    // betekent niet hetzelfde als "de afstand staat al correct".
+    const previousStateByTeamleaderId = new Map<string, { address: string | null; kmDistanceOneWayMeters: number | null }>(
       (
         await this.prisma.project.findMany({
           where: { teamleaderId: { in: rowsWithCustomer.map((entry) => entry.row.id) } },
-          select: { teamleaderId: true, address: true },
+          select: { teamleaderId: true, address: true, kmDistanceOneWayMeters: true },
         })
-      ).map((project: { teamleaderId: string; address: string | null }) => [project.teamleaderId, project.address]),
+      ).map((project: { teamleaderId: string; address: string | null; kmDistanceOneWayMeters: number | null }) => [
+        project.teamleaderId,
+        { address: project.address, kmDistanceOneWayMeters: project.kmDistanceOneWayMeters },
+      ]),
     );
 
     for (const { row, customer: ref } of rowsWithCustomer) {
@@ -239,12 +248,19 @@ export class ProjectSyncService {
       seenTeamleaderIds.push(row.id);
 
       // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
-      // gewijzigd is t.o.v. vóór deze upsert (of nog nooit berekend werd),
-      // conform sectie 28 ("vraag nooit continu alle gegevens opnieuw op").
+      // gewijzigd is t.o.v. vóór deze upsert, OF de afstand nog nooit
+      // succesvol berekend werd (kmDistanceOneWayMeters staat nog op
+      // `null`) — conform sectie 28 ("vraag nooit continu alle gegevens
+      // opnieuw op"), maar zonder een project blijvend zonder afstand te
+      // laten zitten enkel omdat het adres toevallig ongewijzigd bleef.
+      const previousState = previousStateByTeamleaderId.get(row.id);
+      const addressChanged = localCustomer.address !== previousState?.address;
+      const neverComputed = previousState?.kmDistanceOneWayMeters == null;
       // Bewust NA de upsert (project bestaat dan zeker) en in een eigen
-      // try/catch: een mislukte km-berekening (netwerk, niet-geocodeerbaar
-      // adres) mag de rest van de projectsync nooit blokkeren (business rule 9).
-      if (localCustomer.address !== null && localCustomer.address !== previousAddressByTeamleaderId.get(row.id)) {
+      // try/catch binnen recomputeKmDistance(): een mislukte km-berekening
+      // (netwerk, niet-geocodeerbaar adres) mag de rest van de projectsync
+      // nooit blokkeren (business rule 9).
+      if (localCustomer.address !== null && (addressChanged || neverComputed)) {
         await this.recomputeKmDistance(row.id, localCustomer.address);
       }
     }
