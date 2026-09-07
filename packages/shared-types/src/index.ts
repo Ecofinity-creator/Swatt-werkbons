@@ -593,6 +593,15 @@ export interface WorkOrderSummary {
    * `null` wanneer er geen km-vergoeding van toepassing is.
    */
   kmAmountCents: number | null;
+  /**
+   * Op vraag (7/9/2026, diagnose): de ruwe invoerwaarden voor de km-
+   * berekening hierboven, apart blootgesteld zodat een Admin/Supervisor op
+   * het scherm zelf kan zien WAAROM kmAmountCents eventueel `null` is
+   * (geen afstand gekend? geen tarief ingesteld?) zonder in de Render-logs
+   * te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
+   * kmAmountCents zelf leeg is — zie WorkOrderReviewPage.tsx.
+   */
+  kmDebug: { projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
   createdByEmployeeDisplayName: string;
   createdAt: string;
   timeEntries: WorkOrderTimeEntrySummary[];

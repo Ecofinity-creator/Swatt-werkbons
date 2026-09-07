@@ -1,0 +1,197 @@
+From 64db2afdcec082b2630e295eec229b6ea9deee5a Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 13:18:43 +0000
+Subject: [PATCH] =?UTF-8?q?Km-diagnose=20rechtstreeks=20op=20het=20onderte?=
+ =?UTF-8?q?kenscherm=20=E2=80=94=20laatste=20stap=20in=20het=20lopende=20d?=
+ =?UTF-8?q?ebug-traject?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Gerapporteerd (7/9/2026, 6e ronde): "ook bij nieuwe werkbon verschijnt
+geen km", zelfs na alle voorgaande fixes en na bevestiging dat de
+synchronisatie en logging correct werken. Op dit punt is elke server-side
+schakel (afstandsberekening, opslag, doorgifte in de API-respons) grondig
+geverifieerd en logisch correct bevonden — verder puur op basis van
+Render-logs blijven gissen wordt onproductief.
+
+In plaats van nog een fix te proberen zonder harde bevestiging: de ruwe
+invoerwaarden voor de km-berekening (Project.kmDistanceOneWayMeters,
+CompanySettings.kmRateCents) worden nu rechtstreeks getoond op het
+ondertekenscherm zelf, enkel voor Supervisor/Admin en enkel wanneer de
+km-vergoeding leeg blijft — bv. "(km-diagnose: afstand = 4200m, tarief =
+niet ingesteld cent/km)". Dit maakt in één oogopslag duidelijk WELKE van
+de twee waarden ontbreekt of onverwacht is, zonder dat iemand nog in de
+Render-logs moet zoeken of mij een screenshot moet doorsturen.
+
+- WorkOrderSummary.kmDebug (nieuw veld): { projectKmDistanceOneWayMeters,
+  companyKmRateCents }, meegegeven in elke work-order-respons.
+- WorkOrderSummaryCard toont dit regeltje conditioneel; showKmDebug-prop
+  doorgegeven vanaf de hoofdpagina (herbruikt dezelfde SUPERVISOR-rolcheck
+  als de bestaande canManagePdf-logica).
+
+Verificatie: backend-testsuite 227 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint backend+
+frontend schoon, frontend-productiebuild slaagt.
+---
+ .../modules/work-orders/work-order.routes.ts  | 13 ++++++------
+ apps/web/src/pages/WorkOrderReviewPage.tsx    | 21 +++++++++++++++----
+ packages/shared-types/src/index.ts            |  9 ++++++++
+ 3 files changed, 33 insertions(+), 10 deletions(-)
+
+diff --git a/apps/api/src/modules/work-orders/work-order.routes.ts b/apps/api/src/modules/work-orders/work-order.routes.ts
+index 32f239b..bfaadd7 100644
+--- a/apps/api/src/modules/work-orders/work-order.routes.ts
++++ b/apps/api/src/modules/work-orders/work-order.routes.ts
+@@ -447,12 +447,8 @@ async function toSummary(
+   // levende PREVIEW met exact dezelfde formule (computeKmAmountCents()) —
+   // na ondertekening geeft dit hetzelfde bevroren bedrag terug, dus geen
+   // waargenomen "sprong" tussen het onderteken- en het PDF-scherm.
+-  const kmAmountCents =
+-    workOrder.kmAmountCents ??
+-    (await (async () => {
+-      const settings = await companySettingsService.get();
+-      return computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, settings.kmRateCents);
+-    })());
++  const companySettingsForKm = await companySettingsService.get();
++  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
+ 
+   return {
+     id: workOrder.id,
+@@ -464,6 +460,11 @@ async function toSummary(
+     status: workOrder.status,
+     description: workOrder.description,
+     kmAmountCents,
++    // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
++    kmDebug: {
++      projectKmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
++      companyKmRateCents: companySettingsForKm.kmRateCents,
++    },
+     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
+     createdAt: workOrder.createdAt.toISOString(),
+     timeEntries: workOrder.timeEntries.map((link) => ({
+diff --git a/apps/web/src/pages/WorkOrderReviewPage.tsx b/apps/web/src/pages/WorkOrderReviewPage.tsx
+index 058f729..5275b0c 100644
+--- a/apps/web/src/pages/WorkOrderReviewPage.tsx
++++ b/apps/web/src/pages/WorkOrderReviewPage.tsx
+@@ -296,6 +296,7 @@ export function WorkOrderReviewPage() {
+       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'review' && (
+         <ReviewStep
+           workOrder={workOrder}
++          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
+           isUploadingPhoto={isUploadingPhoto}
+           uploadError={uploadError}
+           category={category}
+@@ -310,6 +311,7 @@ export function WorkOrderReviewPage() {
+       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'sign' && (
+         <SignStep
+           workOrder={workOrder}
++          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
+           pendingWeekCount={pendingWeekCount}
+           pendingWeekEntries={pendingWeekEntries}
+           pendingWeekKmInfo={pendingWeekKmInfo}
+@@ -334,6 +336,7 @@ export function WorkOrderReviewPage() {
+ 
+ function ReviewStep({
+   workOrder,
++  showKmDebug,
+   isUploadingPhoto,
+   uploadError,
+   category,
+@@ -344,6 +347,7 @@ function ReviewStep({
+   onContinue,
+ }: {
+   workOrder: WorkOrderSummary;
++  showKmDebug: boolean;
+   isUploadingPhoto: boolean;
+   uploadError: string | null;
+   category: WorkOrderPhotoCategory | '';
+@@ -355,7 +359,7 @@ function ReviewStep({
+ }) {
+   return (
+     <div className="flex flex-col gap-6">
+-      <WorkOrderSummaryCard workOrder={workOrder} />
++      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={showKmDebug} />
+ 
+       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-swatt-gold">Foto&apos;s</h2>
+@@ -473,6 +477,7 @@ function PhotoInputButton({
+ 
+ function SignStep({
+   workOrder,
++  showKmDebug,
+   pendingWeekCount,
+   pendingWeekEntries,
+   pendingWeekKmInfo,
+@@ -491,6 +496,7 @@ function SignStep({
+   onSign,
+ }: {
+   workOrder: WorkOrderSummary;
++  showKmDebug: boolean;
+   /** Phase 12, deel B — aantal werkbonnen dat samen met deze getekend wordt, enkel gezet bij projectSigningMode === 'WEEKLY'. */
+   pendingWeekCount: number | null;
+   /** Detail van alle tijdregistraties die samen met deze week ondertekend worden — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt". */
+@@ -516,7 +522,7 @@ function SignStep({
+   return (
+     <div className="flex flex-col gap-6">
+       <p className="text-lg font-semibold">Werkbon controleren</p>
+-      <WorkOrderSummaryCard workOrder={workOrder} />
++      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={showKmDebug} />
+ 
+       {workOrder.projectSigningMode === 'WEEKLY' && pendingWeekCount !== null && pendingWeekCount > 1 && (
+         <div className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-3 text-sm text-swatt-gold">
+@@ -682,7 +688,7 @@ function SignedWorkOrderView({
+       <div className="rounded-xl border border-emerald-900 bg-emerald-950 p-4 text-center text-sm text-emerald-200">
+         Deze werkbon is ondertekend en kan niet meer gewijzigd worden.
+       </div>
+-      <WorkOrderSummaryCard workOrder={workOrder} />
++      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={canManagePdf} />
+ 
+       {canManagePdf && (
+         <TeamleaderSyncSection
+@@ -844,7 +850,7 @@ function TeamleaderSyncSection({
+   );
+ }
+ 
+-function WorkOrderSummaryCard({ workOrder }: { workOrder: WorkOrderSummary }) {
++function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrderSummary; showKmDebug: boolean }) {
+   const totalSeconds = workOrder.timeEntries.reduce((sum, entry) => {
+     if (!entry.endedAt) return sum;
+     const worked = (new Date(entry.endedAt).getTime() - new Date(entry.startedAt).getTime()) / 1000 - entry.pausedSeconds;
+@@ -878,6 +884,13 @@ function WorkOrderSummaryCard({ workOrder }: { workOrder: WorkOrderSummary }) {
+       {workOrder.kmAmountCents !== null && workOrder.kmAmountCents > 0 && (
+         <p className="mt-1 text-right text-xs text-neutral-400">Verplaatsingskosten: {formatEuroCents(workOrder.kmAmountCents)}</p>
+       )}
++      {/* Op vraag (7/9/2026, diagnose): enkel zichtbaar voor Supervisor+ én enkel wanneer de km-vergoeding zelf leeg blijft — toont in dat geval WAAROM (welke van de twee invoerwaarden ontbreekt), zonder in de Render-logs te moeten zoeken. */}
++      {showKmDebug && (workOrder.kmAmountCents === null || workOrder.kmAmountCents === 0) && (
++        <p className="mt-1 text-right text-[11px] text-neutral-500">
++          (km-diagnose: afstand = {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief ={' '}
++          {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'} cent/km)
++        </p>
++      )}
+     </div>
+   );
+ }
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index be51fcc..9fb3ed2 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -593,6 +593,15 @@ export interface WorkOrderSummary {
+    * `null` wanneer er geen km-vergoeding van toepassing is.
+    */
+   kmAmountCents: number | null;
++  /**
++   * Op vraag (7/9/2026, diagnose): de ruwe invoerwaarden voor de km-
++   * berekening hierboven, apart blootgesteld zodat een Admin/Supervisor op
++   * het scherm zelf kan zien WAAROM kmAmountCents eventueel `null` is
++   * (geen afstand gekend? geen tarief ingesteld?) zonder in de Render-logs
++   * te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
++   * kmAmountCents zelf leeg is — zie WorkOrderReviewPage.tsx.
++   */
++  kmDebug: { projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
+   createdByEmployeeDisplayName: string;
+   createdAt: string;
+   timeEntries: WorkOrderTimeEntrySummary[];
+-- 
+2.43.0
+

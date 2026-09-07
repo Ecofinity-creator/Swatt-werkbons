@@ -296,6 +296,7 @@ export function WorkOrderReviewPage() {
       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'review' && (
         <ReviewStep
           workOrder={workOrder}
+          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
           isUploadingPhoto={isUploadingPhoto}
           uploadError={uploadError}
           category={category}
@@ -310,6 +311,7 @@ export function WorkOrderReviewPage() {
       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'sign' && (
         <SignStep
           workOrder={workOrder}
+          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
           pendingWeekCount={pendingWeekCount}
           pendingWeekEntries={pendingWeekEntries}
           pendingWeekKmInfo={pendingWeekKmInfo}
@@ -334,6 +336,7 @@ export function WorkOrderReviewPage() {
 
 function ReviewStep({
   workOrder,
+  showKmDebug,
   isUploadingPhoto,
   uploadError,
   category,
@@ -344,6 +347,7 @@ function ReviewStep({
   onContinue,
 }: {
   workOrder: WorkOrderSummary;
+  showKmDebug: boolean;
   isUploadingPhoto: boolean;
   uploadError: string | null;
   category: WorkOrderPhotoCategory | '';
@@ -355,7 +359,7 @@ function ReviewStep({
 }) {
   return (
     <div className="flex flex-col gap-6">
-      <WorkOrderSummaryCard workOrder={workOrder} />
+      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={showKmDebug} />
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-swatt-gold">Foto&apos;s</h2>
@@ -473,6 +477,7 @@ function PhotoInputButton({
 
 function SignStep({
   workOrder,
+  showKmDebug,
   pendingWeekCount,
   pendingWeekEntries,
   pendingWeekKmInfo,
@@ -491,6 +496,7 @@ function SignStep({
   onSign,
 }: {
   workOrder: WorkOrderSummary;
+  showKmDebug: boolean;
   /** Phase 12, deel B — aantal werkbonnen dat samen met deze getekend wordt, enkel gezet bij projectSigningMode === 'WEEKLY'. */
   pendingWeekCount: number | null;
   /** Detail van alle tijdregistraties die samen met deze week ondertekend worden — op vraag: "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt". */
@@ -516,7 +522,7 @@ function SignStep({
   return (
     <div className="flex flex-col gap-6">
       <p className="text-lg font-semibold">Werkbon controleren</p>
-      <WorkOrderSummaryCard workOrder={workOrder} />
+      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={showKmDebug} />
 
       {workOrder.projectSigningMode === 'WEEKLY' && pendingWeekCount !== null && pendingWeekCount > 1 && (
         <div className="rounded-lg border border-swatt-gold bg-neutral-900 px-4 py-3 text-sm text-swatt-gold">
@@ -682,7 +688,7 @@ function SignedWorkOrderView({
       <div className="rounded-xl border border-emerald-900 bg-emerald-950 p-4 text-center text-sm text-emerald-200">
         Deze werkbon is ondertekend en kan niet meer gewijzigd worden.
       </div>
-      <WorkOrderSummaryCard workOrder={workOrder} />
+      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={canManagePdf} />
 
       {canManagePdf && (
         <TeamleaderSyncSection
@@ -844,7 +850,7 @@ function TeamleaderSyncSection({
   );
 }
 
-function WorkOrderSummaryCard({ workOrder }: { workOrder: WorkOrderSummary }) {
+function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrderSummary; showKmDebug: boolean }) {
   const totalSeconds = workOrder.timeEntries.reduce((sum, entry) => {
     if (!entry.endedAt) return sum;
     const worked = (new Date(entry.endedAt).getTime() - new Date(entry.startedAt).getTime()) / 1000 - entry.pausedSeconds;
@@ -877,6 +883,13 @@ function WorkOrderSummaryCard({ workOrder }: { workOrder: WorkOrderSummary }) {
       {/* Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet getoond aan de klant" — nu zichtbaar vóór het tekenen, niet enkel op de PDF achteraf. */}
       {workOrder.kmAmountCents !== null && workOrder.kmAmountCents > 0 && (
         <p className="mt-1 text-right text-xs text-neutral-400">Verplaatsingskosten: {formatEuroCents(workOrder.kmAmountCents)}</p>
+      )}
+      {/* Op vraag (7/9/2026, diagnose): enkel zichtbaar voor Supervisor+ én enkel wanneer de km-vergoeding zelf leeg blijft — toont in dat geval WAAROM (welke van de twee invoerwaarden ontbreekt), zonder in de Render-logs te moeten zoeken. */}
+      {showKmDebug && (workOrder.kmAmountCents === null || workOrder.kmAmountCents === 0) && (
+        <p className="mt-1 text-right text-[11px] text-neutral-500">
+          (km-diagnose: afstand = {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief ={' '}
+          {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'} cent/km)
+        </p>
       )}
     </div>
   );

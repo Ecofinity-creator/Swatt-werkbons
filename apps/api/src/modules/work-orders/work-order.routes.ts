@@ -447,12 +447,8 @@ async function toSummary(
   // levende PREVIEW met exact dezelfde formule (computeKmAmountCents()) —
   // na ondertekening geeft dit hetzelfde bevroren bedrag terug, dus geen
   // waargenomen "sprong" tussen het onderteken- en het PDF-scherm.
-  const kmAmountCents =
-    workOrder.kmAmountCents ??
-    (await (async () => {
-      const settings = await companySettingsService.get();
-      return computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, settings.kmRateCents);
-    })());
+  const companySettingsForKm = await companySettingsService.get();
+  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(workOrder.project.kmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
 
   return {
     id: workOrder.id,
@@ -464,6 +460,11 @@ async function toSummary(
     status: workOrder.status,
     description: workOrder.description,
     kmAmountCents,
+    // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
+    kmDebug: {
+      projectKmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
+      companyKmRateCents: companySettingsForKm.kmRateCents,
+    },
     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
     createdAt: workOrder.createdAt.toISOString(),
     timeEntries: workOrder.timeEntries.map((link) => ({
