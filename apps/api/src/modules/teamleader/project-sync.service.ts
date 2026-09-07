@@ -445,7 +445,26 @@ export class ProjectSyncService {
   private async recomputeKmDistancesBounded(
     allProjects: Array<{ projectTeamleaderId: string; projectName: string; projectAddress: string }>,
   ): Promise<void> {
-    if (allProjects.length === 0 || !this.distanceService || !this.companySettingsService) return;
+    // Op vraag (7/9/2026, 5e ronde): "nog steeds geen km te zien", maar géén
+    // enkele "Km-afstand"-logregel meer na een sync — dat kon tot nu toe
+    // TWEE volledig verschillende dingen betekenen zonder onderscheid: ofwel
+    // is er niets meer te berekenen (alles al klaar van een vorige, geslaagde
+    // poging — GOED nieuws, dan is het probleem elders, bv. de PDF/het
+    // ondertekenscherm zelf), ofwel ontbreekt de configuratie zelf
+    // (distanceService/companySettingsService niet meegegeven). Vandaar nu
+    // een expliciete log voor exact dit stille pad.
+    if (allProjects.length === 0) {
+      // eslint-disable-next-line no-console
+      console.log('Km-afstand: geen enkel project had deze sync-run een herberekening nodig (alles staat al up-to-date).');
+      return;
+    }
+    if (!this.distanceService || !this.companySettingsService) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `Km-afstand kan niet berekend worden voor ${allProjects.length} project(en): OPENROUTESERVICE_API_KEY is niet geconfigureerd.`,
+      );
+      return;
+    }
 
     const projects = allProjects.slice(0, ProjectSyncService.MAX_KM_RECOMPUTES_PER_SYNC_RUN);
     // Op vraag (7/9/2026, 4e ronde): "nog steeds geen km te zien", ondanks

@@ -1,0 +1,72 @@
+From ae146df37d9c0a214accd1c28e20a47d3f4e5542 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 12:57:27 +0000
+Subject: [PATCH] =?UTF-8?q?Log=20ook=20expliciet=20wanneer=20er=20niets=20?=
+ =?UTF-8?q?te=20berekenen=20valt=20(5e=20ronde)=20=E2=80=94=20laatste=20st?=
+ =?UTF-8?q?ille=20"geen=20logregel"-scenario=20weggewerkt?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Gerapporteerd (7/9/2026, 5e ronde): een screenshot van de Render-logs rond
+een sync-klik toonde HELEMAAL GEEN "Km-afstand"-logregel, ondanks alle
+eerdere logging-uitbreidingen. Dit bleek een laatste, nog niet
+onderscheiden stil pad: recomputeKmDistancesBounded() gaf vroegtijdig
+`return` bij een lege lijst (niets te berekenen) OF een ontbrekende
+distanceService/companySettingsService, zonder in beide gevallen ook maar
+iets te loggen.
+
+Belangrijke nuance: "niets te berekenen" is hier eigenlijk GOED nieuws —
+het betekent dat alle projecten die een herberekening nodig hadden, al in
+een eerdere, geslaagde sync-run verwerkt zijn. Als de km-vergoeding dan
+nog steeds niet verschijnt op het ondertekenscherm, ligt het probleem niet
+meer bij de synchronisatie/berekening zelf, maar elders (bv. de klant-/
+project-koppeling van het specifieke testproject, browsercache, of iets in
+de weergavelaag).
+
+Fix: twee nieuwe, onderscheiden logregels — "geen enkel project had deze
+sync-run een herberekening nodig (alles staat al up-to-date)" vs.
+"OPENROUTESERVICE_API_KEY is niet geconfigureerd" — zodat dit onderscheid
+voortaan altijd zichtbaar is.
+
+Verificatie: backend-testsuite 227 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../teamleader/project-sync.service.ts        | 21 ++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 7149ef1..671ffb3 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -445,7 +445,26 @@ export class ProjectSyncService {
+   private async recomputeKmDistancesBounded(
+     allProjects: Array<{ projectTeamleaderId: string; projectName: string; projectAddress: string }>,
+   ): Promise<void> {
+-    if (allProjects.length === 0 || !this.distanceService || !this.companySettingsService) return;
++    // Op vraag (7/9/2026, 5e ronde): "nog steeds geen km te zien", maar géén
++    // enkele "Km-afstand"-logregel meer na een sync — dat kon tot nu toe
++    // TWEE volledig verschillende dingen betekenen zonder onderscheid: ofwel
++    // is er niets meer te berekenen (alles al klaar van een vorige, geslaagde
++    // poging — GOED nieuws, dan is het probleem elders, bv. de PDF/het
++    // ondertekenscherm zelf), ofwel ontbreekt de configuratie zelf
++    // (distanceService/companySettingsService niet meegegeven). Vandaar nu
++    // een expliciete log voor exact dit stille pad.
++    if (allProjects.length === 0) {
++      // eslint-disable-next-line no-console
++      console.log('Km-afstand: geen enkel project had deze sync-run een herberekening nodig (alles staat al up-to-date).');
++      return;
++    }
++    if (!this.distanceService || !this.companySettingsService) {
++      // eslint-disable-next-line no-console
++      console.warn(
++        `Km-afstand kan niet berekend worden voor ${allProjects.length} project(en): OPENROUTESERVICE_API_KEY is niet geconfigureerd.`,
++      );
++      return;
++    }
+ 
+     const projects = allProjects.slice(0, ProjectSyncService.MAX_KM_RECOMPUTES_PER_SYNC_RUN);
+     // Op vraag (7/9/2026, 4e ronde): "nog steeds geen km te zien", ondanks
+-- 
+2.43.0
+
