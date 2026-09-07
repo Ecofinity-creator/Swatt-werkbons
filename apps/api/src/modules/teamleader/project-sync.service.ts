@@ -154,7 +154,7 @@ export class ProjectSyncService {
     // delen vaak dezelfde klant).
     const localCustomerCache = new Map<string, { id: string; address: string | null }>();
     // Op vraag (7/9/2026) — zie de toelichting bij recomputeKmDistancesBounded() hieronder.
-    const projectsNeedingKmRecompute: Array<{ projectTeamleaderId: string; projectAddress: string }> = [];
+    const projectsNeedingKmRecompute: Array<{ projectTeamleaderId: string; projectName: string; projectAddress: string }> = [];
     const seenTeamleaderIds: string[] = [];
 
     // Phase 12, deel D — vooraf ophalen welk adres elk project al had, om na
@@ -259,7 +259,7 @@ export class ProjectSyncService {
       const addressChanged = localCustomer.address !== previousState?.address;
       const neverComputed = previousState?.kmDistanceOneWayMeters == null;
       if (localCustomer.address !== null && (addressChanged || neverComputed)) {
-        projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectAddress: localCustomer.address });
+        projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectName: row.name, projectAddress: localCustomer.address });
       } else if (localCustomer.address === null && neverComputed) {
         // Op vraag (7/9/2026, 3e ronde van hetzelfde debug-traject): dit was
         // tot nu toe een derde, volledig stille faalmodus — een klant zonder
@@ -442,16 +442,30 @@ export class ProjectSyncService {
    */
   private static readonly MAX_KM_RECOMPUTES_PER_SYNC_RUN = 15;
 
-  private async recomputeKmDistancesBounded(allProjects: Array<{ projectTeamleaderId: string; projectAddress: string }>): Promise<void> {
+  private async recomputeKmDistancesBounded(
+    allProjects: Array<{ projectTeamleaderId: string; projectName: string; projectAddress: string }>,
+  ): Promise<void> {
     if (allProjects.length === 0 || !this.distanceService || !this.companySettingsService) return;
 
     const projects = allProjects.slice(0, ProjectSyncService.MAX_KM_RECOMPUTES_PER_SYNC_RUN);
+    // Op vraag (7/9/2026, 4e ronde): "nog steeds geen km te zien", ondanks
+    // een geslaagde sync zonder foutmelding — bleek uiteindelijk niet met
+    // zekerheid vast te stellen te zijn, want een GESLAAGDE berekening werd
+    // tot nu toe nergens gelogd (enkel mislukkingen/waarschuwingen). Bij een
+    // backlog groter dan de portie van deze run kon een specifiek project
+    // (bv. het testproject zelf) toevallig niet in de eerste 15 zitten,
+    // zonder dat dat ergens zichtbaar was. Vandaar nu ook expliciet loggen
+    // WELKE projecten deze run wél/niet aan bod komen, en het resultaat van
+    // elke individuele berekening.
     if (allProjects.length > projects.length) {
+      const skipped = allProjects.slice(ProjectSyncService.MAX_KM_RECOMPUTES_PER_SYNC_RUN);
       // eslint-disable-next-line no-console
       console.warn(
-        `Km-afstand: ${allProjects.length} project(en) hebben een herberekening nodig, deze sync-run verwerkt er ${projects.length} (begrensd om binnen de requesttimeout te blijven). Klik nogmaals op "Synchroniseer projecten" om de rest bij te werken.`,
+        `Km-afstand: ${allProjects.length} project(en) hebben een herberekening nodig, deze sync-run verwerkt er ${projects.length} (begrensd om binnen de requesttimeout te blijven). Klik nogmaals op "Synchroniseer projecten" om de rest bij te werken. Deze run overgeslagen: ${skipped.map((p) => p.projectName).join(', ')}.`,
       );
     }
+    // eslint-disable-next-line no-console
+    console.log(`Km-afstand: deze sync-run berekent voor: ${projects.map((p) => p.projectName).join(', ')}.`);
 
     const settings = await this.companySettingsService.get();
     if (!settings.addressLine) {
@@ -469,14 +483,14 @@ export class ProjectSyncService {
       const index = cursor;
       cursor += 1;
       if (index >= projects.length) return;
-      const { projectTeamleaderId, projectAddress } = projects[index]!;
-      await this.recomputeKmDistance(projectTeamleaderId, projectAddress, companyAddressLine);
+      const { projectTeamleaderId, projectName, projectAddress } = projects[index]!;
+      await this.recomputeKmDistance(projectTeamleaderId, projectName, projectAddress, companyAddressLine);
       await runNext();
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, projects.length) }, () => runNext()));
   }
 
-  private async recomputeKmDistance(projectTeamleaderId: string, projectAddress: string, companyAddressLine: string): Promise<void> {
+  private async recomputeKmDistance(projectTeamleaderId: string, projectName: string, projectAddress: string, companyAddressLine: string): Promise<void> {
     if (!this.distanceService) return;
 
     try {
@@ -485,13 +499,15 @@ export class ProjectSyncService {
         where: { teamleaderId: projectTeamleaderId },
         data: { kmDistanceOneWayMeters: meters },
       });
+      // eslint-disable-next-line no-console
+      console.log(`Km-afstand berekend voor project "${projectName}" (${projectTeamleaderId}): ${meters}m enkele rit.`);
     } catch (err) {
       // "Stil" betekent hier bewust NIET "onzichtbaar" (zie ook
       // teamleader.plugin.ts se opstartwaarschuwing bij een ontbrekende
       // OPENROUTESERVICE_API_KEY) — enkel de sync-run zelf mag er niet door
       // falen. Render vangt console.error automatisch op in zijn logstream.
       // eslint-disable-next-line no-console
-      console.error(`Km-afstand herberekenen mislukt voor project ${projectTeamleaderId} (adres "${projectAddress}"):`, err);
+      console.error(`Km-afstand herberekenen mislukt voor project "${projectName}" (${projectTeamleaderId}, adres "${projectAddress}"):`, err);
     }
   }
 }

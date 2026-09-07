@@ -305,6 +305,11 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
     expect(projectRows.filter((p) => p.kmDistanceOneWayMeters !== null)).toHaveLength(15);
     expect(projectRows.filter((p) => p.kmDistanceOneWayMeters === null)).toHaveLength(5);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('20 project(en) hebben een herberekening nodig'));
+    // Op vraag (7/9/2026, 4e ronde): expliciet vermelden WELKE projecten
+    // overgeslagen worden (niet enkel hoeveel) — anders blijft het gissen
+    // of een specifiek project (bv. het testproject zelf) toevallig wél of
+    // niet in deze run aan bod kwam.
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Project 16, Project 17, Project 18, Project 19, Project 20'));
     warnSpy.mockRestore();
   });
 });
