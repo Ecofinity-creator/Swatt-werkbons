@@ -260,6 +260,19 @@ export class ProjectSyncService {
       const neverComputed = previousState?.kmDistanceOneWayMeters == null;
       if (localCustomer.address !== null && (addressChanged || neverComputed)) {
         projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectAddress: localCustomer.address });
+      } else if (localCustomer.address === null && neverComputed) {
+        // Op vraag (7/9/2026, 3e ronde van hetzelfde debug-traject): dit was
+        // tot nu toe een derde, volledig stille faalmodus — een klant zonder
+        // (volledig) adres in Teamleader (formatAddress() geeft dan `null`
+        // terug) betekende dat deze project-rij hier simpelweg NOOIT in
+        // projectsNeedingKmRecompute terechtkwam, dus ook nooit een
+        // console.error uit recomputeKmDistance() kreeg — een km-vergoeding
+        // die voor altijd `null` bleef, zonder dat ergens zichtbaar werd
+        // waarom. Vandaar deze expliciete log hier, vóór dat punt.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
+        );
       }
     }
 
@@ -441,7 +454,13 @@ export class ProjectSyncService {
     if (projects.length === 0 || !this.distanceService || !this.companySettingsService) return;
 
     const settings = await this.companySettingsService.get();
-    if (!settings.addressLine) return; // Geen Swatt-adres ingesteld — niets om vanaf te berekenen.
+    if (!settings.addressLine) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `Km-afstand kan niet berekend worden voor ${projects.length} project(en): er is geen bedrijfsadres ingesteld in Bedrijfsgegevens.`,
+      );
+      return;
+    }
     const companyAddressLine = settings.addressLine;
 
     const CONCURRENCY = 5;

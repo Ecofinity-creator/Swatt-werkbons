@@ -1,0 +1,123 @@
+From 8c7cb77599df4cd1b514021d47d3939331829784 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 09:26:18 +0000
+Subject: [PATCH] Nog twee stille faalmodi bij de km-berekening zichtbaar
+ gemaakt (klant zonder adres, geen bedrijfsadres ingesteld)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Vervolg op het lopende debug-traject (7/9/2026, "verplaatsing staat nog
+steeds niet op het ondertekenscherm"). Na het oplossen van de HTTP 502 en
+het toevoegen van logging voor een mislukte OpenRouteService-aanroep,
+bleven er nog TWEE andere, volledig stille manieren over waarop de
+km-vergoeding voor altijd `null` kon blijven zonder dat dit ergens
+zichtbaar werd:
+
+1. De gekoppelde klant heeft geen (volledig) adres in Teamleader
+   (formatAddress() geeft dan `null` terug) — het project belandde dan
+   simpelweg nooit in de lijst "moet herberekend worden", dus kreeg ook
+   nooit een kans om te falen/loggen in recomputeKmDistance() zelf.
+2. Er is geen bedrijfsadres ingesteld in Bedrijfsgegevens
+   (CompanySettings.addressLine) — recomputeKmDistancesBounded() stopte
+   dan gewoon vroegtijdig, ook zonder enige log.
+
+Beide loggen nu een duidelijke console.warn (zichtbaar in de Render-logs)
+met de naam van het betrokken project resp. het aantal getroffen
+projecten, zodat een volgende keer meteen duidelijk is WAAROM de
+km-vergoeding niet verschijnt, zonder een nieuw lang debug-traject.
+
+Tests: 2 nieuwe tests die specifiek deze twee scenario's afdekken en
+bevestigen dat de juiste waarschuwing effectief gelogd wordt.
+
+Verificatie: backend-testsuite 226 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../teamleader/project-sync.service.ts        | 21 +++++++++++-
+ .../api/test/project-sync-km-distance.test.ts | 33 +++++++++++++++++++
+ 2 files changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 3897525..3ecdeef 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -260,6 +260,19 @@ export class ProjectSyncService {
+       const neverComputed = previousState?.kmDistanceOneWayMeters == null;
+       if (localCustomer.address !== null && (addressChanged || neverComputed)) {
+         projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectAddress: localCustomer.address });
++      } else if (localCustomer.address === null && neverComputed) {
++        // Op vraag (7/9/2026, 3e ronde van hetzelfde debug-traject): dit was
++        // tot nu toe een derde, volledig stille faalmodus — een klant zonder
++        // (volledig) adres in Teamleader (formatAddress() geeft dan `null`
++        // terug) betekende dat deze project-rij hier simpelweg NOOIT in
++        // projectsNeedingKmRecompute terechtkwam, dus ook nooit een
++        // console.error uit recomputeKmDistance() kreeg — een km-vergoeding
++        // die voor altijd `null` bleef, zonder dat ergens zichtbaar werd
++        // waarom. Vandaar deze expliciete log hier, vóór dat punt.
++        // eslint-disable-next-line no-console
++        console.warn(
++          `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
++        );
+       }
+     }
+ 
+@@ -441,7 +454,13 @@ export class ProjectSyncService {
+     if (projects.length === 0 || !this.distanceService || !this.companySettingsService) return;
+ 
+     const settings = await this.companySettingsService.get();
+-    if (!settings.addressLine) return; // Geen Swatt-adres ingesteld — niets om vanaf te berekenen.
++    if (!settings.addressLine) {
++      // eslint-disable-next-line no-console
++      console.warn(
++        `Km-afstand kan niet berekend worden voor ${projects.length} project(en): er is geen bedrijfsadres ingesteld in Bedrijfsgegevens.`,
++      );
++      return;
++    }
+     const companyAddressLine = settings.addressLine;
+ 
+     const CONCURRENCY = 5;
+diff --git a/apps/api/test/project-sync-km-distance.test.ts b/apps/api/test/project-sync-km-distance.test.ts
+index d4f8093..3a674d1 100644
+--- a/apps/api/test/project-sync-km-distance.test.ts
++++ b/apps/api/test/project-sync-km-distance.test.ts
+@@ -231,4 +231,37 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+     expect(result.syncedCount).toBe(1);
+     expect(projectRow.kmDistanceOneWayMeters).toBeNull();
+   });
++
++  it('logt een waarschuwing (i.p.v. volledig stil te blijven) wanneer de klant geen adres heeft in Teamleader — 3e stille faalmodus, 7/9/2026', async () => {
++    const { prisma, projectRow } = createFakePrisma({ existingAddress: null });
++    const client = fakeClient(null); // geen primary_address bij deze klant in Teamleader
++    const distanceService: DistanceService = { getDrivingDistanceMetersOneWay: vi.fn(async () => 12345) };
++    const companySettingsService = { get: async () => ({ addressLine: 'Swatt-adres 1, 2000 Antwerpen' }) } as unknown as CompanySettingsService;
++    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
++
++    const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
++    await service.syncAll();
++    await flushBackgroundKmWork();
++
++    expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
++    expect(projectRow.kmDistanceOneWayMeters).toBeNull();
++    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('geen (volledig) adres in Teamleader'));
++    warnSpy.mockRestore();
++  });
++
++  it('logt een waarschuwing wanneer er geen bedrijfsadres ingesteld is in Bedrijfsgegevens — idem, 7/9/2026', async () => {
++    const { prisma } = createFakePrisma({ existingAddress: null });
++    const client = fakeClient(JANSSENS_ADDRESS);
++    const distanceService: DistanceService = { getDrivingDistanceMetersOneWay: vi.fn(async () => 12345) };
++    const companySettingsService = { get: async () => ({ addressLine: null }) } as unknown as CompanySettingsService;
++    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
++
++    const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
++    await service.syncAll();
++    await flushBackgroundKmWork();
++
++    expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
++    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('geen bedrijfsadres ingesteld'));
++    warnSpy.mockRestore();
++  });
+ });
+-- 
+2.43.0
+

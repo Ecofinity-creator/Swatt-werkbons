@@ -231,4 +231,37 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
     expect(result.syncedCount).toBe(1);
     expect(projectRow.kmDistanceOneWayMeters).toBeNull();
   });
+
+  it('logt een waarschuwing (i.p.v. volledig stil te blijven) wanneer de klant geen adres heeft in Teamleader — 3e stille faalmodus, 7/9/2026', async () => {
+    const { prisma, projectRow } = createFakePrisma({ existingAddress: null });
+    const client = fakeClient(null); // geen primary_address bij deze klant in Teamleader
+    const distanceService: DistanceService = { getDrivingDistanceMetersOneWay: vi.fn(async () => 12345) };
+    const companySettingsService = { get: async () => ({ addressLine: 'Swatt-adres 1, 2000 Antwerpen' }) } as unknown as CompanySettingsService;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+    await service.syncAll();
+    await flushBackgroundKmWork();
+
+    expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
+    expect(projectRow.kmDistanceOneWayMeters).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('geen (volledig) adres in Teamleader'));
+    warnSpy.mockRestore();
+  });
+
+  it('logt een waarschuwing wanneer er geen bedrijfsadres ingesteld is in Bedrijfsgegevens — idem, 7/9/2026', async () => {
+    const { prisma } = createFakePrisma({ existingAddress: null });
+    const client = fakeClient(JANSSENS_ADDRESS);
+    const distanceService: DistanceService = { getDrivingDistanceMetersOneWay: vi.fn(async () => 12345) };
+    const companySettingsService = { get: async () => ({ addressLine: null }) } as unknown as CompanySettingsService;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const service = new ProjectSyncService(prisma, client, distanceService, companySettingsService);
+    await service.syncAll();
+    await flushBackgroundKmWork();
+
+    expect(distanceService.getDrivingDistanceMetersOneWay).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('geen bedrijfsadres ingesteld'));
+    warnSpy.mockRestore();
+  });
 });
