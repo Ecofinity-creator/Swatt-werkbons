@@ -191,15 +191,29 @@ export class ProjectSyncService {
       ]),
     );
 
-    for (const { row, customer: ref } of rowsWithCustomer) {
+    // Op vraag (7/9/2026, 5e ronde): bij 1507 projecthreads bleek deze lus
+    // zelf (twee sequentiële databankschrijvingen per project, telkens
+    // afgewacht vóór de volgende) al te traag om zeker af te ronden binnen
+    // Render's requesttimeout — een project ver in de lijst (zoals het
+    // testproject hier) kreeg zijn beurt dan gewoon nooit, met een
+    // afgebroken/mislukte aanvraag tot gevolg, VOOR er ook maar één
+    // km-specifieke log kon verschijnen. Bewust dezelfde begrensd-parallelle
+    // aanpak als recomputeKmDistancesBounded() hieronder — bewust GEEN
+    // Redis/BullMQ-achtergrondtaak (zie de toelichting daar). Race-condities
+    // op localCustomerCache (twee projecten met dezelfde klant tegelijk
+    // verwerkt) leiden in het slechtste geval tot één overbodige, maar
+    // onschadelijke dubbele customer-upsert (idempotent op teamleaderId) —
+    // nooit tot verkeerde data.
+    const CUSTOMER_PROJECT_UPSERT_CONCURRENCY = 10;
+    let upsertCursor = 0;
+    const processNextRow = async (): Promise<void> => {
+      const index = upsertCursor;
+      upsertCursor += 1;
+      if (index >= rowsWithCustomer.length) return;
+      const { row, customer: ref } = rowsWithCustomer[index]!;
+
       const cacheKey = `${ref.type}:${ref.id}`;
       const details = customerDetailsByKey.get(cacheKey);
-      if (row.name.toLowerCase().includes('sanitair')) {
-        // eslint-disable-next-line no-console
-        console.log(
-          `Km-diagnose: project "${row.name}" zoekt cacheKey "${cacheKey}" op — ${details ? `GEVONDEN (${details.name})` : 'NIET GEVONDEN (dit project wordt overgeslagen als "geen klant gekoppeld")'}.`,
-        );
-      }
       if (!details) {
         // Klant stond nog in het project, maar kon niet (meer) opgehaald worden
         // via contacts.list/companies.list (bv. intussen verwijderd in
@@ -208,7 +222,7 @@ export class ProjectSyncService {
         // crashen (business rule 9 — externe API-eigenaardigheden mogen nooit
         // lokale data laten verloren gaan).
         skippedWithoutCustomerCount += 1;
-        continue;
+        return processNextRow();
       }
 
       let localCustomer = localCustomerCache.get(cacheKey);
@@ -239,19 +253,6 @@ export class ProjectSyncService {
         localCustomerCache.set(cacheKey, localCustomer);
       }
 
-      // Op vraag (7/9/2026, diagnose, 4e ronde): bevestigd dat de matching
-      // (cacheKey → contact) correct werkt en het opgehaalde adres correct
-      // en volledig is — toch bleef "afstand = onbekend" na een sync.
-      // Gericht op het bevestigde contact-ID van Ruben Mazzier zelf, om
-      // precies te zien wat er ACHTERAF, na de upsert(s), effectief in de
-      // databank terechtkomt.
-      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
-        // eslint-disable-next-line no-console
-        console.log(
-          `Km-diagnose: na upsert voor project "${row.name}" (${row.id}) — details.address="${details.address}", localCustomer.address="${localCustomer.address}".`,
-        );
-      }
-
       const upsertedProject = await this.prisma.project.upsert({
         where: { teamleaderId: row.id },
         create: {
@@ -280,7 +281,9 @@ export class ProjectSyncService {
       });
       if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
         // eslint-disable-next-line no-console
-        console.log(`Km-diagnose: project-upsert teruggegeven, opgeslagen address="${upsertedProject.address}" voor project ${upsertedProject.id}.`);
+        console.log(
+          `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
+        );
       }
       seenTeamleaderIds.push(row.id);
 
@@ -309,7 +312,12 @@ export class ProjectSyncService {
           `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
         );
       }
-    }
+
+      return processNextRow();
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(CUSTOMER_PROJECT_UPSERT_CONCURRENCY, rowsWithCustomer.length) }, () => processNextRow()),
+    );
 
     // Business rule 8: een project dat niet meer in Teamleader voorkomt wordt
     // gearchiveerd, nooit verwijderd — bestaande werkbon-historiek blijft intact.

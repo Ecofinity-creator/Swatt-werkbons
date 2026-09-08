@@ -1,0 +1,138 @@
+From b7ace9a9ff40523618aeafeafb75d8d6bd84ec39 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 8 Sep 2026 05:38:59 +0000
+Subject: [PATCH] =?UTF-8?q?Fix=20(fundamenteel):=20hoofdlus=20van=20projec?=
+ =?UTF-8?q?tsynchronisatie=20zelf=20ook=20begrensd=20parallel=20=E2=80=94?=
+ =?UTF-8?q?=20bij=201507=20projecten=20geraakte=20een=20project=20ver=20in?=
+ =?UTF-8?q?=20de=20lijst=20nooit=20verwerkt?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Doorslaggevende ontdekking (7/9/2026, 10e ronde): na een sync verscheen
+enkel de EERSTE diagnostische log (klant-referentie) voor het testproject,
+maar GEEN van de latere logs (matching, upsert) — ondanks dat eerdere
+losse tests bevestigden dat matching en adres beide correct zijn. Bij
+1507 projecten in het Teamleader-account, met de hoofdlus die per project
+TWEE sequentiële, afgewachte databankschrijvingen deed (customer-upsert +
+project-upsert), bleek deze lus zelf — niet enkel de km-specifieke
+batchverwerking uit eerdere fixes — te traag om zeker binnen Render's
+requesttimeout te blijven. Een project positioned ver in de 1507-lijst
+kreeg daardoor gewoonweg nooit zijn beurt binnen één sync-aanvraag.
+
+Fix: dezelfde begrensd-parallelle aanpak (10 tegelijk) die eerder al
+toegepast werd op de km-herberekeningen, nu ook op de hoofdlus zelf
+(customer-/project-upsert per rij). Race-condities op de lokale
+customer-cache (twee projecten met dezelfde klant tegelijk verwerkt)
+leiden in het slechtste geval tot één overbodige maar onschadelijke
+dubbele customer-upsert (idempotent op teamleaderId) — nooit tot
+verkeerde of verloren data (business rule 9 blijft volledig gelden).
+
+De tijdelijke, te brede "sanitair"-diagnoselog uit een eerdere ronde is
+vervangen door de precieze, op het bevestigde contact-ID gerichte versie
+(al aanwezig, nu behouden binnen de nieuwe parallelle structuur).
+
+Verificatie: backend-testsuite 227 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../teamleader/project-sync.service.ts        | 54 +++++++++++--------
+ 1 file changed, 31 insertions(+), 23 deletions(-)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 16ad92e..73a5f7f 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -191,15 +191,29 @@ export class ProjectSyncService {
+       ]),
+     );
+ 
+-    for (const { row, customer: ref } of rowsWithCustomer) {
++    // Op vraag (7/9/2026, 5e ronde): bij 1507 projecthreads bleek deze lus
++    // zelf (twee sequentiële databankschrijvingen per project, telkens
++    // afgewacht vóór de volgende) al te traag om zeker af te ronden binnen
++    // Render's requesttimeout — een project ver in de lijst (zoals het
++    // testproject hier) kreeg zijn beurt dan gewoon nooit, met een
++    // afgebroken/mislukte aanvraag tot gevolg, VOOR er ook maar één
++    // km-specifieke log kon verschijnen. Bewust dezelfde begrensd-parallelle
++    // aanpak als recomputeKmDistancesBounded() hieronder — bewust GEEN
++    // Redis/BullMQ-achtergrondtaak (zie de toelichting daar). Race-condities
++    // op localCustomerCache (twee projecten met dezelfde klant tegelijk
++    // verwerkt) leiden in het slechtste geval tot één overbodige, maar
++    // onschadelijke dubbele customer-upsert (idempotent op teamleaderId) —
++    // nooit tot verkeerde data.
++    const CUSTOMER_PROJECT_UPSERT_CONCURRENCY = 10;
++    let upsertCursor = 0;
++    const processNextRow = async (): Promise<void> => {
++      const index = upsertCursor;
++      upsertCursor += 1;
++      if (index >= rowsWithCustomer.length) return;
++      const { row, customer: ref } = rowsWithCustomer[index]!;
++
+       const cacheKey = `${ref.type}:${ref.id}`;
+       const details = customerDetailsByKey.get(cacheKey);
+-      if (row.name.toLowerCase().includes('sanitair')) {
+-        // eslint-disable-next-line no-console
+-        console.log(
+-          `Km-diagnose: project "${row.name}" zoekt cacheKey "${cacheKey}" op — ${details ? `GEVONDEN (${details.name})` : 'NIET GEVONDEN (dit project wordt overgeslagen als "geen klant gekoppeld")'}.`,
+-        );
+-      }
+       if (!details) {
+         // Klant stond nog in het project, maar kon niet (meer) opgehaald worden
+         // via contacts.list/companies.list (bv. intussen verwijderd in
+@@ -208,7 +222,7 @@ export class ProjectSyncService {
+         // crashen (business rule 9 — externe API-eigenaardigheden mogen nooit
+         // lokale data laten verloren gaan).
+         skippedWithoutCustomerCount += 1;
+-        continue;
++        return processNextRow();
+       }
+ 
+       let localCustomer = localCustomerCache.get(cacheKey);
+@@ -239,19 +253,6 @@ export class ProjectSyncService {
+         localCustomerCache.set(cacheKey, localCustomer);
+       }
+ 
+-      // Op vraag (7/9/2026, diagnose, 4e ronde): bevestigd dat de matching
+-      // (cacheKey → contact) correct werkt en het opgehaalde adres correct
+-      // en volledig is — toch bleef "afstand = onbekend" na een sync.
+-      // Gericht op het bevestigde contact-ID van Ruben Mazzier zelf, om
+-      // precies te zien wat er ACHTERAF, na de upsert(s), effectief in de
+-      // databank terechtkomt.
+-      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+-        // eslint-disable-next-line no-console
+-        console.log(
+-          `Km-diagnose: na upsert voor project "${row.name}" (${row.id}) — details.address="${details.address}", localCustomer.address="${localCustomer.address}".`,
+-        );
+-      }
+-
+       const upsertedProject = await this.prisma.project.upsert({
+         where: { teamleaderId: row.id },
+         create: {
+@@ -280,7 +281,9 @@ export class ProjectSyncService {
+       });
+       if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+         // eslint-disable-next-line no-console
+-        console.log(`Km-diagnose: project-upsert teruggegeven, opgeslagen address="${upsertedProject.address}" voor project ${upsertedProject.id}.`);
++        console.log(
++          `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
++        );
+       }
+       seenTeamleaderIds.push(row.id);
+ 
+@@ -309,7 +312,12 @@ export class ProjectSyncService {
+           `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
+         );
+       }
+-    }
++
++      return processNextRow();
++    };
++    await Promise.all(
++      Array.from({ length: Math.min(CUSTOMER_PROJECT_UPSERT_CONCURRENCY, rowsWithCustomer.length) }, () => processNextRow()),
++    );
+ 
+     // Business rule 8: een project dat niet meer in Teamleader voorkomt wordt
+     // gearchiveerd, nooit verwijderd — bestaande werkbon-historiek blijft intact.
+-- 
+2.43.0
+
