@@ -601,7 +601,7 @@ export interface WorkOrderSummary {
    * te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
    * kmAmountCents zelf leeg is — zie WorkOrderReviewPage.tsx.
    */
-  kmDebug: { projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
+  kmDebug: { projectTeamleaderId: string; customerName: string; projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
   createdByEmployeeDisplayName: string;
   createdAt: string;
   timeEntries: WorkOrderTimeEntrySummary[];

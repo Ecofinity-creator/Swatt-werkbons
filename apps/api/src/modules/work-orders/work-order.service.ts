@@ -117,6 +117,8 @@ export interface WorkOrderRecord {
     name: string;
     projectNumber: string | null;
     address: string | null;
+    /** Op vraag (7/9/2026, diagnose): het Teamleader-project-ID zelf, blootgesteld om te kunnen bevestigen of meerdere werkbonnen met dezelfde weergavenaam wel degelijk naar hetzelfde lokale/Teamleader-project verwijzen. */
+    teamleaderId: string;
     /** Zie de toelichting bij WorkOrder.kmAmountCents hierboven — de rijafstand zelf (één richting), om op de PDF te kunnen tonen hoeveel km er precies verrekend is. */
     kmDistanceOneWayMeters: number | null;
     /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */

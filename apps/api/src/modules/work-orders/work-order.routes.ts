@@ -491,6 +491,8 @@ async function toSummary(
     kmAmountCents,
     // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
     kmDebug: {
+      projectTeamleaderId: workOrder.project.teamleaderId,
+      customerName: workOrder.project.customer.name,
       projectKmDistanceOneWayMeters,
       companyKmRateCents: companySettingsForKm.kmRateCents,
     },

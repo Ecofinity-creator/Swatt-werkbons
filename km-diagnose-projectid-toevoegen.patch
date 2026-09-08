@@ -1,0 +1,89 @@
+From bacf3b09be3b65bc4e241b3f0e1db6a6d64c594a Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 8 Sep 2026 06:11:39 +0000
+Subject: [PATCH] Km-diagnose uitgebreid met het exacte Teamleader-project-ID
+ en klantnaam
+
+Vervolg (7/9/2026, 7e ronde): een succesvolle, volledige synchronisatie
+("1509 project(en) gesynchroniseerd, 3 overgeslagen") loste het probleem
+nog steeds niet op voor een NIEUWE werkbon (WB-2026-000029) op hetzelfde
+project. Vermoeden: mogelijk bestaan er meerdere, verschillende lokale
+Project-rijen die allemaal als "Aanpassen sanitair water" weergegeven
+worden (bv. door eerdere testprojecten met dezelfde naam), waardoor
+verschillende werkbonnen toch naar een ANDER onderliggend project kunnen
+verwijzen dan hetgeen tot nu toe via de logs opgevolgd werd.
+
+WorkOrderRecord/WorkOrderSummary.kmDebug toont nu ook het exacte
+Teamleader-project-ID (project.teamleaderId) en de klantnaam, zodat
+rechtstreeks op het scherm te vergelijken valt of opeenvolgende
+werkbonnen met dezelfde weergavenaam wel degelijk naar hetzelfde
+onderliggende project verwijzen.
+
+Verificatie: backend-testsuite 229 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint backend+
+frontend schoon, frontend-productiebuild slaagt.
+---
+ apps/api/src/modules/work-orders/work-order.routes.ts  | 2 ++
+ apps/api/src/modules/work-orders/work-order.service.ts | 2 ++
+ apps/web/src/pages/WorkOrderReviewPage.tsx             | 5 +++--
+ packages/shared-types/src/index.ts                     | 2 +-
+ 4 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/apps/api/src/modules/work-orders/work-order.routes.ts b/apps/api/src/modules/work-orders/work-order.routes.ts
+index 2d8822f..9212a37 100644
+--- a/apps/api/src/modules/work-orders/work-order.routes.ts
++++ b/apps/api/src/modules/work-orders/work-order.routes.ts
+@@ -491,6 +491,8 @@ async function toSummary(
+     kmAmountCents,
+     // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
+     kmDebug: {
++      projectTeamleaderId: workOrder.project.teamleaderId,
++      customerName: workOrder.project.customer.name,
+       projectKmDistanceOneWayMeters,
+       companyKmRateCents: companySettingsForKm.kmRateCents,
+     },
+diff --git a/apps/api/src/modules/work-orders/work-order.service.ts b/apps/api/src/modules/work-orders/work-order.service.ts
+index 408a976..7a5b0e4 100644
+--- a/apps/api/src/modules/work-orders/work-order.service.ts
++++ b/apps/api/src/modules/work-orders/work-order.service.ts
+@@ -117,6 +117,8 @@ export interface WorkOrderRecord {
+     name: string;
+     projectNumber: string | null;
+     address: string | null;
++    /** Op vraag (7/9/2026, diagnose): het Teamleader-project-ID zelf, blootgesteld om te kunnen bevestigen of meerdere werkbonnen met dezelfde weergavenaam wel degelijk naar hetzelfde lokale/Teamleader-project verwijzen. */
++    teamleaderId: string;
+     /** Zie de toelichting bij WorkOrder.kmAmountCents hierboven — de rijafstand zelf (één richting), om op de PDF te kunnen tonen hoeveel km er precies verrekend is. */
+     kmDistanceOneWayMeters: number | null;
+     /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
+diff --git a/apps/web/src/pages/WorkOrderReviewPage.tsx b/apps/web/src/pages/WorkOrderReviewPage.tsx
+index 66e7eda..27c1c25 100644
+--- a/apps/web/src/pages/WorkOrderReviewPage.tsx
++++ b/apps/web/src/pages/WorkOrderReviewPage.tsx
+@@ -893,8 +893,9 @@ function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrder
+       {/* Op vraag (7/9/2026, debug-traject): toont nu ALTIJD wanneer showKmDebug aan staat, ook al is kmAmountCents wél gezet — sluit uit dat de eerdere, striktere voorwaarde zelf ergens de boosdoener was. Terug vernauwen zodra het onderliggende km-probleem bevestigd en opgelost is. */}
+       {showKmDebug && (
+         <p className="mt-1 text-right text-[11px] text-neutral-500">
+-          (km-diagnose: afstand = {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief ={' '}
+-          {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'} cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'})
++          (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, afstand ={' '}
++          {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief = {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'}{' '}
++          cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'})
+         </p>
+       )}
+     </div>
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 9fb3ed2..a8adf87 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -601,7 +601,7 @@ export interface WorkOrderSummary {
+    * te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
+    * kmAmountCents zelf leeg is — zie WorkOrderReviewPage.tsx.
+    */
+-  kmDebug: { projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
++  kmDebug: { projectTeamleaderId: string; customerName: string; projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
+   createdByEmployeeDisplayName: string;
+   createdAt: string;
+   timeEntries: WorkOrderTimeEntrySummary[];
+-- 
+2.43.0
+

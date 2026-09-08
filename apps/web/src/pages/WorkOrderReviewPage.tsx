@@ -893,8 +893,9 @@ function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrder
       {/* Op vraag (7/9/2026, debug-traject): toont nu ALTIJD wanneer showKmDebug aan staat, ook al is kmAmountCents wél gezet — sluit uit dat de eerdere, striktere voorwaarde zelf ergens de boosdoener was. Terug vernauwen zodra het onderliggende km-probleem bevestigd en opgelost is. */}
       {showKmDebug && (
         <p className="mt-1 text-right text-[11px] text-neutral-500">
-          (km-diagnose: afstand = {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief ={' '}
-          {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'} cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'})
+          (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, afstand ={' '}
+          {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief = {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'}{' '}
+          cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'})
         </p>
       )}
     </div>
