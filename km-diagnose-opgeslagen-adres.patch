@@ -1,0 +1,77 @@
+From 899bda773fc246a6d1abe74905a08a02359354a0 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Mon, 7 Sep 2026 15:42:31 +0000
+Subject: [PATCH] Tijdelijke diagnose (4e ronde): log het effectief opgeslagen
+ project-adres na de upsert zelf
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Vervolg (7/9/2026): de matching (cacheKey → contact) is bevestigd correct
+("GEVONDEN (Ruben Mazzier)"), en het opgehaalde adres zelf is bevestigd
+volledig en correct. Toch bleef "afstand = onbekend" na een sync én na
+het openen van de werkbon (waar de on-demand berekening had moeten
+aanslaan). De enige overgebleven stap die nog niet rechtstreeks
+gecontroleerd is: wat er ECHT in de databank terechtkomt na de
+project-upsert zelf.
+
+Twee nieuwe, gerichte logs (enkel voor het bevestigde contact-ID van
+Ruben Mazzier, 167eaca6-f41d-048c-bf75-b10ac48f8faa, om de te brede
+"sanitair"-log van de vorige ronde te vermijden):
+1. Vlak vóór de project-upsert: welke waarde (details.address /
+   localCustomer.address) er ZAL doorgegeven worden.
+2. Vlak NA de project-upsert: welke waarde Prisma effectief teruggeeft
+   als opgeslagen `address`-veld.
+
+Als deze twee waarden overeenkomen met het verwachte adres, maar de
+werkbon-pagina toont nog steeds "onbekend", dan ligt het probleem niet
+meer bij de synchronisatie zelf maar bij het UITLEZEN ervan (bv. de
+on-demand berekening in work-order.routes.ts, of een caching-laag) — en
+dat wordt dan het volgende onderzoeksspoor.
+
+Verificatie: backend-testsuite 227 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../teamleader/project-sync.service.ts        | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index c4a7729..16ad92e 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -239,7 +239,20 @@ export class ProjectSyncService {
+         localCustomerCache.set(cacheKey, localCustomer);
+       }
+ 
+-      await this.prisma.project.upsert({
++      // Op vraag (7/9/2026, diagnose, 4e ronde): bevestigd dat de matching
++      // (cacheKey → contact) correct werkt en het opgehaalde adres correct
++      // en volledig is — toch bleef "afstand = onbekend" na een sync.
++      // Gericht op het bevestigde contact-ID van Ruben Mazzier zelf, om
++      // precies te zien wat er ACHTERAF, na de upsert(s), effectief in de
++      // databank terechtkomt.
++      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
++        // eslint-disable-next-line no-console
++        console.log(
++          `Km-diagnose: na upsert voor project "${row.name}" (${row.id}) — details.address="${details.address}", localCustomer.address="${localCustomer.address}".`,
++        );
++      }
++
++      const upsertedProject = await this.prisma.project.upsert({
+         where: { teamleaderId: row.id },
+         create: {
+           teamleaderId: row.id,
+@@ -265,6 +278,10 @@ export class ProjectSyncService {
+           lastSyncedAt: new Date(),
+         },
+       });
++      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
++        // eslint-disable-next-line no-console
++        console.log(`Km-diagnose: project-upsert teruggegeven, opgeslagen address="${upsertedProject.address}" voor project ${upsertedProject.id}.`);
++      }
+       seenTeamleaderIds.push(row.id);
+ 
+       // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
+-- 
+2.43.0
+

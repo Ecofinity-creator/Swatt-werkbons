@@ -239,7 +239,20 @@ export class ProjectSyncService {
         localCustomerCache.set(cacheKey, localCustomer);
       }
 
-      await this.prisma.project.upsert({
+      // Op vraag (7/9/2026, diagnose, 4e ronde): bevestigd dat de matching
+      // (cacheKey → contact) correct werkt en het opgehaalde adres correct
+      // en volledig is — toch bleef "afstand = onbekend" na een sync.
+      // Gericht op het bevestigde contact-ID van Ruben Mazzier zelf, om
+      // precies te zien wat er ACHTERAF, na de upsert(s), effectief in de
+      // databank terechtkomt.
+      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+        // eslint-disable-next-line no-console
+        console.log(
+          `Km-diagnose: na upsert voor project "${row.name}" (${row.id}) — details.address="${details.address}", localCustomer.address="${localCustomer.address}".`,
+        );
+      }
+
+      const upsertedProject = await this.prisma.project.upsert({
         where: { teamleaderId: row.id },
         create: {
           teamleaderId: row.id,
@@ -265,6 +278,10 @@ export class ProjectSyncService {
           lastSyncedAt: new Date(),
         },
       });
+      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+        // eslint-disable-next-line no-console
+        console.log(`Km-diagnose: project-upsert teruggegeven, opgeslagen address="${upsertedProject.address}" voor project ${upsertedProject.id}.`);
+      }
       seenTeamleaderIds.push(row.id);
 
       // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
