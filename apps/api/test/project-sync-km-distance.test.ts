@@ -33,6 +33,7 @@ function createFakePrisma(opts: { existingAddress: string | null; existingKmDist
       },
     },
     project: {
+        findUnique: async () => null,
       findMany: async () => [
         { teamleaderId: projectRow.teamleaderId, address: projectRow.address, kmDistanceOneWayMeters: projectRow.kmDistanceOneWayMeters },
       ],
@@ -124,6 +125,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
         upsert: async ({ where }: { where: { teamleaderId: string } }) => customerRows.get(where.teamleaderId)!,
       },
       project: {
+        findUnique: async () => null,
         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: p.kmDistanceOneWayMeters })),
         upsert: async ({ where }: { where: { teamleaderId: string } }) => projectRows.find((p) => p.teamleaderId === where.teamleaderId)!,
         updateMany: async () => ({ count: 0 }),
@@ -258,6 +260,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
       teamleaderConnection: { findUnique: async () => ({ id: 'singleton', projectsModule: 'LEGACY' }) },
       customer: { upsert: async ({ where }: { where: { teamleaderId: string } }) => customerRows.get(where.teamleaderId)! },
       project: {
+        findUnique: async () => null,
         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: p.kmDistanceOneWayMeters })),
         upsert: async ({ where }: { where: { teamleaderId: string } }) => projectRows.find((p) => p.teamleaderId === where.teamleaderId)!,
         updateMany: async () => ({ count: 0 }),
@@ -345,6 +348,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
         }),
       },
       project: {
+        findUnique: async () => null,
         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
         upsert: async ({ where }: { where: { teamleaderId: string } }) => {
           const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
@@ -407,6 +411,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
         }),
       },
       project: {
+        findUnique: async () => null,
         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
         upsert: async ({ where }: { where: { teamleaderId: string } }) => {
           const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;

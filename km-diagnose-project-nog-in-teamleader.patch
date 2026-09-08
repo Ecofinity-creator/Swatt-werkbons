@@ -1,0 +1,117 @@
+From cccf3bc11a044d3bf6742c9b2c4c4c3750143336 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 8 Sep 2026 06:37:34 +0000
+Subject: [PATCH] Tijdelijke diagnose: controleer of het project nog voorkomt
+ in Teamleader se eigen projectenlijst
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Gerapporteerd (7/9/2026, 8e ronde): het project-ID dat de werkbon effectief
+gebruikt (fcd2b84e-f3c6-0a91-8762-39ba5339cecf) kwam in GEEN van de eerdere
+"sanitair"-gefilterde diagnoselogs voor. Vermoeden: dit project komt niet
+(meer) voor in Teamleader se eigen projects.list-respons — bv.
+gearchiveerd of verwijderd in Teamleader zelf — waardoor de rest van de
+synchronisatie het structureel nooit bereikt, ook al laat de app
+blijkbaar toe om er nieuwe werkbonnen op aan te maken (business rule 8
+archiveert dan wel de lokale rij, maar dat verhindert werkbon-aanmaak
+niet — een apart punt om later te bekijken indien bevestigd).
+
+Twee nieuwe, gerichte logs:
+1. Komt dit exacte Teamleader-ID nog voor in de vers opgehaalde
+   projects.list-respons van deze sync-run? Zo ja: met welke naam/status/
+   klant-referentie.
+2. Wat is de huidige lokale databankstatus van dit project (naam, adres,
+   afstand, isArchivedInTl, laatste synctijdstip) vóór deze sync-run?
+
+Tests: alle fake-Prisma-fixtures in dit testbestand aangevuld met
+`project.findUnique` (nodig voor de nieuwe query), 12 tests blijven
+slagen.
+
+Verificatie: backend-testsuite 229 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../teamleader/project-sync.service.ts        | 22 +++++++++++++++++++
+ .../api/test/project-sync-km-distance.test.ts |  5 +++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 970bf79..9feae92 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -132,6 +132,28 @@ export class ProjectSyncService {
+       throw this.wrapTeamleaderError(err);
+     }
+ 
++    // Op vraag (7/9/2026, 8e ronde): het project-ID dat de werkbon effectief
++    // gebruikt (fcd2b84e-f3c6-0a91-8762-39ba5339cecf) kwam in geen enkele
++    // eerdere "sanitair"-gefilterde log voor — vermoeden: dit project komt
++    // niet (meer) voor in Teamleader se eigen projects.list-respons (bv.
++    // gearchiveerd/verwijderd in Teamleader), waardoor de rest van deze
++    // sync-functie het structureel nooit bereikt en de lokale rij dus nooit
++    // een adres/afstand krijgt — ook al laat de app blijkbaar toe om er
++    // nieuwe werkbonnen op aan te maken.
++    const targetRow = rows.find((row) => row.id === 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf');
++    // eslint-disable-next-line no-console
++    console.log(
++      targetRow
++        ? `Km-diagnose: project fcd2b84e... komt WEL voor in de verse Teamleader-projectenlijst — naam="${targetRow.name}", status="${targetRow.status}", klant-referentie=${JSON.stringify(targetRow.customer)}.`
++        : `Km-diagnose: project fcd2b84e... komt NIET (meer) voor in de verse Teamleader-projectenlijst (${rows.length} projecten totaal opgehaald) — waarschijnlijk gearchiveerd/verwijderd in Teamleader zelf.`,
++    );
++    const localTargetProject = await this.prisma.project.findUnique({
++      where: { teamleaderId: 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf' },
++      select: { id: true, name: true, address: true, kmDistanceOneWayMeters: true, isArchivedInTl: true, lastSyncedAt: true },
++    });
++    // eslint-disable-next-line no-console
++    console.log(`Km-diagnose: lokale databankstatus voor project fcd2b84e... (vóór deze sync-run):`, JSON.stringify(localTargetProject));
++
+     let skippedWithoutCustomerCount = 0;
+     const rowsWithCustomer: { row: NormalizedProjectRow; customer: TeamleaderCustomerRef }[] = [];
+     for (const row of rows) {
+diff --git a/apps/api/test/project-sync-km-distance.test.ts b/apps/api/test/project-sync-km-distance.test.ts
+index 7d6e66f..101245b 100644
+--- a/apps/api/test/project-sync-km-distance.test.ts
++++ b/apps/api/test/project-sync-km-distance.test.ts
+@@ -33,6 +33,7 @@ function createFakePrisma(opts: { existingAddress: string | null; existingKmDist
+       },
+     },
+     project: {
++        findUnique: async () => null,
+       findMany: async () => [
+         { teamleaderId: projectRow.teamleaderId, address: projectRow.address, kmDistanceOneWayMeters: projectRow.kmDistanceOneWayMeters },
+       ],
+@@ -124,6 +125,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+         upsert: async ({ where }: { where: { teamleaderId: string } }) => customerRows.get(where.teamleaderId)!,
+       },
+       project: {
++        findUnique: async () => null,
+         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: p.kmDistanceOneWayMeters })),
+         upsert: async ({ where }: { where: { teamleaderId: string } }) => projectRows.find((p) => p.teamleaderId === where.teamleaderId)!,
+         updateMany: async () => ({ count: 0 }),
+@@ -258,6 +260,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+       teamleaderConnection: { findUnique: async () => ({ id: 'singleton', projectsModule: 'LEGACY' }) },
+       customer: { upsert: async ({ where }: { where: { teamleaderId: string } }) => customerRows.get(where.teamleaderId)! },
+       project: {
++        findUnique: async () => null,
+         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: p.kmDistanceOneWayMeters })),
+         upsert: async ({ where }: { where: { teamleaderId: string } }) => projectRows.find((p) => p.teamleaderId === where.teamleaderId)!,
+         updateMany: async () => ({ count: 0 }),
+@@ -345,6 +348,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+         }),
+       },
+       project: {
++        findUnique: async () => null,
+         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
+         upsert: async ({ where }: { where: { teamleaderId: string } }) => {
+           const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
+@@ -407,6 +411,7 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+         }),
+       },
+       project: {
++        findUnique: async () => null,
+         findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
+         upsert: async ({ where }: { where: { teamleaderId: string } }) => {
+           const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
+-- 
+2.43.0
+

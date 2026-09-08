@@ -132,6 +132,28 @@ export class ProjectSyncService {
       throw this.wrapTeamleaderError(err);
     }
 
+    // Op vraag (7/9/2026, 8e ronde): het project-ID dat de werkbon effectief
+    // gebruikt (fcd2b84e-f3c6-0a91-8762-39ba5339cecf) kwam in geen enkele
+    // eerdere "sanitair"-gefilterde log voor — vermoeden: dit project komt
+    // niet (meer) voor in Teamleader se eigen projects.list-respons (bv.
+    // gearchiveerd/verwijderd in Teamleader), waardoor de rest van deze
+    // sync-functie het structureel nooit bereikt en de lokale rij dus nooit
+    // een adres/afstand krijgt — ook al laat de app blijkbaar toe om er
+    // nieuwe werkbonnen op aan te maken.
+    const targetRow = rows.find((row) => row.id === 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf');
+    // eslint-disable-next-line no-console
+    console.log(
+      targetRow
+        ? `Km-diagnose: project fcd2b84e... komt WEL voor in de verse Teamleader-projectenlijst — naam="${targetRow.name}", status="${targetRow.status}", klant-referentie=${JSON.stringify(targetRow.customer)}.`
+        : `Km-diagnose: project fcd2b84e... komt NIET (meer) voor in de verse Teamleader-projectenlijst (${rows.length} projecten totaal opgehaald) — waarschijnlijk gearchiveerd/verwijderd in Teamleader zelf.`,
+    );
+    const localTargetProject = await this.prisma.project.findUnique({
+      where: { teamleaderId: 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf' },
+      select: { id: true, name: true, address: true, kmDistanceOneWayMeters: true, isArchivedInTl: true, lastSyncedAt: true },
+    });
+    // eslint-disable-next-line no-console
+    console.log(`Km-diagnose: lokale databankstatus voor project fcd2b84e... (vóór deze sync-run):`, JSON.stringify(localTargetProject));
+
     let skippedWithoutCustomerCount = 0;
     const rowsWithCustomer: { row: NormalizedProjectRow; customer: TeamleaderCustomerRef }[] = [];
     for (const row of rows) {
