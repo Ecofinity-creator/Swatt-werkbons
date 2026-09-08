@@ -312,4 +312,147 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Project 16, Project 17, Project 18, Project 19, Project 20'));
     warnSpy.mockRestore();
   });
+
+  it('upsert de klant maar ÉÉN keer, ook als meerdere projecten met dezelfde klant tegelijk (begrensd parallel) verwerkt worden — race-condition-fix (7/9/2026, 6e ronde: "na synchroniseren wordt er niets meer gevonden")', async () => {
+    // 12 projecten die ALLEMAAL dezelfde klant delen (heel gewoon bij 1507
+    // projecten in de praktijk) — met CUSTOMER_PROJECT_UPSERT_CONCURRENCY
+    // (10) zullen minstens 10 daarvan gegarandeerd gelijktijdig proberen de
+    // klant op te zoeken/aan te maken.
+    const PROJECT_COUNT = 12;
+    const projectRows = Array.from({ length: PROJECT_COUNT }, (_, i) => ({
+      id: `proj-${i + 1}`,
+      teamleaderId: `tl-proj-${i + 1}`,
+      address: null as string | null,
+    }));
+    let customerUpsertCallCount = 0;
+    let resolveFirstUpsert: (() => void) | undefined;
+    const firstUpsertStarted = new Promise<void>((resolve) => {
+      resolveFirstUpsert = resolve;
+    });
+
+    const prisma = {
+      teamleaderConnection: { findUnique: async () => ({ id: 'singleton', projectsModule: 'LEGACY' }) },
+      customer: {
+        upsert: vi.fn(async () => {
+          customerUpsertCallCount += 1;
+          resolveFirstUpsert?.();
+          // Kunstmatige vertraging — simuleert een echte databank-round-trip
+          // die lang genoeg duurt opdat andere, gelijktijdige projecten voor
+          // dezelfde klant hun kans zouden krijgen om (vóór de fix) een
+          // eigen, dubbele upsert te starten.
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return { id: 'cust-1', address: 'Gedeeld adres 1, 2000 Antwerpen' };
+        }),
+      },
+      project: {
+        findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
+        upsert: async ({ where }: { where: { teamleaderId: string } }) => {
+          const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
+          row.address = 'Gedeeld adres 1, 2000 Antwerpen';
+          return row;
+        },
+        updateMany: async () => ({ count: 0 }),
+        update: async () => ({}),
+      },
+    } as unknown as PrismaClient;
+
+    const client = {
+      listAll: async (endpoint: string) => {
+        if (endpoint === 'projects.list') {
+          return projectRows.map((p, i) => ({
+            id: p.teamleaderId,
+            reference: `PRO-${i + 1}`,
+            title: `Gedeeld project ${i + 1}`,
+            description: null,
+            status: 'active',
+            customer: { type: 'contact', id: 'tl-comp-gedeeld' }, // ALLE projecten wijzen naar dezelfde klant
+          }));
+        }
+        if (endpoint === 'contacts.list') {
+          return [{ id: 'tl-comp-gedeeld', first_name: 'Gedeelde', last_name: 'Klant', primary_address: { line_1: 'Gedeeld adres 1', postal_code: '2000', city: 'Antwerpen' } }];
+        }
+        if (endpoint === 'companies.list') return [];
+        throw new Error(`onverwacht endpoint in test: ${endpoint}`);
+      },
+    } as unknown as TeamleaderClient;
+
+    const service = new ProjectSyncService(prisma, client);
+    const syncPromise = service.syncAll();
+
+    // Wacht tot de eerste upsert effectief gestart is (garandeert dat de
+    // race-conditie-vensters zich effectief overlappen), dan pas verder.
+    await firstUpsertStarted;
+    await syncPromise;
+
+    expect(customerUpsertCallCount).toBe(1); // was vóór de fix potentieel tot 10 (CONCURRENCY) bij een echte race
+    expect(projectRows.every((p) => p.address === 'Gedeeld adres 1, 2000 Antwerpen')).toBe(true);
+  });
+
+  it('één onverwachte fout bij één project blokkeert de rest van de sync niet — voorkomt dat "niets meer gevonden wordt" na één mislukte rij (7/9/2026, 6e ronde)', async () => {
+    const PROJECT_COUNT = 5;
+    const projectRows = Array.from({ length: PROJECT_COUNT }, (_, i) => ({
+      id: `proj-${i + 1}`,
+      teamleaderId: `tl-proj-${i + 1}`,
+      address: null as string | null,
+    }));
+
+    const prisma = {
+      teamleaderConnection: { findUnique: async () => ({ id: 'singleton', projectsModule: 'LEGACY' }) },
+      customer: {
+        upsert: vi.fn(async ({ where }: { where: { teamleaderId: string } }) => {
+          if (where.teamleaderId === 'tl-comp-3') {
+            throw new Error('Gesimuleerde databankfout (bv. een unique-constraint-race) voor precies één klant');
+          }
+          return { id: `cust-${where.teamleaderId}`, address: 'Een geldig adres, 2000 Antwerpen' };
+        }),
+      },
+      project: {
+        findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
+        upsert: async ({ where }: { where: { teamleaderId: string } }) => {
+          const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
+          row.address = 'Een geldig adres, 2000 Antwerpen';
+          return row;
+        },
+        updateMany: async () => ({ count: 0 }),
+        update: async () => ({}),
+      },
+    } as unknown as PrismaClient;
+
+    const client = {
+      listAll: async (endpoint: string) => {
+        if (endpoint === 'projects.list') {
+          return projectRows.map((p, i) => ({
+            id: p.teamleaderId,
+            reference: `PRO-${i + 1}`,
+            title: `Project ${i + 1}`,
+            description: null,
+            status: 'active',
+            customer: { type: 'contact', id: `tl-comp-${i + 1}` },
+          }));
+        }
+        if (endpoint === 'contacts.list') {
+          return projectRows.map((_, i) => ({
+            id: `tl-comp-${i + 1}`,
+            first_name: `Klant`,
+            last_name: `${i + 1}`,
+            primary_address: { line_1: 'Straat 1', postal_code: '2000', city: 'Antwerpen' },
+          }));
+        }
+        if (endpoint === 'companies.list') return [];
+        throw new Error(`onverwacht endpoint in test: ${endpoint}`);
+      },
+    } as unknown as TeamleaderClient;
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const service = new ProjectSyncService(prisma, client);
+
+    const result = await service.syncAll();
+
+    // Project 3 (met de gesimuleerde fout) is de enige die niet gesynchroniseerd raakt — de andere 4 gewoon wél.
+    expect(result.syncedCount).toBe(4);
+    expect(projectRows.filter((p) => p.address !== null)).toHaveLength(4);
+    expect(projectRows.find((p) => p.teamleaderId === 'tl-proj-3')!.address).toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Onverwachte fout bij het verwerken van project'), expect.any(Error));
+    errorSpy.mockRestore();
+  });
 });

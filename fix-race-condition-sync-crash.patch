@@ -1,0 +1,443 @@
+From 8840e64b91fc9c8414ee54de9162214e7edf7df6 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 8 Sep 2026 05:54:38 +0000
+Subject: [PATCH] Fix (kritiek): race condition in de begrensd-parallelle
+ hoofdlus kon de volledige synchronisatie doen crashen bij gedeelde klanten
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Gerapporteerd (7/9/2026, 6e ronde): "na synchroniseren wordt er niets meer
+gevonden" — een regressie t.o.v. de vorige fix (hoofdlus begrensd
+parallel), waar zelfs de eerste, eenvoudigste diagnostische log niet meer
+verscheen. Root cause: de vorige fix liet meerdere projecten tegelijk
+verwerken zonder rekening te houden met projecten die DEZELFDE klant
+delen (bij 1507 projecten heel gewoon) — twee gelijktijdige projecten
+voor dezelfde klant konden beide `localCustomerCache.get(cacheKey)` als
+"nog niet aanwezig" zien (de eerste upsert was nog niet klaar) en dus
+allebei een EIGEN customer.upsert()-call starten voor exact dezelfde
+teamleaderId. Dit kan op databankniveau een unique-constraint-fout geven,
+die — onopgevangen — de volledige Promise.all() en dus de hele
+sync-aanvraag deed crashen, zonder dat ook maar één project nog verwerkt
+raakte.
+
+Twee onafhankelijke, complementaire fixes:
+1. De klant-cache bewaart nu de PROMISE zelf (synchroon aangemaakt, vóór
+   enige await), niet pas het opgeloste resultaat — gelijktijdige
+   aanvragen voor dezelfde klant wachten voortaan altijd op exact
+   dezelfde, ene upsert-belofte i.p.v. te racen.
+2. Elke rij-verwerking zit nu in een eigen try/catch: een onverwachte
+   fout bij één project (welke oorzaak dan ook) wordt gelogd en die ene
+   rij overgeslagen, maar blokkeert de rest van de synchronisatie nooit
+   meer — business rule 9 letterlijk toegepast op deze nieuwe, parallelle
+   lus, niet enkel op de km-berekening zoals voorheen.
+
+Tests: 2 nieuwe tests — (a) 12 projecten die dezelfde klant delen,
+bevestigt dat customer.upsert() precies 1 keer aangeroepen wordt i.p.v.
+tot 10 keer (CONCURRENCY) bij een echte race; (b) een gesimuleerde fout
+bij exact 1 van de 5 projecten, bevestigt dat de andere 4 gewoon
+succesvol synchroniseren.
+
+Verificatie: backend-testsuite 229 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ .../teamleader/project-sync.service.ts        | 222 ++++++++++--------
+ .../api/test/project-sync-km-distance.test.ts | 143 +++++++++++
+ 2 files changed, 267 insertions(+), 98 deletions(-)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 73a5f7f..970bf79 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -164,7 +164,7 @@ export class ProjectSyncService {
+     // customer.teamleaderId -> onze lokale Customer.id (voorkomt herhaalde
+     // upserts voor dezelfde klant binnen één sync-run — meerdere projecten
+     // delen vaak dezelfde klant).
+-    const localCustomerCache = new Map<string, { id: string; address: string | null }>();
++    const localCustomerCache = new Map<string, Promise<{ id: string; address: string | null }>>();
+     // Op vraag (7/9/2026) — zie de toelichting bij recomputeKmDistancesBounded() hieronder.
+     const projectsNeedingKmRecompute: Array<{ projectTeamleaderId: string; projectName: string; projectAddress: string }> = [];
+     const seenTeamleaderIds: string[] = [];
+@@ -212,104 +212,130 @@ export class ProjectSyncService {
+       if (index >= rowsWithCustomer.length) return;
+       const { row, customer: ref } = rowsWithCustomer[index]!;
+ 
+-      const cacheKey = `${ref.type}:${ref.id}`;
+-      const details = customerDetailsByKey.get(cacheKey);
+-      if (!details) {
+-        // Klant stond nog in het project, maar kon niet (meer) opgehaald worden
+-        // via contacts.list/companies.list (bv. intussen verwijderd in
+-        // Teamleader tussen het ophalen van de projectenlijst en dit moment).
+-        // Zelfde afhandeling als "geen klant gekoppeld": overslaan, niet laten
+-        // crashen (business rule 9 — externe API-eigenaardigheden mogen nooit
+-        // lokale data laten verloren gaan).
+-        skippedWithoutCustomerCount += 1;
+-        return processNextRow();
+-      }
+-
+-      let localCustomer = localCustomerCache.get(cacheKey);
+-      if (!localCustomer) {
+-        const customer = await this.prisma.customer.upsert({
+-          where: { teamleaderId: ref.id },
+-          create: {
+-            teamleaderId: ref.id,
+-            teamleaderType: ref.type,
+-            name: details.name,
+-            address: details.address,
+-            email: details.email,
+-            vatNumber: details.vatNumber,
+-            isArchivedInTl: false,
+-            lastSyncedAt: new Date(),
+-          },
+-          update: {
+-            teamleaderType: ref.type,
+-            name: details.name,
+-            address: details.address,
+-            email: details.email,
+-            vatNumber: details.vatNumber,
+-            isArchivedInTl: false,
+-            lastSyncedAt: new Date(),
+-          },
+-        });
+-        localCustomer = { id: customer.id, address: customer.address };
+-        localCustomerCache.set(cacheKey, localCustomer);
+-      }
+-
+-      const upsertedProject = await this.prisma.project.upsert({
+-        where: { teamleaderId: row.id },
+-        create: {
+-          teamleaderId: row.id,
+-          teamleaderModule: module,
+-          customerId: localCustomer.id,
+-          projectNumber: row.projectNumber,
+-          name: row.name,
+-          description: row.description,
+-          address: localCustomer.address,
+-          status: row.status,
+-          isArchivedInTl: false,
+-          lastSyncedAt: new Date(),
+-        },
+-        update: {
+-          teamleaderModule: module,
+-          customerId: localCustomer.id,
+-          projectNumber: row.projectNumber,
+-          name: row.name,
+-          description: row.description,
+-          address: localCustomer.address,
+-          status: row.status,
+-          isArchivedInTl: false,
+-          lastSyncedAt: new Date(),
+-        },
+-      });
+-      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+-        // eslint-disable-next-line no-console
+-        console.log(
+-          `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
+-        );
+-      }
+-      seenTeamleaderIds.push(row.id);
+-
+-      // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
+-      // gewijzigd is t.o.v. vóór deze upsert, OF de afstand nog nooit
+-      // succesvol berekend werd (kmDistanceOneWayMeters staat nog op
+-      // `null`) — conform sectie 28 ("vraag nooit continu alle gegevens
+-      // opnieuw op"), maar zonder een project blijvend zonder afstand te
+-      // laten zitten enkel omdat het adres toevallig ongewijzigd bleef.
+-      const previousState = previousStateByTeamleaderId.get(row.id);
+-      const addressChanged = localCustomer.address !== previousState?.address;
+-      const neverComputed = previousState?.kmDistanceOneWayMeters == null;
+-      if (localCustomer.address !== null && (addressChanged || neverComputed)) {
+-        projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectName: row.name, projectAddress: localCustomer.address });
+-      } else if (localCustomer.address === null && neverComputed) {
+-        // Op vraag (7/9/2026, 3e ronde van hetzelfde debug-traject): dit was
+-        // tot nu toe een derde, volledig stille faalmodus — een klant zonder
+-        // (volledig) adres in Teamleader (formatAddress() geeft dan `null`
+-        // terug) betekende dat deze project-rij hier simpelweg NOOIT in
+-        // projectsNeedingKmRecompute terechtkwam, dus ook nooit een
+-        // console.error uit recomputeKmDistance() kreeg — een km-vergoeding
+-        // die voor altijd `null` bleef, zonder dat ergens zichtbaar werd
+-        // waarom. Vandaar deze expliciete log hier, vóór dat punt.
++      // Op vraag (7/9/2026, 6e ronde): "na synchroniseren wordt er niets meer
++      // gevonden" — zonder deze try/catch deed ÉÉN mislukte rij (bv. een
++      // resterende race op de databank, of een andere onverwachte fout) de
++      // volledige Promise.all() en dus de hele sync-aanvraag crashen, met
++      // als gevolg dat GEEN ENKEL project nog verwerkt werd — niet enkel het
++      // getroffen project. Business rule 9: een fout op één rij mag de rest
++      // van de synchronisatie nooit blokkeren.
++      try {
++        const cacheKey = `${ref.type}:${ref.id}`;
++        const details = customerDetailsByKey.get(cacheKey);
++        if (!details) {
++          // Klant stond nog in het project, maar kon niet (meer) opgehaald
++          // worden via contacts.list/companies.list (bv. intussen verwijderd
++          // in Teamleader tussen het ophalen van de projectenlijst en dit
++          // moment). Zelfde afhandeling als "geen klant gekoppeld": overslaan.
++          skippedWithoutCustomerCount += 1;
++        } else {
++          // Op vraag (7/9/2026, 6e ronde): de begrensd-parallelle hoofdlus
++          // (vorige fix) introduceerde een echte race condition: meerdere
++          // projecten die dezelfde klant delen (heel gewoon bij 1507
++          // projecten) konden tegelijk `localCustomerCache.get(cacheKey)` als
++          // "nog niet aanwezig" zien (want de EERSTE upsert was nog niet
++          // klaar) en dus allemaal hun EIGEN customer.upsert()-call starten
++          // voor exact dezelfde teamleaderId — wat op databankniveau een
++          // unique-constraint-fout kan geven. Fix: de cache bewaart nu de
++          // PROMISE zelf (synchroon aangemaakt, vóór enige await), zodat
++          // gelijktijdige aanvragen voor dezelfde klant altijd op exact
++          // dezelfde, ene upsert-belofte wachten i.p.v. te racen.
++          let localCustomerPromise: Promise<{ id: string; address: string | null }> | undefined = localCustomerCache.get(cacheKey);
++          if (!localCustomerPromise) {
++            const freshCustomerPromise: Promise<{ id: string; address: string | null }> = this.prisma.customer
++              .upsert({
++                where: { teamleaderId: ref.id },
++                create: {
++                  teamleaderId: ref.id,
++                  teamleaderType: ref.type,
++                  name: details.name,
++                  address: details.address,
++                  email: details.email,
++                  vatNumber: details.vatNumber,
++                  isArchivedInTl: false,
++                  lastSyncedAt: new Date(),
++                },
++                update: {
++                  teamleaderType: ref.type,
++                  name: details.name,
++                  address: details.address,
++                  email: details.email,
++                  vatNumber: details.vatNumber,
++                  isArchivedInTl: false,
++                  lastSyncedAt: new Date(),
++                },
++              })
++              .then((customer) => ({ id: customer.id, address: customer.address }));
++            localCustomerCache.set(cacheKey, freshCustomerPromise);
++            localCustomerPromise = freshCustomerPromise;
++          }
++          const localCustomer = await localCustomerCache.get(cacheKey)!;
++
++          const upsertedProject = await this.prisma.project.upsert({
++            where: { teamleaderId: row.id },
++            create: {
++              teamleaderId: row.id,
++              teamleaderModule: module,
++              customerId: localCustomer.id,
++              projectNumber: row.projectNumber,
++              name: row.name,
++              description: row.description,
++              address: localCustomer.address,
++              status: row.status,
++              isArchivedInTl: false,
++              lastSyncedAt: new Date(),
++            },
++            update: {
++              teamleaderModule: module,
++              customerId: localCustomer.id,
++              projectNumber: row.projectNumber,
++              name: row.name,
++              description: row.description,
++              address: localCustomer.address,
++              status: row.status,
++              isArchivedInTl: false,
++              lastSyncedAt: new Date(),
++            },
++          });
++          if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
++            // eslint-disable-next-line no-console
++            console.log(
++              `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
++            );
++          }
++          seenTeamleaderIds.push(row.id);
++
++          // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
++          // gewijzigd is t.o.v. vóór deze upsert, OF de afstand nog nooit
++          // succesvol berekend werd (kmDistanceOneWayMeters staat nog op
++          // `null`) — conform sectie 28 ("vraag nooit continu alle gegevens
++          // opnieuw op"), maar zonder een project blijvend zonder afstand te
++          // laten zitten enkel omdat het adres toevallig ongewijzigd bleef.
++          const previousState = previousStateByTeamleaderId.get(row.id);
++          const addressChanged = localCustomer.address !== previousState?.address;
++          const neverComputed = previousState?.kmDistanceOneWayMeters == null;
++          if (localCustomer.address !== null && (addressChanged || neverComputed)) {
++            projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectName: row.name, projectAddress: localCustomer.address });
++          } else if (localCustomer.address === null && neverComputed) {
++            // Op vraag (7/9/2026, 3e ronde van hetzelfde debug-traject): dit
++            // was tot nu toe een derde, volledig stille faalmodus — een klant
++            // zonder (volledig) adres in Teamleader (formatAddress() geeft
++            // dan `null` terug) betekende dat deze project-rij hier
++            // simpelweg NOOIT in projectsNeedingKmRecompute terechtkwam, dus
++            // ook nooit een console.error uit recomputeKmDistance() kreeg —
++            // een km-vergoeding die voor altijd `null` bleef, zonder dat
++            // ergens zichtbaar werd waarom. Vandaar deze expliciete log hier.
++            // eslint-disable-next-line no-console
++            console.warn(
++              `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
++            );
++          }
++        }
++      } catch (err) {
+         // eslint-disable-next-line no-console
+-        console.warn(
+-          `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
++        console.error(
++          `Onverwachte fout bij het verwerken van project "${row.name}" (${row.id}) tijdens de sync — deze rij wordt overgeslagen, de rest van de synchronisatie gaat door:`,
++          err,
+         );
+       }
+ 
+diff --git a/apps/api/test/project-sync-km-distance.test.ts b/apps/api/test/project-sync-km-distance.test.ts
+index 052bafe..7d6e66f 100644
+--- a/apps/api/test/project-sync-km-distance.test.ts
++++ b/apps/api/test/project-sync-km-distance.test.ts
+@@ -312,4 +312,147 @@ describe('ProjectSyncService — Phase 12, deel D (km-afstand)', () => {
+     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Project 16, Project 17, Project 18, Project 19, Project 20'));
+     warnSpy.mockRestore();
+   });
++
++  it('upsert de klant maar ÉÉN keer, ook als meerdere projecten met dezelfde klant tegelijk (begrensd parallel) verwerkt worden — race-condition-fix (7/9/2026, 6e ronde: "na synchroniseren wordt er niets meer gevonden")', async () => {
++    // 12 projecten die ALLEMAAL dezelfde klant delen (heel gewoon bij 1507
++    // projecten in de praktijk) — met CUSTOMER_PROJECT_UPSERT_CONCURRENCY
++    // (10) zullen minstens 10 daarvan gegarandeerd gelijktijdig proberen de
++    // klant op te zoeken/aan te maken.
++    const PROJECT_COUNT = 12;
++    const projectRows = Array.from({ length: PROJECT_COUNT }, (_, i) => ({
++      id: `proj-${i + 1}`,
++      teamleaderId: `tl-proj-${i + 1}`,
++      address: null as string | null,
++    }));
++    let customerUpsertCallCount = 0;
++    let resolveFirstUpsert: (() => void) | undefined;
++    const firstUpsertStarted = new Promise<void>((resolve) => {
++      resolveFirstUpsert = resolve;
++    });
++
++    const prisma = {
++      teamleaderConnection: { findUnique: async () => ({ id: 'singleton', projectsModule: 'LEGACY' }) },
++      customer: {
++        upsert: vi.fn(async () => {
++          customerUpsertCallCount += 1;
++          resolveFirstUpsert?.();
++          // Kunstmatige vertraging — simuleert een echte databank-round-trip
++          // die lang genoeg duurt opdat andere, gelijktijdige projecten voor
++          // dezelfde klant hun kans zouden krijgen om (vóór de fix) een
++          // eigen, dubbele upsert te starten.
++          await new Promise((resolve) => setTimeout(resolve, 20));
++          return { id: 'cust-1', address: 'Gedeeld adres 1, 2000 Antwerpen' };
++        }),
++      },
++      project: {
++        findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
++        upsert: async ({ where }: { where: { teamleaderId: string } }) => {
++          const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
++          row.address = 'Gedeeld adres 1, 2000 Antwerpen';
++          return row;
++        },
++        updateMany: async () => ({ count: 0 }),
++        update: async () => ({}),
++      },
++    } as unknown as PrismaClient;
++
++    const client = {
++      listAll: async (endpoint: string) => {
++        if (endpoint === 'projects.list') {
++          return projectRows.map((p, i) => ({
++            id: p.teamleaderId,
++            reference: `PRO-${i + 1}`,
++            title: `Gedeeld project ${i + 1}`,
++            description: null,
++            status: 'active',
++            customer: { type: 'contact', id: 'tl-comp-gedeeld' }, // ALLE projecten wijzen naar dezelfde klant
++          }));
++        }
++        if (endpoint === 'contacts.list') {
++          return [{ id: 'tl-comp-gedeeld', first_name: 'Gedeelde', last_name: 'Klant', primary_address: { line_1: 'Gedeeld adres 1', postal_code: '2000', city: 'Antwerpen' } }];
++        }
++        if (endpoint === 'companies.list') return [];
++        throw new Error(`onverwacht endpoint in test: ${endpoint}`);
++      },
++    } as unknown as TeamleaderClient;
++
++    const service = new ProjectSyncService(prisma, client);
++    const syncPromise = service.syncAll();
++
++    // Wacht tot de eerste upsert effectief gestart is (garandeert dat de
++    // race-conditie-vensters zich effectief overlappen), dan pas verder.
++    await firstUpsertStarted;
++    await syncPromise;
++
++    expect(customerUpsertCallCount).toBe(1); // was vóór de fix potentieel tot 10 (CONCURRENCY) bij een echte race
++    expect(projectRows.every((p) => p.address === 'Gedeeld adres 1, 2000 Antwerpen')).toBe(true);
++  });
++
++  it('één onverwachte fout bij één project blokkeert de rest van de sync niet — voorkomt dat "niets meer gevonden wordt" na één mislukte rij (7/9/2026, 6e ronde)', async () => {
++    const PROJECT_COUNT = 5;
++    const projectRows = Array.from({ length: PROJECT_COUNT }, (_, i) => ({
++      id: `proj-${i + 1}`,
++      teamleaderId: `tl-proj-${i + 1}`,
++      address: null as string | null,
++    }));
++
++    const prisma = {
++      teamleaderConnection: { findUnique: async () => ({ id: 'singleton', projectsModule: 'LEGACY' }) },
++      customer: {
++        upsert: vi.fn(async ({ where }: { where: { teamleaderId: string } }) => {
++          if (where.teamleaderId === 'tl-comp-3') {
++            throw new Error('Gesimuleerde databankfout (bv. een unique-constraint-race) voor precies één klant');
++          }
++          return { id: `cust-${where.teamleaderId}`, address: 'Een geldig adres, 2000 Antwerpen' };
++        }),
++      },
++      project: {
++        findMany: async () => projectRows.map((p) => ({ teamleaderId: p.teamleaderId, address: p.address, kmDistanceOneWayMeters: null })),
++        upsert: async ({ where }: { where: { teamleaderId: string } }) => {
++          const row = projectRows.find((p) => p.teamleaderId === where.teamleaderId)!;
++          row.address = 'Een geldig adres, 2000 Antwerpen';
++          return row;
++        },
++        updateMany: async () => ({ count: 0 }),
++        update: async () => ({}),
++      },
++    } as unknown as PrismaClient;
++
++    const client = {
++      listAll: async (endpoint: string) => {
++        if (endpoint === 'projects.list') {
++          return projectRows.map((p, i) => ({
++            id: p.teamleaderId,
++            reference: `PRO-${i + 1}`,
++            title: `Project ${i + 1}`,
++            description: null,
++            status: 'active',
++            customer: { type: 'contact', id: `tl-comp-${i + 1}` },
++          }));
++        }
++        if (endpoint === 'contacts.list') {
++          return projectRows.map((_, i) => ({
++            id: `tl-comp-${i + 1}`,
++            first_name: `Klant`,
++            last_name: `${i + 1}`,
++            primary_address: { line_1: 'Straat 1', postal_code: '2000', city: 'Antwerpen' },
++          }));
++        }
++        if (endpoint === 'companies.list') return [];
++        throw new Error(`onverwacht endpoint in test: ${endpoint}`);
++      },
++    } as unknown as TeamleaderClient;
++
++    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
++    const service = new ProjectSyncService(prisma, client);
++
++    const result = await service.syncAll();
++
++    // Project 3 (met de gesimuleerde fout) is de enige die niet gesynchroniseerd raakt — de andere 4 gewoon wél.
++    expect(result.syncedCount).toBe(4);
++    expect(projectRows.filter((p) => p.address !== null)).toHaveLength(4);
++    expect(projectRows.find((p) => p.teamleaderId === 'tl-proj-3')!.address).toBeNull();
++    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Onverwachte fout bij het verwerken van project'), expect.any(Error));
++    errorSpy.mockRestore();
++  });
+ });
+-- 
+2.43.0
+

@@ -164,7 +164,7 @@ export class ProjectSyncService {
     // customer.teamleaderId -> onze lokale Customer.id (voorkomt herhaalde
     // upserts voor dezelfde klant binnen één sync-run — meerdere projecten
     // delen vaak dezelfde klant).
-    const localCustomerCache = new Map<string, { id: string; address: string | null }>();
+    const localCustomerCache = new Map<string, Promise<{ id: string; address: string | null }>>();
     // Op vraag (7/9/2026) — zie de toelichting bij recomputeKmDistancesBounded() hieronder.
     const projectsNeedingKmRecompute: Array<{ projectTeamleaderId: string; projectName: string; projectAddress: string }> = [];
     const seenTeamleaderIds: string[] = [];
@@ -212,104 +212,130 @@ export class ProjectSyncService {
       if (index >= rowsWithCustomer.length) return;
       const { row, customer: ref } = rowsWithCustomer[index]!;
 
-      const cacheKey = `${ref.type}:${ref.id}`;
-      const details = customerDetailsByKey.get(cacheKey);
-      if (!details) {
-        // Klant stond nog in het project, maar kon niet (meer) opgehaald worden
-        // via contacts.list/companies.list (bv. intussen verwijderd in
-        // Teamleader tussen het ophalen van de projectenlijst en dit moment).
-        // Zelfde afhandeling als "geen klant gekoppeld": overslaan, niet laten
-        // crashen (business rule 9 — externe API-eigenaardigheden mogen nooit
-        // lokale data laten verloren gaan).
-        skippedWithoutCustomerCount += 1;
-        return processNextRow();
-      }
+      // Op vraag (7/9/2026, 6e ronde): "na synchroniseren wordt er niets meer
+      // gevonden" — zonder deze try/catch deed ÉÉN mislukte rij (bv. een
+      // resterende race op de databank, of een andere onverwachte fout) de
+      // volledige Promise.all() en dus de hele sync-aanvraag crashen, met
+      // als gevolg dat GEEN ENKEL project nog verwerkt werd — niet enkel het
+      // getroffen project. Business rule 9: een fout op één rij mag de rest
+      // van de synchronisatie nooit blokkeren.
+      try {
+        const cacheKey = `${ref.type}:${ref.id}`;
+        const details = customerDetailsByKey.get(cacheKey);
+        if (!details) {
+          // Klant stond nog in het project, maar kon niet (meer) opgehaald
+          // worden via contacts.list/companies.list (bv. intussen verwijderd
+          // in Teamleader tussen het ophalen van de projectenlijst en dit
+          // moment). Zelfde afhandeling als "geen klant gekoppeld": overslaan.
+          skippedWithoutCustomerCount += 1;
+        } else {
+          // Op vraag (7/9/2026, 6e ronde): de begrensd-parallelle hoofdlus
+          // (vorige fix) introduceerde een echte race condition: meerdere
+          // projecten die dezelfde klant delen (heel gewoon bij 1507
+          // projecten) konden tegelijk `localCustomerCache.get(cacheKey)` als
+          // "nog niet aanwezig" zien (want de EERSTE upsert was nog niet
+          // klaar) en dus allemaal hun EIGEN customer.upsert()-call starten
+          // voor exact dezelfde teamleaderId — wat op databankniveau een
+          // unique-constraint-fout kan geven. Fix: de cache bewaart nu de
+          // PROMISE zelf (synchroon aangemaakt, vóór enige await), zodat
+          // gelijktijdige aanvragen voor dezelfde klant altijd op exact
+          // dezelfde, ene upsert-belofte wachten i.p.v. te racen.
+          let localCustomerPromise: Promise<{ id: string; address: string | null }> | undefined = localCustomerCache.get(cacheKey);
+          if (!localCustomerPromise) {
+            const freshCustomerPromise: Promise<{ id: string; address: string | null }> = this.prisma.customer
+              .upsert({
+                where: { teamleaderId: ref.id },
+                create: {
+                  teamleaderId: ref.id,
+                  teamleaderType: ref.type,
+                  name: details.name,
+                  address: details.address,
+                  email: details.email,
+                  vatNumber: details.vatNumber,
+                  isArchivedInTl: false,
+                  lastSyncedAt: new Date(),
+                },
+                update: {
+                  teamleaderType: ref.type,
+                  name: details.name,
+                  address: details.address,
+                  email: details.email,
+                  vatNumber: details.vatNumber,
+                  isArchivedInTl: false,
+                  lastSyncedAt: new Date(),
+                },
+              })
+              .then((customer) => ({ id: customer.id, address: customer.address }));
+            localCustomerCache.set(cacheKey, freshCustomerPromise);
+            localCustomerPromise = freshCustomerPromise;
+          }
+          const localCustomer = await localCustomerCache.get(cacheKey)!;
 
-      let localCustomer = localCustomerCache.get(cacheKey);
-      if (!localCustomer) {
-        const customer = await this.prisma.customer.upsert({
-          where: { teamleaderId: ref.id },
-          create: {
-            teamleaderId: ref.id,
-            teamleaderType: ref.type,
-            name: details.name,
-            address: details.address,
-            email: details.email,
-            vatNumber: details.vatNumber,
-            isArchivedInTl: false,
-            lastSyncedAt: new Date(),
-          },
-          update: {
-            teamleaderType: ref.type,
-            name: details.name,
-            address: details.address,
-            email: details.email,
-            vatNumber: details.vatNumber,
-            isArchivedInTl: false,
-            lastSyncedAt: new Date(),
-          },
-        });
-        localCustomer = { id: customer.id, address: customer.address };
-        localCustomerCache.set(cacheKey, localCustomer);
-      }
+          const upsertedProject = await this.prisma.project.upsert({
+            where: { teamleaderId: row.id },
+            create: {
+              teamleaderId: row.id,
+              teamleaderModule: module,
+              customerId: localCustomer.id,
+              projectNumber: row.projectNumber,
+              name: row.name,
+              description: row.description,
+              address: localCustomer.address,
+              status: row.status,
+              isArchivedInTl: false,
+              lastSyncedAt: new Date(),
+            },
+            update: {
+              teamleaderModule: module,
+              customerId: localCustomer.id,
+              projectNumber: row.projectNumber,
+              name: row.name,
+              description: row.description,
+              address: localCustomer.address,
+              status: row.status,
+              isArchivedInTl: false,
+              lastSyncedAt: new Date(),
+            },
+          });
+          if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+            // eslint-disable-next-line no-console
+            console.log(
+              `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
+            );
+          }
+          seenTeamleaderIds.push(row.id);
 
-      const upsertedProject = await this.prisma.project.upsert({
-        where: { teamleaderId: row.id },
-        create: {
-          teamleaderId: row.id,
-          teamleaderModule: module,
-          customerId: localCustomer.id,
-          projectNumber: row.projectNumber,
-          name: row.name,
-          description: row.description,
-          address: localCustomer.address,
-          status: row.status,
-          isArchivedInTl: false,
-          lastSyncedAt: new Date(),
-        },
-        update: {
-          teamleaderModule: module,
-          customerId: localCustomer.id,
-          projectNumber: row.projectNumber,
-          name: row.name,
-          description: row.description,
-          address: localCustomer.address,
-          status: row.status,
-          isArchivedInTl: false,
-          lastSyncedAt: new Date(),
-        },
-      });
-      if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+          // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
+          // gewijzigd is t.o.v. vóór deze upsert, OF de afstand nog nooit
+          // succesvol berekend werd (kmDistanceOneWayMeters staat nog op
+          // `null`) — conform sectie 28 ("vraag nooit continu alle gegevens
+          // opnieuw op"), maar zonder een project blijvend zonder afstand te
+          // laten zitten enkel omdat het adres toevallig ongewijzigd bleef.
+          const previousState = previousStateByTeamleaderId.get(row.id);
+          const addressChanged = localCustomer.address !== previousState?.address;
+          const neverComputed = previousState?.kmDistanceOneWayMeters == null;
+          if (localCustomer.address !== null && (addressChanged || neverComputed)) {
+            projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectName: row.name, projectAddress: localCustomer.address });
+          } else if (localCustomer.address === null && neverComputed) {
+            // Op vraag (7/9/2026, 3e ronde van hetzelfde debug-traject): dit
+            // was tot nu toe een derde, volledig stille faalmodus — een klant
+            // zonder (volledig) adres in Teamleader (formatAddress() geeft
+            // dan `null` terug) betekende dat deze project-rij hier
+            // simpelweg NOOIT in projectsNeedingKmRecompute terechtkwam, dus
+            // ook nooit een console.error uit recomputeKmDistance() kreeg —
+            // een km-vergoeding die voor altijd `null` bleef, zonder dat
+            // ergens zichtbaar werd waarom. Vandaar deze expliciete log hier.
+            // eslint-disable-next-line no-console
+            console.warn(
+              `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
+            );
+          }
+        }
+      } catch (err) {
         // eslint-disable-next-line no-console
-        console.log(
-          `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
-        );
-      }
-      seenTeamleaderIds.push(row.id);
-
-      // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
-      // gewijzigd is t.o.v. vóór deze upsert, OF de afstand nog nooit
-      // succesvol berekend werd (kmDistanceOneWayMeters staat nog op
-      // `null`) — conform sectie 28 ("vraag nooit continu alle gegevens
-      // opnieuw op"), maar zonder een project blijvend zonder afstand te
-      // laten zitten enkel omdat het adres toevallig ongewijzigd bleef.
-      const previousState = previousStateByTeamleaderId.get(row.id);
-      const addressChanged = localCustomer.address !== previousState?.address;
-      const neverComputed = previousState?.kmDistanceOneWayMeters == null;
-      if (localCustomer.address !== null && (addressChanged || neverComputed)) {
-        projectsNeedingKmRecompute.push({ projectTeamleaderId: row.id, projectName: row.name, projectAddress: localCustomer.address });
-      } else if (localCustomer.address === null && neverComputed) {
-        // Op vraag (7/9/2026, 3e ronde van hetzelfde debug-traject): dit was
-        // tot nu toe een derde, volledig stille faalmodus — een klant zonder
-        // (volledig) adres in Teamleader (formatAddress() geeft dan `null`
-        // terug) betekende dat deze project-rij hier simpelweg NOOIT in
-        // projectsNeedingKmRecompute terechtkwam, dus ook nooit een
-        // console.error uit recomputeKmDistance() kreeg — een km-vergoeding
-        // die voor altijd `null` bleef, zonder dat ergens zichtbaar werd
-        // waarom. Vandaar deze expliciete log hier, vóór dat punt.
-        // eslint-disable-next-line no-console
-        console.warn(
-          `Km-afstand kan niet berekend worden voor project ${row.id} ("${row.name}"): de gekoppelde klant heeft geen (volledig) adres in Teamleader (straat/postcode/gemeente).`,
+        console.error(
+          `Onverwachte fout bij het verwerken van project "${row.name}" (${row.id}) tijdens de sync — deze rij wordt overgeslagen, de rest van de synchronisatie gaat door:`,
+          err,
         );
       }
 
