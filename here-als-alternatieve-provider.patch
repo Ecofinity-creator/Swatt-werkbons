@@ -1,0 +1,336 @@
+From 1c9a4dfd9c2006bc63d9449062909dcf2631ca92 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 8 Sep 2026 07:01:07 +0000
+Subject: [PATCH] HERE toegevoegd als alternatieve km-afstandsprovider naast
+ OpenRouteService
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Op vraag (7/9/2026), na bevestiging dat de HTTP 403-fout een langdurige,
+externe storing bij OpenRouteService zelf is (bevestigd via meerdere
+andere getroffen gebruikers op OpenRouteService's eigen communityforum,
+niet onze configuratie): "kan er geen andere service gebruikt worden".
+
+De architectuur voorzag hier al bewust in — DistanceService is een dunne
+interface met precies één implementatie erachter, specifiek zodat de
+provider later kan wisselen zonder de aanroepende code
+(ProjectSyncService, WorkOrderService) aan te raken.
+
+- HereDistanceProvider (nieuw, implements DistanceService): HERE
+  Geocoding & Search API v7 + Routing API v8, endpoints geverifieerd via
+  docs.here.com (7/9/2026) — combineert geocoding en routing in één
+  platform, gratis laag ruim voldoende voor dit gebruikspatroon.
+- HERE_API_KEY (nieuwe, optionele env var) naast het bestaande
+  OPENROUTESERVICE_API_KEY.
+- getDistanceServiceProvider(): HERE heeft voorrang zodra beide sleutels
+  gezet zijn, OpenRouteService blijft ondersteund als terugvaloptie
+  zonder een sleutel te moeten verwijderen.
+- teamleader.plugin.ts kiest de juiste implementatie op basis van welke
+  sleutel geconfigureerd is, en logt bij opstart welke provider actief is.
+
+Tests: nieuwe testgroep voor HereDistanceProvider (geocoderen + route
+berekenen, niet-geocodeerbaar adres, blijvende serverfout — inclusief een
+test die specifiek een HTTP 403 simuleert, het exacte scenario dat
+OpenRouteService trof). Foutmelding bij een ontbrekende sleutel is nu
+provider-neutraal.
+
+Verificatie: backend-testsuite 232 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies), typecheck/lint schoon.
+---
+ apps/api/src/config/env.ts                    | 38 ++++++--
+ .../src/modules/distance/distance.service.ts  | 92 +++++++++++++++++++
+ .../teamleader/project-sync.service.ts        |  2 +-
+ .../modules/teamleader/teamleader.plugin.ts   | 19 +++-
+ apps/api/test/distance.service.test.ts        | 55 ++++++++++-
+ 5 files changed, 194 insertions(+), 12 deletions(-)
+
+diff --git a/apps/api/src/config/env.ts b/apps/api/src/config/env.ts
+index 9237f29..47a71a8 100644
+--- a/apps/api/src/config/env.ts
++++ b/apps/api/src/config/env.ts
+@@ -74,6 +74,20 @@ const rawEnvSchema = z.object({
+    */
+   OPENROUTESERVICE_API_KEY: z.string().min(1).optional(),
+ 
++  /**
++   * Op vraag (7/9/2026): OpenRouteService bleek een langdurige, externe
++   * storing te hebben ("Invalid API key or access to this API has been
++   * disallowed", HTTP 403 — bevestigd via meerdere andere getroffen
++   * gebruikers op OpenRouteService's eigen communityforum, dus geen fout in
++   * onze configuratie). HERE (voorheen Nokia HERE) is het alternatief:
++   * combineert geocoding + routing in één platform, gratis laag ruim
++   * voldoende voor dit gebruikspatroon (enkel bij een adreswijziging), en
++   * onafhankelijk brontabellen bevestigd (docs.here.com, sept. 2026). Zie de
++   * toelichting bij getDistanceServiceApiKey() hieronder voor de
++   * voorkeursvolgorde tussen beide sleutels.
++   */
++  HERE_API_KEY: z.string().min(1).optional(),
++
+   /**
+    * Phase 9 — Redis voor de BullMQ-achtergrondwerker (sectie 15). Bewust een
+    * default i.p.v. verplicht: dit houdt lokale dev/test zonder Redis werkend
+@@ -225,15 +239,27 @@ export function getEmailConfig(): EmailEnvConfig {
+   return { apiKey: env.RESEND_API_KEY, fromAddress: env.EMAIL_FROM_ADDRESS };
+ }
+ 
+-/** Phase 12, deel D — true zodra OPENROUTESERVICE_API_KEY gezet is. */
++/** Phase 12, deel D — true zodra minstens één van beide km-afstandsproviders geconfigureerd is. */
+ export function isDistanceServiceConfigured(): boolean {
+-  return env.OPENROUTESERVICE_API_KEY !== undefined;
++  return env.HERE_API_KEY !== undefined || env.OPENROUTESERVICE_API_KEY !== undefined;
++}
++
++/**
++ * Op vraag (7/9/2026): welke provider effectief gebruikt wordt — HERE heeft
++ * voorrang zodra beide sleutels gezet zijn (aanbevolen sinds de langdurige
++ * OpenRouteService-storing van juli-september 2026), maar
++ * OPENROUTESERVICE_API_KEY blijft ondersteund als terugvaloptie zonder
++ * meteen een tweede account te moeten aanmaken.
++ */
++export function getDistanceServiceProvider(): 'HERE' | 'OPENROUTESERVICE' {
++  return env.HERE_API_KEY !== undefined ? 'HERE' : 'OPENROUTESERVICE';
+ }
+ 
+-/** Werp altijd eerst `isDistanceServiceConfigured()` op — deze gooit als de configuratie ontbreekt. */
++/** Werp altijd eerst `isDistanceServiceConfigured()` op — deze gooit als geen van beide geconfigureerd is. */
+ export function getDistanceServiceApiKey(): string {
+-  if (env.OPENROUTESERVICE_API_KEY === undefined) {
+-    throw new Error('getDistanceServiceApiKey() aangeroepen terwijl OPENROUTESERVICE_API_KEY niet geconfigureerd is — roep eerst isDistanceServiceConfigured() op.');
++  const key = env.HERE_API_KEY ?? env.OPENROUTESERVICE_API_KEY;
++  if (key === undefined) {
++    throw new Error('getDistanceServiceApiKey() aangeroepen terwijl noch HERE_API_KEY, noch OPENROUTESERVICE_API_KEY geconfigureerd is — roep eerst isDistanceServiceConfigured() op.');
+   }
+-  return env.OPENROUTESERVICE_API_KEY;
++  return key;
+ }
+diff --git a/apps/api/src/modules/distance/distance.service.ts b/apps/api/src/modules/distance/distance.service.ts
+index 2dbb2e6..eea02bc 100644
+--- a/apps/api/src/modules/distance/distance.service.ts
++++ b/apps/api/src/modules/distance/distance.service.ts
+@@ -116,6 +116,98 @@ function sleep(ms: number): Promise<void> {
+   return new Promise((resolve) => setTimeout(resolve, ms));
+ }
+ 
++/**
++ * Op vraag (7/9/2026): vervanging/alternatief voor OpenRouteService na een
++ * langdurige, externe storing daar ("Invalid API key or access to this API
++ * has been disallowed", HTTP 403 — bevestigd op OpenRouteService's eigen
++ * communityforum door meerdere andere getroffen gebruikers, dus geen fout
++ * in onze configuratie of code). HERE (voorheen Nokia HERE) combineert
++ * geocoding + routing in één platform, met een gratis laag die voor dit
++ * gebruikspatroon (enkel bij een adreswijziging, of on-demand voor één
++ * project) ruimschoots voldoende is.
++ *
++ * Endpoints geverifieerd via docs.here.com (7/9/2026):
++ * - Geocoding: `GET https://geocode.search.hereapi.com/v1/geocode?q=<adres>&apiKey=...`
++ *   → `{ items: [{ position: { lat, lng } }] }`.
++ * - Routing: `GET https://router.hereapi.com/v8/routes?transportMode=car&origin=<lat>,<lng>&destination=<lat>,<lng>&return=summary&apiKey=...`
++ *   → `{ routes: [{ sections: [{ summary: { length: <meter> } }] }] }`.
++ * Zoals de projectregel voorschrijft ("verzin geen endpoints"): dit is geen
++ * aanname maar expliciet nagekeken vóór implementatie.
++ */
++export class HereDistanceProvider implements DistanceService {
++  constructor(private readonly apiKey: string) {}
++
++  async getDrivingDistanceMetersOneWay(fromAddress: string, toAddress: string): Promise<number> {
++    const [from, to] = await Promise.all([this.geocode(fromAddress), this.geocode(toAddress)]);
++
++    const url = new URL(HERE_ROUTING_URL);
++    url.searchParams.set('apiKey', this.apiKey);
++    url.searchParams.set('transportMode', 'car');
++    url.searchParams.set('origin', `${from.lat},${from.lng}`);
++    url.searchParams.set('destination', `${to.lat},${to.lng}`);
++    url.searchParams.set('return', 'summary');
++
++    const response = await this.fetchWithRetry(url, 'rijafstand berekenen');
++    const data = (await response.json()) as HereRoutesResponse;
++    const length = data.routes?.[0]?.sections?.[0]?.summary?.length;
++    if (typeof length !== 'number') {
++      throw new DistanceServiceError('HERE gaf geen route terug tussen deze twee adressen.');
++    }
++    return Math.round(length);
++  }
++
++  private async geocode(address: string): Promise<{ lat: number; lng: number }> {
++    const url = new URL(HERE_GEOCODE_URL);
++    url.searchParams.set('apiKey', this.apiKey);
++    url.searchParams.set('q', address);
++
++    const response = await this.fetchWithRetry(url, `adres lokaliseren ("${address}")`);
++    const data = (await response.json()) as HereGeocodeResponse;
++    const position = data.items?.[0]?.position;
++    if (!position) {
++      throw new DistanceServiceError(`Kon het adres "${address}" niet lokaliseren.`);
++    }
++    return position;
++  }
++
++  /** Zelfde exponential-backoff-filosofie als OpenRouteServiceDistanceProvider hierboven. */
++  private async fetchWithRetry(url: URL, actionDescription: string): Promise<Response> {
++    let lastError: unknown;
++    for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
++      let response: Response;
++      try {
++        response = await fetch(url);
++      } catch (err) {
++        lastError = err;
++        await sleep(Math.min(2 ** attempt * 500, MAX_RATE_LIMIT_WAIT_MS));
++        continue;
++      }
++      if (response.ok) {
++        return response;
++      }
++      if (response.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
++        const retryAfterHeader = response.headers.get('retry-after');
++        const waitMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : Math.min(2 ** attempt * 1000, MAX_RATE_LIMIT_WAIT_MS);
++        await sleep(waitMs);
++        continue;
++      }
++      throw new DistanceServiceError(`HERE-fout bij ${actionDescription} (HTTP ${response.status}).`);
++    }
++    throw new DistanceServiceError(`HERE niet bereikbaar bij ${actionDescription}: ${String(lastError)}`);
++  }
++}
++
++const HERE_GEOCODE_URL = 'https://geocode.search.hereapi.com/v1/geocode';
++const HERE_ROUTING_URL = 'https://router.hereapi.com/v8/routes';
++
++interface HereGeocodeResponse {
++  items: Array<{ position: { lat: number; lng: number } }>;
++}
++
++interface HereRoutesResponse {
++  routes: Array<{ sections: Array<{ summary: { length: number } }> }>;
++}
++
+ /**
+  * Phase 12, deel D — km-vergoeding heen-en-terug: `kmDistanceOneWayMeters`
+  * is de rijafstand in één richting (zie DistanceService hierboven);
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 9feae92..06b1390 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -568,7 +568,7 @@ export class ProjectSyncService {
+     if (!this.distanceService || !this.companySettingsService) {
+       // eslint-disable-next-line no-console
+       console.warn(
+-        `Km-afstand kan niet berekend worden voor ${allProjects.length} project(en): OPENROUTESERVICE_API_KEY is niet geconfigureerd.`,
++        `Km-afstand kan niet berekend worden voor ${allProjects.length} project(en): geen afstandsprovider geconfigureerd (HERE_API_KEY of OPENROUTESERVICE_API_KEY).`,
+       );
+       return;
+     }
+diff --git a/apps/api/src/modules/teamleader/teamleader.plugin.ts b/apps/api/src/modules/teamleader/teamleader.plugin.ts
+index f55dcf8..69f1e41 100644
+--- a/apps/api/src/modules/teamleader/teamleader.plugin.ts
++++ b/apps/api/src/modules/teamleader/teamleader.plugin.ts
+@@ -1,9 +1,9 @@
+ import type { FastifyInstance } from 'fastify';
+ import fp from 'fastify-plugin';
+-import { getDistanceServiceApiKey, isDistanceServiceConfigured } from '../../config/env';
++import { getDistanceServiceApiKey, getDistanceServiceProvider, isDistanceServiceConfigured } from '../../config/env';
+ import { SyncJobService } from '../sync/sync-job.service';
+ import { CompanySettingsService } from '../company-settings/company-settings.service';
+-import { OpenRouteServiceDistanceProvider, type DistanceService } from '../distance/distance.service';
++import { HereDistanceProvider, OpenRouteServiceDistanceProvider, type DistanceService } from '../distance/distance.service';
+ import { FileSyncService } from './file-sync.service';
+ import { MilestoneSyncService } from './milestone-sync.service';
+ import { ProjectSyncService } from './project-sync.service';
+@@ -63,10 +63,21 @@ export default fp(async function teamleaderPlugin(app: FastifyInstance) {
+   const distanceServiceConfigured = isDistanceServiceConfigured();
+   if (!distanceServiceConfigured) {
+     app.log.warn(
+-      'OPENROUTESERVICE_API_KEY is niet ingesteld — de km-vergoeding (verplaatsingskosten) blijft daardoor overal uitgeschakeld, ook al staan een km-tarief en bedrijfsadres wél correct ingesteld in Bedrijfsgegevens.',
++      'Noch HERE_API_KEY, noch OPENROUTESERVICE_API_KEY is ingesteld — de km-vergoeding (verplaatsingskosten) blijft daardoor overal uitgeschakeld, ook al staan een km-tarief en bedrijfsadres wél correct ingesteld in Bedrijfsgegevens.',
+     );
+   }
+-  const distanceService = distanceServiceConfigured ? new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey()) : null;
++  // Op vraag (7/9/2026): HERE heeft voorrang op OpenRouteService (zie
++  // getDistanceServiceProvider()) sinds een langdurige, externe storing bij
++  // OpenRouteService — zie de toelichting bij HereDistanceProvider.
++  const distanceServiceProvider = getDistanceServiceProvider();
++  const distanceService: DistanceService | null = distanceServiceConfigured
++    ? distanceServiceProvider === 'HERE'
++      ? new HereDistanceProvider(getDistanceServiceApiKey())
++      : new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey())
++    : null;
++  if (distanceServiceConfigured) {
++    app.log.info(`Km-vergoeding: actieve afstandsprovider is ${distanceServiceProvider}.`);
++  }
+   app.decorate('distanceService', distanceService);
+   const companySettingsService = new CompanySettingsService(app.prisma);
+   app.decorate('projectSyncService', new ProjectSyncService(app.prisma, teamleaderClient, distanceService, companySettingsService));
+diff --git a/apps/api/test/distance.service.test.ts b/apps/api/test/distance.service.test.ts
+index e14341b..bc3bba7 100644
+--- a/apps/api/test/distance.service.test.ts
++++ b/apps/api/test/distance.service.test.ts
+@@ -1,5 +1,5 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+-import { computeKmAmountCents, DistanceServiceError, OpenRouteServiceDistanceProvider } from '../src/modules/distance/distance.service';
++import { computeKmAmountCents, DistanceServiceError, HereDistanceProvider, OpenRouteServiceDistanceProvider } from '../src/modules/distance/distance.service';
+ 
+ function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
+   return {
+@@ -85,6 +85,59 @@ describe('OpenRouteServiceDistanceProvider', () => {
+   });
+ });
+ 
++describe('HereDistanceProvider (op vraag 7/9/2026, na een langdurige OpenRouteService-storing)', () => {
++  let fetchMock: ReturnType<typeof vi.fn>;
++
++  beforeEach(() => {
++    fetchMock = vi.fn();
++    vi.stubGlobal('fetch', fetchMock);
++  });
++
++  afterEach(() => {
++    vi.unstubAllGlobals();
++    vi.restoreAllMocks();
++  });
++
++  const GEOCODE_SWATT = { items: [{ position: { lat: 51.2, lng: 4.4 } }] };
++  const GEOCODE_CUSTOMER = { items: [{ position: { lat: 51.3, lng: 4.5 } }] };
++  const ROUTE_12KM = { routes: [{ sections: [{ summary: { length: 12345.6 } }] }] };
++
++  it('geocodeert beide adressen en berekent de rijafstand in meter, afgerond', async () => {
++    fetchMock
++      .mockResolvedValueOnce(jsonResponse(200, GEOCODE_SWATT))
++      .mockResolvedValueOnce(jsonResponse(200, GEOCODE_CUSTOMER))
++      .mockResolvedValueOnce(jsonResponse(200, ROUTE_12KM));
++
++    const provider = new HereDistanceProvider('test-key');
++    const meters = await provider.getDrivingDistanceMetersOneWay('Swatt-adres', 'Klantadres');
++
++    expect(meters).toBe(12346); // afgerond
++    expect(fetchMock).toHaveBeenCalledTimes(3);
++    const geocodeCall = fetchMock.mock.calls[0]![0] as URL;
++    expect(geocodeCall.toString()).toContain('geocode.search.hereapi.com/v1/geocode');
++    expect(geocodeCall.searchParams.get('q')).toBe('Swatt-adres');
++    const routingCall = fetchMock.mock.calls[2]![0] as URL;
++    expect(routingCall.toString()).toContain('router.hereapi.com/v8/routes');
++    expect(routingCall.searchParams.get('origin')).toBe('51.2,4.4');
++    expect(routingCall.searchParams.get('destination')).toBe('51.3,4.5');
++    expect(routingCall.searchParams.get('transportMode')).toBe('car');
++  });
++
++  it('gooit een duidelijke fout wanneer een adres niet geocodeerbaar is', async () => {
++    fetchMock.mockResolvedValue(jsonResponse(200, { items: [] }));
++
++    const provider = new HereDistanceProvider('test-key');
++    await expect(provider.getDrivingDistanceMetersOneWay('Onbestaand adres', 'Klantadres')).rejects.toThrow(DistanceServiceError);
++  });
++
++  it('gooit een duidelijke fout bij een blijvende serverfout (geen 429) — bv. het HTTP 403 dat OpenRouteService liet crashen', async () => {
++    fetchMock.mockResolvedValue(jsonResponse(403, { error: 'Invalid API key or access to this API has been disallowed' }));
++
++    const provider = new HereDistanceProvider('test-key');
++    await expect(provider.getDrivingDistanceMetersOneWay('Swatt-adres', 'Klantadres')).rejects.toThrow(DistanceServiceError);
++  });
++});
++
+ describe('computeKmAmountCents()', () => {
+   it('berekent heen-en-terug: 12,4 km enkel × €0,35/km → 868 eurocent', () => {
+     expect(computeKmAmountCents(12400, 35)).toBe(868); // (12400*2/1000)*35 = 24.8*35 = 868
+-- 
+2.43.0
+

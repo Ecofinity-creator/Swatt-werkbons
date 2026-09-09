@@ -302,7 +302,7 @@ export function WorkOrderReviewPage() {
           // precies omdat een technicus (EMPLOYEE-rol) het test-account is.
           // Terug beperken tot Supervisor+ zodra het onderliggende
           // km-probleem effectief bevestigd en opgelost is.
-          showKmDebug={user != null}
+          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
           isUploadingPhoto={isUploadingPhoto}
           uploadError={uploadError}
           category={category}
@@ -317,7 +317,7 @@ export function WorkOrderReviewPage() {
       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'sign' && (
         <SignStep
           workOrder={workOrder}
-          showKmDebug={user != null}
+          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
           pendingWeekCount={pendingWeekCount}
           pendingWeekEntries={pendingWeekEntries}
           pendingWeekKmInfo={pendingWeekKmInfo}
@@ -694,7 +694,7 @@ function SignedWorkOrderView({
       <div className="rounded-xl border border-emerald-900 bg-emerald-950 p-4 text-center text-sm text-emerald-200">
         Deze werkbon is ondertekend en kan niet meer gewijzigd worden.
       </div>
-      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug />
+      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={canManagePdf} />
 
       {canManagePdf && (
         <TeamleaderSyncSection
@@ -890,8 +890,8 @@ function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrder
       {workOrder.kmAmountCents !== null && workOrder.kmAmountCents > 0 && (
         <p className="mt-1 text-right text-xs text-neutral-400">Verplaatsingskosten: {formatEuroCents(workOrder.kmAmountCents)}</p>
       )}
-      {/* Op vraag (7/9/2026, debug-traject): toont nu ALTIJD wanneer showKmDebug aan staat, ook al is kmAmountCents wél gezet — sluit uit dat de eerdere, striktere voorwaarde zelf ergens de boosdoener was. Terug vernauwen zodra het onderliggende km-probleem bevestigd en opgelost is. */}
-      {showKmDebug && (
+      {/* Op vraag (7/9/2026, na een lang debug-traject rond een externe OpenRouteService-storing, uiteindelijk opgelost via HERE als alternatieve provider) — enkel zichtbaar voor Supervisor+ én enkel wanneer de km-vergoeding zelf leeg blijft, als hulpmiddel om een toekomstig, gelijkaardig probleem sneller te kunnen diagnosticeren. */}
+      {showKmDebug && (workOrder.kmAmountCents === null || workOrder.kmAmountCents === 0) && (
         <p className="mt-1 text-right text-[11px] text-neutral-500">
           (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, afstand ={' '}
           {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief = {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'}{' '}

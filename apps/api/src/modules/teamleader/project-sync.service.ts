@@ -132,28 +132,6 @@ export class ProjectSyncService {
       throw this.wrapTeamleaderError(err);
     }
 
-    // Op vraag (7/9/2026, 8e ronde): het project-ID dat de werkbon effectief
-    // gebruikt (fcd2b84e-f3c6-0a91-8762-39ba5339cecf) kwam in geen enkele
-    // eerdere "sanitair"-gefilterde log voor — vermoeden: dit project komt
-    // niet (meer) voor in Teamleader se eigen projects.list-respons (bv.
-    // gearchiveerd/verwijderd in Teamleader), waardoor de rest van deze
-    // sync-functie het structureel nooit bereikt en de lokale rij dus nooit
-    // een adres/afstand krijgt — ook al laat de app blijkbaar toe om er
-    // nieuwe werkbonnen op aan te maken.
-    const targetRow = rows.find((row) => row.id === 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf');
-    // eslint-disable-next-line no-console
-    console.log(
-      targetRow
-        ? `Km-diagnose: project fcd2b84e... komt WEL voor in de verse Teamleader-projectenlijst — naam="${targetRow.name}", status="${targetRow.status}", klant-referentie=${JSON.stringify(targetRow.customer)}.`
-        : `Km-diagnose: project fcd2b84e... komt NIET (meer) voor in de verse Teamleader-projectenlijst (${rows.length} projecten totaal opgehaald) — waarschijnlijk gearchiveerd/verwijderd in Teamleader zelf.`,
-    );
-    const localTargetProject = await this.prisma.project.findUnique({
-      where: { teamleaderId: 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf' },
-      select: { id: true, name: true, address: true, kmDistanceOneWayMeters: true, isArchivedInTl: true, lastSyncedAt: true },
-    });
-    // eslint-disable-next-line no-console
-    console.log(`Km-diagnose: lokale databankstatus voor project fcd2b84e... (vóór deze sync-run):`, JSON.stringify(localTargetProject));
-
     let skippedWithoutCustomerCount = 0;
     const rowsWithCustomer: { row: NormalizedProjectRow; customer: TeamleaderCustomerRef }[] = [];
     for (const row of rows) {
@@ -161,18 +139,6 @@ export class ProjectSyncService {
         rowsWithCustomer.push({ row, customer: row.customer });
       } else {
         skippedWithoutCustomerCount += 1;
-      }
-      // Op vraag (7/9/2026, diagnose, 2e helft): het opgehaalde adres voor
-      // contactpersoon "Ruben Mazzier" bleek zelf volledig en correct
-      // ({"line_1":"Hundelgemsesteenweg 737","postal_code":"9820","city":
-      // "Merelbeke",...}) — het probleem moet dus in de koppeling tussen
-      // PROJECT en klant-ID zitten, niet in de adresverwerking zelf. Log
-      // daarom expliciet welke klant-referentie (type + Teamleader-ID) elk
-      // project met "sanitair" in de naam heeft, om te vergelijken met het
-      // bevestigde contact-ID van Ruben Mazzier.
-      if (row.name.toLowerCase().includes('sanitair')) {
-        // eslint-disable-next-line no-console
-        console.log(`Km-diagnose: project "${row.name}" (${row.id}) heeft klant-referentie:`, JSON.stringify(row.customer));
       }
     }
 
@@ -293,7 +259,7 @@ export class ProjectSyncService {
           }
           const localCustomer = await localCustomerCache.get(cacheKey)!;
 
-          const upsertedProject = await this.prisma.project.upsert({
+          await this.prisma.project.upsert({
             where: { teamleaderId: row.id },
             create: {
               teamleaderId: row.id,
@@ -319,12 +285,6 @@ export class ProjectSyncService {
               lastSyncedAt: new Date(),
             },
           });
-          if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
-            // eslint-disable-next-line no-console
-            console.log(
-              `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
-            );
-          }
           seenTeamleaderIds.push(row.id);
 
           // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
@@ -421,22 +381,6 @@ export class ProjectSyncService {
         ? this.client.listAll<CompanyInfoRow>('companies.list', { filter: { ids: companyIds } })
         : Promise.resolve<CompanyInfoRow[]>([]),
     ]);
-
-    // Op vraag (7/9/2026, diagnose): een contactpersoon met een zichtbaar
-    // volledig adres in Teamleader ("Ruben Mazzier") kreeg toch geen
-    // km-afstand — ondanks dat `primary_address` bevestigd het juiste
-    // veldnamen zijn voor contacts.list/companies.list (Teamleader se eigen
-    // apiary.apib). Tijdelijke, gerichte log van de RUWE respons om te zien
-    // wat er precies binnenkomt, i.p.v. verder te gissen op basis van
-    // documentatie alleen. Bewust enkel de velden die ertoe doen (geen
-    // volledige contactgegevens in de logs).
-    if (contactIds.length > 0) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `Km-diagnose: ruwe contacts.list-respons (${contactRows.length} van ${contactIds.length} opgevraagd):`,
-        JSON.stringify(contactRows.map((c) => ({ id: c.id, name: `${c.first_name} ${c.last_name}`, primary_address: c.primary_address }))),
-      );
-    }
 
     const result = new Map<string, CustomerDetails>();
     for (const contact of contactRows) {

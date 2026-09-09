@@ -1,0 +1,184 @@
+From 3cce383dfeebcd2d059cd66e33df0043e23c1758 Mon Sep 17 00:00:00 2001
+From: "Claude (sandbox sessie)" <claude@anthropic.com>
+Date: Tue, 8 Sep 2026 18:46:05 +0000
+Subject: [PATCH 2/2] Opruiming: tijdelijke, project-specifieke diagnostiek
+ verwijderd nu het km-probleem definitief opgelost is (overstap naar HERE)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bevestigd (7/9/2026): "Verplaatsingskosten: € 107,89" verschijnt nu
+correct op het ondertekenscherm na de overstap naar HERE als
+km-afstandsprovider — de langdurige speurtocht is afgerond.
+
+Verwijderd uit project-sync.service.ts (allemaal hardgecodeerd op
+specifieke Teamleader-ID's, dus zonder blijvende waarde):
+- De controle of project "fcd2b84e..." nog voorkomt in Teamleader se
+  projectenlijst, plus de bijhorende lokale-databankstatus-log.
+- De "sanitair"-gefilterde klant-referentie-log.
+- De op contact-ID "167eaca6..." gerichte upsert-bevestigingslog.
+- De ruwe contacts.list-respons-log.
+
+De GENERIEKE, blijvend nuttige logging (een mislukte/overgeslagen
+km-berekening, ontbrekende configuratie, welke projecten een sync-run
+verwerkt) blijft wél behouden — die is niet aan één specifiek project
+gebonden en waardevol bij een toekomstig, gelijkaardig probleem.
+
+WorkOrderReviewPage.tsx: de km-diagnose (projectId/klant/afstand/tarief,
+toegevoegd tijdens dit debug-traject) blijft ook behouden als blijvend
+hulpmiddel, maar de zichtbaarheid is teruggezet naar enkel Supervisor+
+(was tijdelijk opengesteld voor alle rollen) en toont enkel nog wanneer
+de km-vergoeding zelf leeg blijft (was tijdelijk altijd zichtbaar).
+
+Verificatie: backend-testsuite 232 slagen (dezelfde 16 pre-existente
+mislukkingen als voordien, geen regressies — de bestaande km-tests bleven
+ongewijzigd slagen, wat bevestigt dat de verwijderde code volledig los
+stond van de kernlogica), typecheck/lint backend+frontend schoon,
+frontend-productiebuild slaagt.
+---
+ .../teamleader/project-sync.service.ts        | 58 +------------------
+ apps/web/src/pages/WorkOrderReviewPage.tsx    | 10 ++--
+ 2 files changed, 6 insertions(+), 62 deletions(-)
+
+diff --git a/apps/api/src/modules/teamleader/project-sync.service.ts b/apps/api/src/modules/teamleader/project-sync.service.ts
+index 06b1390..78557e8 100644
+--- a/apps/api/src/modules/teamleader/project-sync.service.ts
++++ b/apps/api/src/modules/teamleader/project-sync.service.ts
+@@ -132,28 +132,6 @@ export class ProjectSyncService {
+       throw this.wrapTeamleaderError(err);
+     }
+ 
+-    // Op vraag (7/9/2026, 8e ronde): het project-ID dat de werkbon effectief
+-    // gebruikt (fcd2b84e-f3c6-0a91-8762-39ba5339cecf) kwam in geen enkele
+-    // eerdere "sanitair"-gefilterde log voor — vermoeden: dit project komt
+-    // niet (meer) voor in Teamleader se eigen projects.list-respons (bv.
+-    // gearchiveerd/verwijderd in Teamleader), waardoor de rest van deze
+-    // sync-functie het structureel nooit bereikt en de lokale rij dus nooit
+-    // een adres/afstand krijgt — ook al laat de app blijkbaar toe om er
+-    // nieuwe werkbonnen op aan te maken.
+-    const targetRow = rows.find((row) => row.id === 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf');
+-    // eslint-disable-next-line no-console
+-    console.log(
+-      targetRow
+-        ? `Km-diagnose: project fcd2b84e... komt WEL voor in de verse Teamleader-projectenlijst — naam="${targetRow.name}", status="${targetRow.status}", klant-referentie=${JSON.stringify(targetRow.customer)}.`
+-        : `Km-diagnose: project fcd2b84e... komt NIET (meer) voor in de verse Teamleader-projectenlijst (${rows.length} projecten totaal opgehaald) — waarschijnlijk gearchiveerd/verwijderd in Teamleader zelf.`,
+-    );
+-    const localTargetProject = await this.prisma.project.findUnique({
+-      where: { teamleaderId: 'fcd2b84e-f3c6-0a91-8762-39ba5339cecf' },
+-      select: { id: true, name: true, address: true, kmDistanceOneWayMeters: true, isArchivedInTl: true, lastSyncedAt: true },
+-    });
+-    // eslint-disable-next-line no-console
+-    console.log(`Km-diagnose: lokale databankstatus voor project fcd2b84e... (vóór deze sync-run):`, JSON.stringify(localTargetProject));
+-
+     let skippedWithoutCustomerCount = 0;
+     const rowsWithCustomer: { row: NormalizedProjectRow; customer: TeamleaderCustomerRef }[] = [];
+     for (const row of rows) {
+@@ -162,18 +140,6 @@ export class ProjectSyncService {
+       } else {
+         skippedWithoutCustomerCount += 1;
+       }
+-      // Op vraag (7/9/2026, diagnose, 2e helft): het opgehaalde adres voor
+-      // contactpersoon "Ruben Mazzier" bleek zelf volledig en correct
+-      // ({"line_1":"Hundelgemsesteenweg 737","postal_code":"9820","city":
+-      // "Merelbeke",...}) — het probleem moet dus in de koppeling tussen
+-      // PROJECT en klant-ID zitten, niet in de adresverwerking zelf. Log
+-      // daarom expliciet welke klant-referentie (type + Teamleader-ID) elk
+-      // project met "sanitair" in de naam heeft, om te vergelijken met het
+-      // bevestigde contact-ID van Ruben Mazzier.
+-      if (row.name.toLowerCase().includes('sanitair')) {
+-        // eslint-disable-next-line no-console
+-        console.log(`Km-diagnose: project "${row.name}" (${row.id}) heeft klant-referentie:`, JSON.stringify(row.customer));
+-      }
+     }
+ 
+     let customerDetailsByKey: Map<string, CustomerDetails>;
+@@ -293,7 +259,7 @@ export class ProjectSyncService {
+           }
+           const localCustomer = await localCustomerCache.get(cacheKey)!;
+ 
+-          const upsertedProject = await this.prisma.project.upsert({
++          await this.prisma.project.upsert({
+             where: { teamleaderId: row.id },
+             create: {
+               teamleaderId: row.id,
+@@ -319,12 +285,6 @@ export class ProjectSyncService {
+               lastSyncedAt: new Date(),
+             },
+           });
+-          if (ref.id === '167eaca6-f41d-048c-bf75-b10ac48f8faa') {
+-            // eslint-disable-next-line no-console
+-            console.log(
+-              `Km-diagnose: project "${row.name}" (${row.id}) verwerkt — details.address="${details.address}", opgeslagen address="${upsertedProject.address}".`,
+-            );
+-          }
+           seenTeamleaderIds.push(row.id);
+ 
+           // Phase 12, deel D — enkel herberekenen wanneer het adres effectief
+@@ -422,22 +382,6 @@ export class ProjectSyncService {
+         : Promise.resolve<CompanyInfoRow[]>([]),
+     ]);
+ 
+-    // Op vraag (7/9/2026, diagnose): een contactpersoon met een zichtbaar
+-    // volledig adres in Teamleader ("Ruben Mazzier") kreeg toch geen
+-    // km-afstand — ondanks dat `primary_address` bevestigd het juiste
+-    // veldnamen zijn voor contacts.list/companies.list (Teamleader se eigen
+-    // apiary.apib). Tijdelijke, gerichte log van de RUWE respons om te zien
+-    // wat er precies binnenkomt, i.p.v. verder te gissen op basis van
+-    // documentatie alleen. Bewust enkel de velden die ertoe doen (geen
+-    // volledige contactgegevens in de logs).
+-    if (contactIds.length > 0) {
+-      // eslint-disable-next-line no-console
+-      console.log(
+-        `Km-diagnose: ruwe contacts.list-respons (${contactRows.length} van ${contactIds.length} opgevraagd):`,
+-        JSON.stringify(contactRows.map((c) => ({ id: c.id, name: `${c.first_name} ${c.last_name}`, primary_address: c.primary_address }))),
+-      );
+-    }
+-
+     const result = new Map<string, CustomerDetails>();
+     for (const contact of contactRows) {
+       result.set(`contact:${contact.id}`, {
+diff --git a/apps/web/src/pages/WorkOrderReviewPage.tsx b/apps/web/src/pages/WorkOrderReviewPage.tsx
+index 27c1c25..a614a65 100644
+--- a/apps/web/src/pages/WorkOrderReviewPage.tsx
++++ b/apps/web/src/pages/WorkOrderReviewPage.tsx
+@@ -302,7 +302,7 @@ export function WorkOrderReviewPage() {
+           // precies omdat een technicus (EMPLOYEE-rol) het test-account is.
+           // Terug beperken tot Supervisor+ zodra het onderliggende
+           // km-probleem effectief bevestigd en opgelost is.
+-          showKmDebug={user != null}
++          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
+           isUploadingPhoto={isUploadingPhoto}
+           uploadError={uploadError}
+           category={category}
+@@ -317,7 +317,7 @@ export function WorkOrderReviewPage() {
+       {!isLoading && workOrder && workOrder.status === 'DRAFT' && step === 'sign' && (
+         <SignStep
+           workOrder={workOrder}
+-          showKmDebug={user != null}
++          showKmDebug={user != null && roleAtLeast(user.role, 'SUPERVISOR')}
+           pendingWeekCount={pendingWeekCount}
+           pendingWeekEntries={pendingWeekEntries}
+           pendingWeekKmInfo={pendingWeekKmInfo}
+@@ -694,7 +694,7 @@ function SignedWorkOrderView({
+       <div className="rounded-xl border border-emerald-900 bg-emerald-950 p-4 text-center text-sm text-emerald-200">
+         Deze werkbon is ondertekend en kan niet meer gewijzigd worden.
+       </div>
+-      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug />
++      <WorkOrderSummaryCard workOrder={workOrder} showKmDebug={canManagePdf} />
+ 
+       {canManagePdf && (
+         <TeamleaderSyncSection
+@@ -890,8 +890,8 @@ function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrder
+       {workOrder.kmAmountCents !== null && workOrder.kmAmountCents > 0 && (
+         <p className="mt-1 text-right text-xs text-neutral-400">Verplaatsingskosten: {formatEuroCents(workOrder.kmAmountCents)}</p>
+       )}
+-      {/* Op vraag (7/9/2026, debug-traject): toont nu ALTIJD wanneer showKmDebug aan staat, ook al is kmAmountCents wél gezet — sluit uit dat de eerdere, striktere voorwaarde zelf ergens de boosdoener was. Terug vernauwen zodra het onderliggende km-probleem bevestigd en opgelost is. */}
+-      {showKmDebug && (
++      {/* Op vraag (7/9/2026, na een lang debug-traject rond een externe OpenRouteService-storing, uiteindelijk opgelost via HERE als alternatieve provider) — enkel zichtbaar voor Supervisor+ én enkel wanneer de km-vergoeding zelf leeg blijft, als hulpmiddel om een toekomstig, gelijkaardig probleem sneller te kunnen diagnosticeren. */}
++      {showKmDebug && (workOrder.kmAmountCents === null || workOrder.kmAmountCents === 0) && (
+         <p className="mt-1 text-right text-[11px] text-neutral-500">
+           (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, afstand ={' '}
+           {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief = {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'}{' '}
+-- 
+2.43.0
+
