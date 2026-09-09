@@ -568,7 +568,7 @@ export class ProjectSyncService {
     if (!this.distanceService || !this.companySettingsService) {
       // eslint-disable-next-line no-console
       console.warn(
-        `Km-afstand kan niet berekend worden voor ${allProjects.length} project(en): OPENROUTESERVICE_API_KEY is niet geconfigureerd.`,
+        `Km-afstand kan niet berekend worden voor ${allProjects.length} project(en): geen afstandsprovider geconfigureerd (HERE_API_KEY of OPENROUTESERVICE_API_KEY).`,
       );
       return;
     }

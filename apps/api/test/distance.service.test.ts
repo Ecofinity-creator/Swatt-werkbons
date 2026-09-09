@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { computeKmAmountCents, DistanceServiceError, OpenRouteServiceDistanceProvider } from '../src/modules/distance/distance.service';
+import { computeKmAmountCents, DistanceServiceError, HereDistanceProvider, OpenRouteServiceDistanceProvider } from '../src/modules/distance/distance.service';
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
   return {
@@ -81,6 +81,59 @@ describe('OpenRouteServiceDistanceProvider', () => {
       .mockResolvedValueOnce(jsonResponse(200, { features: [] }));
 
     const provider = new OpenRouteServiceDistanceProvider('test-key');
+    await expect(provider.getDrivingDistanceMetersOneWay('Swatt-adres', 'Klantadres')).rejects.toThrow(DistanceServiceError);
+  });
+});
+
+describe('HereDistanceProvider (op vraag 7/9/2026, na een langdurige OpenRouteService-storing)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const GEOCODE_SWATT = { items: [{ position: { lat: 51.2, lng: 4.4 } }] };
+  const GEOCODE_CUSTOMER = { items: [{ position: { lat: 51.3, lng: 4.5 } }] };
+  const ROUTE_12KM = { routes: [{ sections: [{ summary: { length: 12345.6 } }] }] };
+
+  it('geocodeert beide adressen en berekent de rijafstand in meter, afgerond', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, GEOCODE_SWATT))
+      .mockResolvedValueOnce(jsonResponse(200, GEOCODE_CUSTOMER))
+      .mockResolvedValueOnce(jsonResponse(200, ROUTE_12KM));
+
+    const provider = new HereDistanceProvider('test-key');
+    const meters = await provider.getDrivingDistanceMetersOneWay('Swatt-adres', 'Klantadres');
+
+    expect(meters).toBe(12346); // afgerond
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const geocodeCall = fetchMock.mock.calls[0]![0] as URL;
+    expect(geocodeCall.toString()).toContain('geocode.search.hereapi.com/v1/geocode');
+    expect(geocodeCall.searchParams.get('q')).toBe('Swatt-adres');
+    const routingCall = fetchMock.mock.calls[2]![0] as URL;
+    expect(routingCall.toString()).toContain('router.hereapi.com/v8/routes');
+    expect(routingCall.searchParams.get('origin')).toBe('51.2,4.4');
+    expect(routingCall.searchParams.get('destination')).toBe('51.3,4.5');
+    expect(routingCall.searchParams.get('transportMode')).toBe('car');
+  });
+
+  it('gooit een duidelijke fout wanneer een adres niet geocodeerbaar is', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { items: [] }));
+
+    const provider = new HereDistanceProvider('test-key');
+    await expect(provider.getDrivingDistanceMetersOneWay('Onbestaand adres', 'Klantadres')).rejects.toThrow(DistanceServiceError);
+  });
+
+  it('gooit een duidelijke fout bij een blijvende serverfout (geen 429) — bv. het HTTP 403 dat OpenRouteService liet crashen', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: 'Invalid API key or access to this API has been disallowed' }));
+
+    const provider = new HereDistanceProvider('test-key');
     await expect(provider.getDrivingDistanceMetersOneWay('Swatt-adres', 'Klantadres')).rejects.toThrow(DistanceServiceError);
   });
 });

@@ -117,6 +117,98 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Op vraag (7/9/2026): vervanging/alternatief voor OpenRouteService na een
+ * langdurige, externe storing daar ("Invalid API key or access to this API
+ * has been disallowed", HTTP 403 — bevestigd op OpenRouteService's eigen
+ * communityforum door meerdere andere getroffen gebruikers, dus geen fout
+ * in onze configuratie of code). HERE (voorheen Nokia HERE) combineert
+ * geocoding + routing in één platform, met een gratis laag die voor dit
+ * gebruikspatroon (enkel bij een adreswijziging, of on-demand voor één
+ * project) ruimschoots voldoende is.
+ *
+ * Endpoints geverifieerd via docs.here.com (7/9/2026):
+ * - Geocoding: `GET https://geocode.search.hereapi.com/v1/geocode?q=<adres>&apiKey=...`
+ *   → `{ items: [{ position: { lat, lng } }] }`.
+ * - Routing: `GET https://router.hereapi.com/v8/routes?transportMode=car&origin=<lat>,<lng>&destination=<lat>,<lng>&return=summary&apiKey=...`
+ *   → `{ routes: [{ sections: [{ summary: { length: <meter> } }] }] }`.
+ * Zoals de projectregel voorschrijft ("verzin geen endpoints"): dit is geen
+ * aanname maar expliciet nagekeken vóór implementatie.
+ */
+export class HereDistanceProvider implements DistanceService {
+  constructor(private readonly apiKey: string) {}
+
+  async getDrivingDistanceMetersOneWay(fromAddress: string, toAddress: string): Promise<number> {
+    const [from, to] = await Promise.all([this.geocode(fromAddress), this.geocode(toAddress)]);
+
+    const url = new URL(HERE_ROUTING_URL);
+    url.searchParams.set('apiKey', this.apiKey);
+    url.searchParams.set('transportMode', 'car');
+    url.searchParams.set('origin', `${from.lat},${from.lng}`);
+    url.searchParams.set('destination', `${to.lat},${to.lng}`);
+    url.searchParams.set('return', 'summary');
+
+    const response = await this.fetchWithRetry(url, 'rijafstand berekenen');
+    const data = (await response.json()) as HereRoutesResponse;
+    const length = data.routes?.[0]?.sections?.[0]?.summary?.length;
+    if (typeof length !== 'number') {
+      throw new DistanceServiceError('HERE gaf geen route terug tussen deze twee adressen.');
+    }
+    return Math.round(length);
+  }
+
+  private async geocode(address: string): Promise<{ lat: number; lng: number }> {
+    const url = new URL(HERE_GEOCODE_URL);
+    url.searchParams.set('apiKey', this.apiKey);
+    url.searchParams.set('q', address);
+
+    const response = await this.fetchWithRetry(url, `adres lokaliseren ("${address}")`);
+    const data = (await response.json()) as HereGeocodeResponse;
+    const position = data.items?.[0]?.position;
+    if (!position) {
+      throw new DistanceServiceError(`Kon het adres "${address}" niet lokaliseren.`);
+    }
+    return position;
+  }
+
+  /** Zelfde exponential-backoff-filosofie als OpenRouteServiceDistanceProvider hierboven. */
+  private async fetchWithRetry(url: URL, actionDescription: string): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
+      let response: Response;
+      try {
+        response = await fetch(url);
+      } catch (err) {
+        lastError = err;
+        await sleep(Math.min(2 ** attempt * 500, MAX_RATE_LIMIT_WAIT_MS));
+        continue;
+      }
+      if (response.ok) {
+        return response;
+      }
+      if (response.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+        const retryAfterHeader = response.headers.get('retry-after');
+        const waitMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : Math.min(2 ** attempt * 1000, MAX_RATE_LIMIT_WAIT_MS);
+        await sleep(waitMs);
+        continue;
+      }
+      throw new DistanceServiceError(`HERE-fout bij ${actionDescription} (HTTP ${response.status}).`);
+    }
+    throw new DistanceServiceError(`HERE niet bereikbaar bij ${actionDescription}: ${String(lastError)}`);
+  }
+}
+
+const HERE_GEOCODE_URL = 'https://geocode.search.hereapi.com/v1/geocode';
+const HERE_ROUTING_URL = 'https://router.hereapi.com/v8/routes';
+
+interface HereGeocodeResponse {
+  items: Array<{ position: { lat: number; lng: number } }>;
+}
+
+interface HereRoutesResponse {
+  routes: Array<{ sections: Array<{ summary: { length: number } }> }>;
+}
+
+/**
  * Phase 12, deel D — km-vergoeding heen-en-terug: `kmDistanceOneWayMeters`
  * is de rijafstand in één richting (zie DistanceService hierboven);
  * vermenigvuldigd met 2 voor heen-terug, omgezet naar kilometer, en

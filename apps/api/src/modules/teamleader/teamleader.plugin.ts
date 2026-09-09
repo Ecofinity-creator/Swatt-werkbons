@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
-import { getDistanceServiceApiKey, isDistanceServiceConfigured } from '../../config/env';
+import { getDistanceServiceApiKey, getDistanceServiceProvider, isDistanceServiceConfigured } from '../../config/env';
 import { SyncJobService } from '../sync/sync-job.service';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
-import { OpenRouteServiceDistanceProvider, type DistanceService } from '../distance/distance.service';
+import { HereDistanceProvider, OpenRouteServiceDistanceProvider, type DistanceService } from '../distance/distance.service';
 import { FileSyncService } from './file-sync.service';
 import { MilestoneSyncService } from './milestone-sync.service';
 import { ProjectSyncService } from './project-sync.service';
@@ -63,10 +63,21 @@ export default fp(async function teamleaderPlugin(app: FastifyInstance) {
   const distanceServiceConfigured = isDistanceServiceConfigured();
   if (!distanceServiceConfigured) {
     app.log.warn(
-      'OPENROUTESERVICE_API_KEY is niet ingesteld — de km-vergoeding (verplaatsingskosten) blijft daardoor overal uitgeschakeld, ook al staan een km-tarief en bedrijfsadres wél correct ingesteld in Bedrijfsgegevens.',
+      'Noch HERE_API_KEY, noch OPENROUTESERVICE_API_KEY is ingesteld — de km-vergoeding (verplaatsingskosten) blijft daardoor overal uitgeschakeld, ook al staan een km-tarief en bedrijfsadres wél correct ingesteld in Bedrijfsgegevens.',
     );
   }
-  const distanceService = distanceServiceConfigured ? new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey()) : null;
+  // Op vraag (7/9/2026): HERE heeft voorrang op OpenRouteService (zie
+  // getDistanceServiceProvider()) sinds een langdurige, externe storing bij
+  // OpenRouteService — zie de toelichting bij HereDistanceProvider.
+  const distanceServiceProvider = getDistanceServiceProvider();
+  const distanceService: DistanceService | null = distanceServiceConfigured
+    ? distanceServiceProvider === 'HERE'
+      ? new HereDistanceProvider(getDistanceServiceApiKey())
+      : new OpenRouteServiceDistanceProvider(getDistanceServiceApiKey())
+    : null;
+  if (distanceServiceConfigured) {
+    app.log.info(`Km-vergoeding: actieve afstandsprovider is ${distanceServiceProvider}.`);
+  }
   app.decorate('distanceService', distanceService);
   const companySettingsService = new CompanySettingsService(app.prisma);
   app.decorate('projectSyncService', new ProjectSyncService(app.prisma, teamleaderClient, distanceService, companySettingsService));

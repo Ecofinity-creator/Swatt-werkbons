@@ -75,6 +75,20 @@ const rawEnvSchema = z.object({
   OPENROUTESERVICE_API_KEY: z.string().min(1).optional(),
 
   /**
+   * Op vraag (7/9/2026): OpenRouteService bleek een langdurige, externe
+   * storing te hebben ("Invalid API key or access to this API has been
+   * disallowed", HTTP 403 — bevestigd via meerdere andere getroffen
+   * gebruikers op OpenRouteService's eigen communityforum, dus geen fout in
+   * onze configuratie). HERE (voorheen Nokia HERE) is het alternatief:
+   * combineert geocoding + routing in één platform, gratis laag ruim
+   * voldoende voor dit gebruikspatroon (enkel bij een adreswijziging), en
+   * onafhankelijk brontabellen bevestigd (docs.here.com, sept. 2026). Zie de
+   * toelichting bij getDistanceServiceApiKey() hieronder voor de
+   * voorkeursvolgorde tussen beide sleutels.
+   */
+  HERE_API_KEY: z.string().min(1).optional(),
+
+  /**
    * Phase 9 — Redis voor de BullMQ-achtergrondwerker (sectie 15). Bewust een
    * default i.p.v. verplicht: dit houdt lokale dev/test zonder Redis werkend
    * voor alles wat geen sync triggert (queue.ts verbindt pas lazy, bij het
@@ -225,15 +239,27 @@ export function getEmailConfig(): EmailEnvConfig {
   return { apiKey: env.RESEND_API_KEY, fromAddress: env.EMAIL_FROM_ADDRESS };
 }
 
-/** Phase 12, deel D — true zodra OPENROUTESERVICE_API_KEY gezet is. */
+/** Phase 12, deel D — true zodra minstens één van beide km-afstandsproviders geconfigureerd is. */
 export function isDistanceServiceConfigured(): boolean {
-  return env.OPENROUTESERVICE_API_KEY !== undefined;
+  return env.HERE_API_KEY !== undefined || env.OPENROUTESERVICE_API_KEY !== undefined;
 }
 
-/** Werp altijd eerst `isDistanceServiceConfigured()` op — deze gooit als de configuratie ontbreekt. */
+/**
+ * Op vraag (7/9/2026): welke provider effectief gebruikt wordt — HERE heeft
+ * voorrang zodra beide sleutels gezet zijn (aanbevolen sinds de langdurige
+ * OpenRouteService-storing van juli-september 2026), maar
+ * OPENROUTESERVICE_API_KEY blijft ondersteund als terugvaloptie zonder
+ * meteen een tweede account te moeten aanmaken.
+ */
+export function getDistanceServiceProvider(): 'HERE' | 'OPENROUTESERVICE' {
+  return env.HERE_API_KEY !== undefined ? 'HERE' : 'OPENROUTESERVICE';
+}
+
+/** Werp altijd eerst `isDistanceServiceConfigured()` op — deze gooit als geen van beide geconfigureerd is. */
 export function getDistanceServiceApiKey(): string {
-  if (env.OPENROUTESERVICE_API_KEY === undefined) {
-    throw new Error('getDistanceServiceApiKey() aangeroepen terwijl OPENROUTESERVICE_API_KEY niet geconfigureerd is — roep eerst isDistanceServiceConfigured() op.');
+  const key = env.HERE_API_KEY ?? env.OPENROUTESERVICE_API_KEY;
+  if (key === undefined) {
+    throw new Error('getDistanceServiceApiKey() aangeroepen terwijl noch HERE_API_KEY, noch OPENROUTESERVICE_API_KEY geconfigureerd is — roep eerst isDistanceServiceConfigured() op.');
   }
-  return env.OPENROUTESERVICE_API_KEY;
+  return key;
 }
