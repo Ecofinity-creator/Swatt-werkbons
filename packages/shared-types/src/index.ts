@@ -998,12 +998,31 @@ export interface ListInvoiceableWorkOrdersResponseBody {
   workOrders: InvoiceableWorkOrderSummary[];
 }
 
+/**
+ * Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan te
+ * passen vooraleer de factuur naar teamleader gaat". `invoiceableSeconds`/
+ * `kmAmountCents` blijven de werkelijke, bevroren waarden (nooit gewijzigd
+ * door een correctie); `adjustedXxx` is de eenmalige override voor déze
+ * batch (`null` = geen correctie); `effectiveXxx` is wat effectief naar
+ * Teamleader gestuurd wordt (`adjustedXxx ?? werkelijkeXxx`) — wat de
+ * Facturatie-pagina toont als het "echte" totaal.
+ */
 export interface InvoiceBatchLineSummary {
   id: string;
   workOrderId: string;
   workOrderNumber: string;
   projectName: string;
+  /** ISO-datum, of `null` als de werkbon (uitzonderlijk) nog geen handtekening heeft. */
+  signedAt: string | null;
+  employeeDisplayNames: string[];
   invoiceableSeconds: number;
+  adjustedInvoiceableSeconds: number | null;
+  effectiveInvoiceableSeconds: number;
+  /** Bevroren km-vergoedingsbedrag (eurocent) — zie WorkOrder.kmAmountCents. `null` = geen km-vergoeding van toepassing op deze werkbon. */
+  kmAmountCents: number | null;
+  adjustedKmAmountCents: number | null;
+  effectiveKmAmountCents: number | null;
+  adjustmentNote: string | null;
 }
 
 /**
@@ -1077,6 +1096,22 @@ export interface UpdateInvoiceBatchProjectRateBody {
 }
 
 export interface UpdateInvoiceBatchProjectRateResponseBody {
+  batch: InvoiceBatchSummary;
+}
+
+/**
+ * Body van POST /admin/invoice-batches/:id/lines/:lineId/adjustment —
+ * klantvraag 10/9/2026. Elk veld `null` wist die correctie weer.
+ * `adjustedInvoiceableSeconds`/`adjustedKmAmountCents` zijn nul of positief
+ * (nooit negatief factureren).
+ */
+export interface SetInvoiceBatchLineAdjustmentBody {
+  adjustedInvoiceableSeconds: number | null;
+  adjustedKmAmountCents: number | null;
+  adjustmentNote: string | null;
+}
+
+export interface SetInvoiceBatchLineAdjustmentResponseBody {
   batch: InvoiceBatchSummary;
 }
 

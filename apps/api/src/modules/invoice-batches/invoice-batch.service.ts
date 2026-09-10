@@ -18,6 +18,13 @@ const WITH_BATCH_DETAILS = {
           include: {
             project: true,
             timeEntries: { include: { timeEntry: { include: { employee: true } } } },
+            // Klantvraag 10/9/2026 — nodig voor de ondertekeningsdatum (per-
+            // regel weergave op de Facturatie-pagina en voor de
+            // week-groepering van de werkbonbundel, zie
+            // invoice-batch-pdf-bundle.service.ts) en het bevroren
+            // km-vergoedingsbedrag (getoond als "werkelijke" waarde naast een
+            // eventuele correctie).
+            signature: true,
           },
         },
       },
@@ -30,7 +37,23 @@ export interface InvoiceBatchLineRecord {
   id: string;
   workOrderId: string;
   invoiceableSeconds: number;
-  workOrder: { workOrderNumber: string; project: { name: string } };
+  /**
+   * Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan
+   * te passen vooraleer de factuur naar teamleader gaat". `null` = geen
+   * correctie, de werkelijke waarde (invoiceableSeconds hiernaast resp.
+   * workOrder.kmAmountCents) blijft gelden. Zie setLineAdjustment()
+   * hieronder en de toelichting bij InvoiceBatchLine in schema.prisma.
+   */
+  adjustedInvoiceableSeconds: number | null;
+  adjustedKmAmountCents: number | null;
+  adjustmentNote: string | null;
+  workOrder: {
+    workOrderNumber: string;
+    project: { name: string };
+    kmAmountCents: number | null;
+    signature: { signedAt: Date } | null;
+    timeEntries: Array<{ timeEntry: { employee: { displayName: string } } }>;
+  };
 }
 
 /** Zie InvoiceBatchProjectRateSummary in shared-types voor de betekenis van elk veld. */
@@ -69,6 +92,8 @@ interface BatchWithProjectDataRow {
   lines: Array<{
     workOrder: {
       project: { id: string; name: string; hourlyRateCents: number | null };
+      kmAmountCents: number | null;
+      signature: { signedAt: Date } | null;
       timeEntries: Array<{
         timeEntry: {
           employee: { id: string; displayName: string };
@@ -244,6 +269,52 @@ export class InvoiceBatchService {
         update: { hourlyRateCents },
       });
     }
+
+    const updated = await this.getById(batchId);
+    if (!updated) {
+      // Kan in de praktijk niet voorkomen — de batch bestond net hierboven nog.
+      throw InvoiceBatchErrors.notFound();
+    }
+    return updated;
+  }
+
+  /**
+   * Klantvraag 10/9/2026 — "de klant wil ook nog een mogelijkheid om de
+   * gefactureerde km en uren aan te passen vooraleer de factuur naar
+   * teamleader gaat." Vult (of wist, met `null`) de correctie op één
+   * werkbonregel van deze batch. Enkel toegestaan op een DRAFT-batch, zelfde
+   * reden als setProjectRate hierboven: eens `invoices.draft` is
+   * aangeroepen liggen de geprijsde regels al vast bij Teamleader. Wijzigt
+   * bewust nooit `invoiceableSeconds`/`WorkOrder.kmAmountCents` zelf (de
+   * bevroren, werkelijke waarden — business rule 3-analoog) — enkel deze
+   * aparte override-kolommen, zodat de correctie zelf ook weer ongedaan
+   * gemaakt kan worden vóór de conceptfactuur effectief aangemaakt wordt.
+   */
+  async setLineAdjustment(
+    batchId: string,
+    lineId: string,
+    input: { adjustedInvoiceableSeconds: number | null; adjustedKmAmountCents: number | null; adjustmentNote: string | null },
+  ): Promise<InvoiceBatchRecord> {
+    const batch = await this.prisma.invoiceBatch.findUnique({ where: { id: batchId } });
+    if (!batch) {
+      throw InvoiceBatchErrors.notFound();
+    }
+    if (batch.status !== 'DRAFT') {
+      throw InvoiceBatchErrors.alreadySubmittedToTeamleader();
+    }
+    const line = await this.prisma.invoiceBatchLine.findUnique({ where: { id: lineId } });
+    if (!line || line.invoiceBatchId !== batchId) {
+      throw InvoiceBatchErrors.lineNotOnBatch();
+    }
+
+    await this.prisma.invoiceBatchLine.update({
+      where: { id: lineId },
+      data: {
+        adjustedInvoiceableSeconds: input.adjustedInvoiceableSeconds,
+        adjustedKmAmountCents: input.adjustedKmAmountCents,
+        adjustmentNote: input.adjustmentNote?.trim() || null,
+      },
+    });
 
     const updated = await this.getById(batchId);
     if (!updated) {

@@ -1,4 +1,9 @@
-import type { InvoiceBatchProjectRateSummary, InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
+import type {
+  InvoiceBatchLineSummary,
+  InvoiceBatchProjectRateSummary,
+  InvoiceBatchSummary,
+  InvoiceableWorkOrderSummary,
+} from '@swatt/shared-types';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { invoiceBatchesApi } from '../../api/client';
@@ -38,6 +43,66 @@ function formatPeriodLabel(periodLabel: string): string {
   if (!year || !month) return periodLabel;
   const date = new Date(Number(year), Number(month) - 1, 1);
   return date.toLocaleDateString('nl-BE', { month: 'long', year: 'numeric' });
+}
+
+/** "2,17" i.p.v. "niet ingesteld" — voor het km-invoerveld hieronder (leeg = geen km-vergoeding). */
+function formatEuroInputValue(cents: number | null): string {
+  return cents === null ? '' : (cents / 100).toFixed(2);
+}
+
+/**
+ * Klantvraag 10/9/2026 — "H:MM"-invoerveld voor de uren-correctie, bv. "2:17".
+ * `null` bij een ongeldige invoer (i.p.v. gooien) zodat de aanroeper zelf een
+ * duidelijke Nederlandstalige foutmelding kan tonen (sectie 27).
+ */
+function parseHmInput(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  const match = /^(\d{1,3}):([0-5]?\d)$/.exec(trimmed);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  return hours * 3600 + minutes * 60;
+}
+
+/**
+ * Zelfde formule als teamleader-invoice.service.ts's/invoice-batch-pdf-
+ * bundle.service.ts's isoWeekKeyOf (ISO-8601, maandag als eerste dag) —
+ * hier enkel gebruikt om de "Download per week"-links hieronder te
+ * groeperen/labelen; de backend berekent deze sleutel zelf onafhankelijk
+ * opnieuw bij de effectieve bundeling, dus een eventuele frontend/backend-
+ * afwijking kan hoogstens een verkeerd label opleveren, nooit een verkeerde
+ * bundel-inhoud.
+ */
+function isoWeekKeyOf(date: Date): string {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNumber = (d.getUTCDay() + 6) % 7; // maandag = 0
+  d.setUTCDate(d.getUTCDate() - dayNumber + 3); // donderdag van deze ISO-week
+  const isoYear = d.getUTCFullYear();
+  const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
+  const firstThursdayDayNumber = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstThursdayDayNumber + 3);
+  const weekNumber = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 24 * 60 * 60 * 1000));
+  return `${isoYear}-W${String(weekNumber).padStart(2, '0')}`;
+}
+
+interface WeekPdfGroup {
+  weekKey: string;
+  weekNumber: number;
+  lineCount: number;
+}
+
+/** Groepeert de werkbonnen van een batch per ISO-week van hun ondertekeningsdatum — voor de "Download per week"-links (klantvraag 10/9/2026). */
+function weekPdfGroupsForBatch(batch: InvoiceBatchSummary): WeekPdfGroup[] {
+  const counts = new Map<string, number>();
+  for (const line of batch.lines) {
+    if (!line.signedAt) continue;
+    const weekKey = isoWeekKeyOf(new Date(line.signedAt));
+    counts.set(weekKey, (counts.get(weekKey) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([weekKey, lineCount]) => ({ weekKey, weekNumber: Number(weekKey.split('-W')[1]), lineCount }))
+    .sort((a, b) => a.weekKey.localeCompare(b.weekKey));
 }
 
 interface ProjectGroup {
@@ -107,6 +172,17 @@ export function InvoicingPage() {
   const [rateError, setRateError] = useState<string | null>(null);
   const [creatingDraftBatchId, setCreatingDraftBatchId] = useState<string | null>(null);
   const [draftErrorByBatchId, setDraftErrorByBatchId] = useState<Record<string, string>>({});
+
+  // Klantvraag 10/9/2026: werkbonnen van een batch tonen/corrigeren (uren/km
+  // vóór "Maak conceptfactuur in Teamleader") en de werkbon-PDF-bundel
+  // downloaden.
+  const [expandedBatchId, setExpandedBatchId] = useState<string | null>(null);
+  const [editingLine, setEditingLine] = useState<{ batchId: string; lineId: string } | null>(null);
+  const [hoursInputValue, setHoursInputValue] = useState('');
+  const [kmInputValue, setKmInputValue] = useState('');
+  const [noteInputValue, setNoteInputValue] = useState('');
+  const [isSavingAdjustment, setIsSavingAdjustment] = useState(false);
+  const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
 
   const load = useCallback(async (period: string) => {
     try {
@@ -233,6 +309,44 @@ export function InvoicingPage() {
       setDraftErrorByBatchId((previous) => ({ ...previous, [batchId]: message }));
     } finally {
       setCreatingDraftBatchId(null);
+    }
+  }
+
+  function handleStartEditLine(batchId: string, line: InvoiceBatchLineSummary) {
+    setEditingLine({ batchId, lineId: line.id });
+    setHoursInputValue(line.adjustedInvoiceableSeconds !== null ? formatHm(line.adjustedInvoiceableSeconds) : '');
+    setKmInputValue(formatEuroInputValue(line.adjustedKmAmountCents));
+    setNoteInputValue(line.adjustmentNote ?? '');
+    setAdjustmentError(null);
+  }
+
+  async function handleSaveLineAdjustment(batchId: string, lineId: string) {
+    const adjustedInvoiceableSeconds = parseHmInput(hoursInputValue);
+    if (hoursInputValue.trim() !== '' && adjustedInvoiceableSeconds === null) {
+      setAdjustmentError('Vul de uren in als uur:minuut (bv. 2:17), of laat leeg om de correctie te wissen.');
+      return;
+    }
+    const trimmedKm = kmInputValue.trim().replace(',', '.');
+    const kmEuros = trimmedKm === '' ? null : Number(trimmedKm);
+    if (trimmedKm !== '' && (Number.isNaN(kmEuros) || (kmEuros as number) < 0)) {
+      setAdjustmentError('Vul een geldig km-vergoedingsbedrag in (bv. 8,68), of laat leeg om de correctie te wissen.');
+      return;
+    }
+
+    setIsSavingAdjustment(true);
+    setAdjustmentError(null);
+    try {
+      await invoiceBatchesApi.setLineAdjustment(batchId, lineId, {
+        adjustedInvoiceableSeconds,
+        adjustedKmAmountCents: kmEuros === null ? null : Math.round(kmEuros * 100),
+        adjustmentNote: noteInputValue.trim() || null,
+      });
+      setEditingLine(null);
+      await load(periodLabel);
+    } catch (err) {
+      setAdjustmentError(err instanceof ApiRequestError ? err.message : 'Opslaan van de correctie is mislukt.');
+    } finally {
+      setIsSavingAdjustment(false);
     }
   }
 
@@ -391,11 +505,22 @@ export function InvoicingPage() {
                 </tr>
               </thead>
               <tbody>
-                {batches.map((batch) => (
+                {batches.map((batch) => {
+                  const isBatchExpanded = expandedBatchId === batch.id;
+                  const weekGroups = weekPdfGroupsForBatch(batch);
+                  return (
                   <Fragment key={batch.id}>
                     <tr className="border-b border-neutral-100 last:border-0 align-top">
                       <td className="px-4 py-3 font-medium">{batch.customerName}</td>
-                      <td className="px-4 py-3 text-neutral-600">{batch.lines.map((line) => line.workOrderNumber).join(', ')}</td>
+                      <td className="px-4 py-3 text-neutral-600">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedBatchId(isBatchExpanded ? null : batch.id)}
+                          className="text-sm font-medium text-swatt-gold-dark underline"
+                        >
+                          {batch.lines.length} werkbon(nen) {isBatchExpanded ? '(verbergen)' : '(tonen)'}
+                        </button>
+                      </td>
                       <td className="px-4 py-3 text-neutral-600">{formatHm(batch.totalInvoiceableSeconds)} u</td>
                       <td className="px-4 py-3 text-neutral-600">
                         <ul className="space-y-1">
@@ -510,8 +635,157 @@ export function InvoicingPage() {
                         </td>
                       </tr>
                     )}
+                    {isBatchExpanded && (
+                      <tr className="border-b border-neutral-100 bg-neutral-50/60 last:border-0">
+                        <td colSpan={7} className="px-4 py-3">
+                          {/* Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per klant/per week in 1 pdf". */}
+                          <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-neutral-200 pb-3 text-sm">
+                            <span className="font-medium text-neutral-700">Download werkbonnen (PDF):</span>
+                            <a
+                              href={invoiceBatchesApi.workOrderPdfBundleUrl(batch.id)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-swatt-gold-dark underline"
+                            >
+                              Volledige maand ({batch.lines.length})
+                            </a>
+                            {weekGroups.map((week) => (
+                              <a
+                                key={week.weekKey}
+                                href={invoiceBatchesApi.workOrderPdfBundleUrl(batch.id, week.weekKey)}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-swatt-gold-dark underline"
+                              >
+                                Week {week.weekNumber} ({week.lineCount})
+                              </a>
+                            ))}
+                          </div>
+
+                          {/* Klantvraag 10/9/2026 — gefactureerde uren/km per werkbon corrigeren vóór "Maak conceptfactuur in Teamleader". */}
+                          <table className="w-full text-left text-sm">
+                            <thead className="text-xs uppercase tracking-wide text-neutral-400">
+                              <tr>
+                                <th className="py-1">Werkbon</th>
+                                <th className="py-1">Ondertekend</th>
+                                <th className="py-1">Medewerker(s)</th>
+                                <th className="py-1 text-right">Uren</th>
+                                <th className="py-1 text-right">Km-vergoeding</th>
+                                <th className="py-1" />
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {batch.lines.map((line) => {
+                                const isEditingLine = editingLine?.batchId === batch.id && editingLine.lineId === line.id;
+                                const hasHoursAdjustment = line.adjustedInvoiceableSeconds !== null;
+                                const hasKmAdjustment = line.adjustedKmAmountCents !== null;
+                                return (
+                                  <Fragment key={line.id}>
+                                    <tr className="border-t border-neutral-100 align-top">
+                                      <td className="py-2 font-medium">{line.workOrderNumber}</td>
+                                      <td className="py-2 text-neutral-600">{formatDate(line.signedAt)}</td>
+                                      <td className="py-2 text-neutral-600">{line.employeeDisplayNames.join(', ')}</td>
+                                      <td className="py-2 text-right text-neutral-600">
+                                        {isEditingLine ? (
+                                          <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            value={hoursInputValue}
+                                            onChange={(event) => setHoursInputValue(event.target.value)}
+                                            placeholder={formatHm(line.invoiceableSeconds)}
+                                            className="w-16 rounded border border-neutral-300 px-2 py-1 text-right text-sm outline-none focus:border-swatt-gold-dark"
+                                          />
+                                        ) : (
+                                          <>
+                                            {formatHm(line.effectiveInvoiceableSeconds)} u
+                                            {hasHoursAdjustment && (
+                                              <span className="ml-1 text-xs text-neutral-400 line-through">{formatHm(line.invoiceableSeconds)} u</span>
+                                            )}
+                                          </>
+                                        )}
+                                      </td>
+                                      <td className="py-2 text-right text-neutral-600">
+                                        {isEditingLine ? (
+                                          <input
+                                            type="text"
+                                            inputMode="decimal"
+                                            value={kmInputValue}
+                                            onChange={(event) => setKmInputValue(event.target.value)}
+                                            placeholder={formatEuroInputValue(line.kmAmountCents) || '0,00'}
+                                            className="w-16 rounded border border-neutral-300 px-2 py-1 text-right text-sm outline-none focus:border-swatt-gold-dark"
+                                          />
+                                        ) : (
+                                          <>
+                                            {formatEuroCents(line.effectiveKmAmountCents)}
+                                            {hasKmAdjustment && (
+                                              <span className="ml-1 text-xs text-neutral-400 line-through">{formatEuroCents(line.kmAmountCents)}</span>
+                                            )}
+                                          </>
+                                        )}
+                                      </td>
+                                      <td className="py-2 text-right">
+                                        {batch.status !== 'DRAFT' ? null : isEditingLine ? (
+                                          <div className="flex items-center justify-end gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => void handleSaveLineAdjustment(batch.id, line.id)}
+                                              disabled={isSavingAdjustment}
+                                              className="text-xs font-semibold text-swatt-gold-dark underline disabled:opacity-50"
+                                            >
+                                              {isSavingAdjustment ? '...' : 'Opslaan'}
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setEditingLine(null)}
+                                              disabled={isSavingAdjustment}
+                                              className="text-xs text-neutral-500 underline"
+                                            >
+                                              Annuleren
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleStartEditLine(batch.id, line)}
+                                            className="text-xs text-swatt-gold-dark underline decoration-dotted underline-offset-2"
+                                          >
+                                            Corrigeren
+                                          </button>
+                                        )}
+                                      </td>
+                                    </tr>
+                                    {isEditingLine && (
+                                      <tr className="border-t border-neutral-50">
+                                        <td colSpan={6} className="pb-2">
+                                          <input
+                                            type="text"
+                                            value={noteInputValue}
+                                            onChange={(event) => setNoteInputValue(event.target.value)}
+                                            placeholder="Opmerking bij deze correctie (optioneel)"
+                                            className="w-full max-w-md rounded border border-neutral-300 px-2 py-1 text-xs outline-none focus:border-swatt-gold-dark"
+                                          />
+                                          {adjustmentError && <p className="mt-1 text-xs text-red-700">{adjustmentError}</p>}
+                                        </td>
+                                      </tr>
+                                    )}
+                                    {!isEditingLine && line.adjustmentNote && (
+                                      <tr className="border-t border-neutral-50">
+                                        <td colSpan={6} className="pb-2 text-xs italic text-neutral-500">
+                                          {line.adjustmentNote}
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </Fragment>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
                   </Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

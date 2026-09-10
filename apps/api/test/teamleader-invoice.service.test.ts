@@ -54,6 +54,9 @@ interface FakeBatch {
   projectRates: Array<{ projectId: string; hourlyRateCents: number }>;
   lines: Array<{
     invoiceableSeconds: number;
+    /** Klantvraag 10/9/2026 — zie DraftBatchLineRow in teamleader-invoice.service.ts. */
+    adjustedInvoiceableSeconds: number | null;
+    adjustedKmAmountCents: number | null;
     workOrder: {
       workOrderNumber: string;
       description: string | null;
@@ -134,6 +137,8 @@ function peterTimeEntry(overrides: Partial<FakeTimeEntry['employee']> = {}) {
 
 const baseLine = {
   invoiceableSeconds: 2 * 60 * 60 + 17 * 60, // 2u17
+  adjustedInvoiceableSeconds: null as number | null,
+  adjustedKmAmountCents: null as number | null,
   workOrder: {
     workOrderNumber: 'WB-2026-000123',
     description: 'Onderhoud uitgevoerd.',
@@ -425,6 +430,89 @@ describe('TeamleaderInvoiceService', () => {
 
     await expect(service.createDraftInvoice('batch-1')).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
     expect(client.post).not.toHaveBeenCalled();
+  });
+
+  describe('Klantvraag 10/9/2026 — uren-/km-correctie per werkbonregel vóór Teamleader-sync', () => {
+    it('gebruikt de gecorrigeerde uren i.p.v. de werkelijke wanneer adjustedInvoiceableSeconds gezet is (evenredig geschaald)', async () => {
+      // Werkelijk 2u17 (8220s), gecorrigeerd naar exact 1u (3600s) ⇒ ratio 3600/8220.
+      const line = { ...baseLine, adjustedInvoiceableSeconds: 3600 };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = allLineItems(payload);
+      expect(lineItems).toHaveLength(1);
+      expect(lineItems[0]?.quantity).toBeCloseTo(1, 2); // 1u i.p.v. de werkelijke 2,28u
+      expect(lineItems[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' }); // tarief zelf verandert niet
+    });
+
+    it('verdeelt een uren-correctie evenredig over meerdere technici op dezelfde werkbon (verhouding blijft behouden)', async () => {
+      const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters' };
+      // Peter 2u17 (8220s) + Wannes 7u45 (27900s) = 10u02 (36120s) werkelijk. Correctie naar exact de helft (18060s).
+      const multiEmployeeLine = {
+        ...baseLine,
+        adjustedInvoiceableSeconds: 18060,
+        invoiceableSeconds: 36120,
+        workOrder: {
+          ...baseLine.workOrder,
+          timeEntries: [
+            peterTimeEntry(),
+            {
+              timeEntry: {
+                startedAt: new Date('2026-08-20T08:15:00Z'),
+                endedAt: new Date('2026-08-20T16:30:00Z'), // 8u15 - 0u30 pauze = 7u45
+                pausedSeconds: 30 * 60,
+                employee: wannes,
+              },
+            },
+          ],
+        },
+      };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [multiEmployeeLine] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const groups = payload.grouped_lines as Array<{ section: { title: string }; line_items: Array<Record<string, unknown>> }>;
+      const peterGroup = groups.find((g) => g.section.title.includes('Peter'))!;
+      const wannesGroup = groups.find((g) => g.section.title.includes('Wannes'))!;
+      // Beide technici precies gehalveerd — de onderlinge verhouding (2u17 : 7u45) blijft behouden.
+      expect(peterGroup.line_items[0]?.quantity).toBeCloseTo(1.14, 2); // 2,28u / 2
+      expect(wannesGroup.line_items[0]?.quantity).toBeCloseTo(3.875, 2); // 7,75u / 2
+    });
+
+    it('gebruikt het gecorrigeerde km-bedrag i.p.v. het bevroren bedrag wanneer adjustedKmAmountCents gezet is', async () => {
+      const line = { ...baseLine, workOrder: { ...baseLine.workOrder, kmAmountCents: 868 }, adjustedKmAmountCents: 1200 };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = allLineItems(payload);
+      const kmLine = lineItems.find((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'));
+      expect(kmLine?.unit_price).toEqual({ amount: 12, tax: 'excluding' }); // gecorrigeerd (1200), niet het bevroren bedrag (868)
+    });
+
+    it('voegt alsnog een km-regel toe via adjustedKmAmountCents, ook al was er origineel geen km-vergoeding (kmAmountCents null)', async () => {
+      const line = { ...baseLine, adjustedKmAmountCents: 500 }; // baseLine.workOrder.kmAmountCents = null
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = allLineItems(payload);
+      const kmLine = lineItems.find((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'));
+      expect(kmLine?.unit_price).toEqual({ amount: 5, tax: 'excluding' });
+    });
   });
 
   it('laat de batch op DRAFT staan met een mensentaal-fout bij een mislukte Teamleader-aanroep (business rule 9)', async () => {

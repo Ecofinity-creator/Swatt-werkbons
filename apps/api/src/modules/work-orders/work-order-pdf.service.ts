@@ -163,7 +163,8 @@ export function buildPdfFileName(workOrderNumber: string, customerName: string, 
   return `${workOrderNumber}_${slugify(customerName)}_${slugify(projectName)}.pdf`;
 }
 
-function slugify(value: string): string {
+/** Ook gebruikt door invoice-batch-pdf-bundle.service.ts (klantvraag 10/9/2026) voor de gebundelde-PDF-bestandsnaam. */
+export function slugify(value: string): string {
   return value
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '') // accenten weg (bv. é → e)

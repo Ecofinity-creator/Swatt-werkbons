@@ -56,6 +56,8 @@ import type {
   UpdateCompanySettingsBody,
   UpdateCustomerHourlyRateBody,
   UpdateCustomerHourlyRateResponseBody,
+  SetInvoiceBatchLineAdjustmentBody,
+  SetInvoiceBatchLineAdjustmentResponseBody,
   UpdateInvoiceBatchProjectRateBody,
   UpdateInvoiceBatchProjectRateResponseBody,
   UpdateProjectHourlyRateBody,
@@ -445,6 +447,23 @@ export const invoiceBatchesApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** Klantvraag 10/9/2026 — correctie van uren/km per werkbonregel vóór "Maak conceptfactuur in Teamleader" (zie InvoiceBatchService.setLineAdjustment). */
+  setLineAdjustment: (batchId: string, lineId: string, body: SetInvoiceBatchLineAdjustmentBody) =>
+    request<SetInvoiceBatchLineAdjustmentResponseBody>(`/admin/invoice-batches/${batchId}/lines/${lineId}/adjustment`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per
+   * klant/per week in 1 pdf". Geeft enkel de download-URL terug (geen
+   * `request()`-aanroep: dit is een binaire PDF-download, geen JSON) — zelfde
+   * patroon als de bestaande "Download PDF"-link op één werkbon
+   * (WorkOrderReviewPage.tsx): een gewone `<a href=... target="_blank">`
+   * stuurt de httpOnly-sessiecookie automatisch mee. `weekKey`: ISO-8601
+   * ("2026-W32") — leeg = de volledige batch (= de hele maand).
+   */
+  workOrderPdfBundleUrl: (batchId: string, weekKey?: string) =>
+    `${API_BASE_URL}/admin/invoice-batches/${batchId}/work-order-pdf-bundle${weekKey ? `?week=${encodeURIComponent(weekKey)}` : ''}`,
 };
 
 /**

@@ -30,6 +30,16 @@ const WITH_DRAFT_DETAILS = {
 /** Handgeschreven vorm van de query hierboven — zelfde reden als elders in deze codebase (stale gegenereerde Prisma-client in de sandbox, zie invoice-batch.service.ts). */
 interface DraftBatchLineRow {
   invoiceableSeconds: number;
+  /**
+   * Klantvraag 10/9/2026 — eenmalige correcties op déze batch, ingevuld via
+   * "Facturatie" vóór "Maak conceptfactuur in Teamleader" (zie
+   * InvoiceBatchService.setLineAdjustment). `null` = geen correctie, de
+   * werkelijke waarde (invoiceableSeconds hiernaast resp.
+   * workOrder.kmAmountCents) blijft gelden — zie buildGroupedLinesForBatch/
+   * addKmItemsToGroups hieronder voor hoe deze effectief toegepast worden.
+   */
+  adjustedInvoiceableSeconds: number | null;
+  adjustedKmAmountCents: number | null;
   workOrder: {
     workOrderNumber: string;
     description: string | null;
@@ -348,10 +358,27 @@ function buildGroupedLinesForBatch(
   // Stap 1: uren bucketen per (technieker, project) → per periode (dag/week
   // naargelang de overurendrempel), en meteen de bijhorende weekgroep
   // aanmaken/vullen met werkbonnummers.
+  //
+  // Klantvraag 10/9/2026 — een eenmalige uren-correctie op déze batch
+  // (InvoiceBatchLine.adjustedInvoiceableSeconds) geldt per WERKBON, terwijl
+  // hier per individuele tijdregistratie gebucket wordt (er kunnen meerdere
+  // technici/dagen op één werkbon staan, sectie 8). Om de correctie toch
+  // consistent te verwerken zonder de bestaande (technieker, project,
+  // dag/week)-groepering en de dag/weekdrempel-berekening te moeten
+  // herschrijven: elke tijdregistratie van deze werkbon wordt evenredig
+  // geschaald (`ratio` = gecorrigeerd totaal ÷ werkelijk totaal), zodat de
+  // verhoudingen tussen technici/periodes behouden blijven en de som van de
+  // geschaalde uren exact het gecorrigeerde totaal oplevert. Is het
+  // werkelijke totaal (uitzonderlijk) 0 seconden, dan kan er niets evenredig
+  // verdeeld worden — de correctie heeft dan geen effect (kan in de praktijk
+  // niet voorkomen: een werkbon wordt pas factureerbaar ná minstens één
+  // afgeronde tijdregistratie).
   for (const line of batch.lines) {
     const project = line.workOrder.project;
+    const effectiveLineSeconds = line.adjustedInvoiceableSeconds ?? line.invoiceableSeconds;
+    const ratio = line.invoiceableSeconds > 0 ? effectiveLineSeconds / line.invoiceableSeconds : 0;
     for (const entry of line.workOrder.timeEntries) {
-      const seconds = computeWorkedSeconds(entry.timeEntry);
+      const seconds = computeWorkedSeconds(entry.timeEntry) * ratio;
       if (seconds <= 0) continue;
 
       const employee = entry.timeEntry.employee;
@@ -453,7 +480,12 @@ function addKmItemsToGroups(
 ): void {
   for (const line of batch.lines) {
     const workOrder = line.workOrder;
-    if (workOrder.kmAmountCents === null || workOrder.kmAmountCents <= 0) continue;
+    // Klantvraag 10/9/2026 — een eenmalige km-correctie op déze batch
+    // (InvoiceBatchLine.adjustedKmAmountCents) vervangt het bevroren bedrag
+    // voor de factuur, zonder dat bevroren bedrag (workOrder.kmAmountCents)
+    // zelf te wijzigen.
+    const effectiveKmAmountCents = line.adjustedKmAmountCents ?? workOrder.kmAmountCents;
+    if (effectiveKmAmountCents === null || effectiveKmAmountCents <= 0) continue;
 
     const ownEntries = workOrder.timeEntries.filter((entry) => entry.timeEntry.employee.id === workOrder.createdByEmployeeId);
     const candidateEntries = ownEntries.length > 0 ? ownEntries : workOrder.timeEntries;
@@ -470,7 +502,7 @@ function addKmItemsToGroups(
     group.kmItems.push({
       quantity: 1,
       description: `${workOrder.workOrderNumber} — verplaatsingskosten`,
-      unit_price: { amount: workOrder.kmAmountCents / 100, tax: 'excluding' as const },
+      unit_price: { amount: effectiveKmAmountCents / 100, tax: 'excluding' as const },
       tax_rate_id: taxRateId,
     });
   }

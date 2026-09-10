@@ -6,6 +6,8 @@ import type {
   InvoiceableWorkOrderSummary,
   ListInvoiceBatchesResponseBody,
   ListInvoiceableWorkOrdersResponseBody,
+  SetInvoiceBatchLineAdjustmentBody,
+  SetInvoiceBatchLineAdjustmentResponseBody,
   UpdateInvoiceBatchProjectRateBody,
   UpdateInvoiceBatchProjectRateResponseBody,
 } from '@swatt/shared-types';
@@ -13,15 +15,20 @@ import type { FastifyInstance } from 'fastify';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthErrors } from '../../errors';
 import { requireRole } from '../rbac/rbac.middleware';
+import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
+import { InvoiceBatchPdfBundleService } from './invoice-batch-pdf-bundle.service';
 import type { InvoiceBatchRecord, InvoiceableWorkOrderRecord } from './invoice-batch.service';
 import { InvoiceBatchService } from './invoice-batch.service';
 import {
   createInvoiceBatchBodySchema,
   invoiceBatchIdParamsSchema,
+  invoiceBatchLineParamsSchema,
   invoiceBatchProjectRateParamsSchema,
   listInvoiceBatchesQuerySchema,
   listInvoiceableWorkOrdersQuerySchema,
+  setInvoiceBatchLineAdjustmentBodySchema,
   updateInvoiceBatchProjectRateBodySchema,
+  workOrderPdfBundleQuerySchema,
 } from './invoice-batch.schemas';
 
 /**
@@ -33,6 +40,8 @@ import {
 export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<void> {
   const service = new InvoiceBatchService(app.prisma);
   const auditLogService = new AuditLogService(app.prisma);
+  const storage: StorageService = new DatabaseStorageService(app.prisma);
+  const pdfBundleService = new InvoiceBatchPdfBundleService(app.prisma, storage);
 
   app.get(
     '/admin/invoice-batches/invoiceable-work-orders',
@@ -134,6 +143,43 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
       return { batch: toBatchSummary(batch) };
     },
   );
+
+  // Klantvraag 10/9/2026 — "de klant wil ook nog een mogelijkheid om de
+  // gefactureerde km en uren aan te passen vooraleer de factuur naar
+  // teamleader gaat". Zie InvoiceBatchService.setLineAdjustment.
+  app.post(
+    '/admin/invoice-batches/:id/lines/:lineId/adjustment',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<SetInvoiceBatchLineAdjustmentResponseBody> => {
+      const params = invoiceBatchLineParamsSchema.parse(request.params);
+      const body: SetInvoiceBatchLineAdjustmentBody = setInvoiceBatchLineAdjustmentBodySchema.parse(request.body);
+      const batch = await service.setLineAdjustment(params.id, params.lineId, body);
+      await auditLogService.record({
+        actorUserId: request.currentUser?.id ?? null,
+        action: 'INVOICE_BATCH_LINE_ADJUSTED',
+        entityType: 'InvoiceBatchLine',
+        entityId: params.lineId,
+        metadata: { ...body },
+      });
+      return { batch: toBatchSummary(batch) };
+    },
+  );
+
+  // Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per
+  // klant/per week in 1 pdf ... wat meegestuurd wordt met de factuur." Zelfde
+  // download-reply-patroon als GET /work-orders/:id/pdf.
+  app.get(
+    '/admin/invoice-batches/:id/work-order-pdf-bundle',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request, reply) => {
+      const params = invoiceBatchIdParamsSchema.parse(request.params);
+      const query = workOrderPdfBundleQuerySchema.parse(request.query);
+      const bundle = await pdfBundleService.buildBundle(params.id, query.week);
+      reply.header('Content-Type', 'application/pdf');
+      reply.header('Content-Disposition', `attachment; filename="${bundle.fileName}"`);
+      return reply.send(bundle.data);
+    },
+  );
 }
 
 function toInvoiceableSummary(record: InvoiceableWorkOrderRecord): InvoiceableWorkOrderSummary {
@@ -164,7 +210,15 @@ function toBatchSummary(batch: InvoiceBatchRecord): InvoiceBatchSummary {
       workOrderId: line.workOrderId,
       workOrderNumber: line.workOrder.workOrderNumber,
       projectName: line.workOrder.project.name,
+      signedAt: line.workOrder.signature ? line.workOrder.signature.signedAt.toISOString() : null,
+      employeeDisplayNames: Array.from(new Set(line.workOrder.timeEntries.map((entry) => entry.timeEntry.employee.displayName))).sort(),
       invoiceableSeconds: line.invoiceableSeconds,
+      adjustedInvoiceableSeconds: line.adjustedInvoiceableSeconds,
+      effectiveInvoiceableSeconds: line.adjustedInvoiceableSeconds ?? line.invoiceableSeconds,
+      kmAmountCents: line.workOrder.kmAmountCents,
+      adjustedKmAmountCents: line.adjustedKmAmountCents,
+      effectiveKmAmountCents: line.adjustedKmAmountCents ?? line.workOrder.kmAmountCents,
+      adjustmentNote: line.adjustmentNote,
     })),
     teamleaderInvoiceId: batch.teamleaderInvoiceId,
     teamleaderSyncError: batch.teamleaderSyncError,

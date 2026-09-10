@@ -361,6 +361,30 @@ export const InvoiceBatchErrors = {
       'INVOICE_BATCH_PROJECT_NOT_ON_BATCH',
       'Dit project komt niet voor op een werkbon van deze facturatiebatch.',
     ),
+  /** Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan te passen". De opgegeven regel (InvoiceBatchLine) hoort niet bij deze batch. */
+  lineNotOnBatch: () =>
+    new ApiError(404, 'INVOICE_BATCH_LINE_NOT_ON_BATCH', 'Deze werkbon komt niet voor op deze facturatiebatch.'),
+  /** Negatieve of anderszins ongeldige correctie (bv. min. -1 seconde) — zie invoice-batch.schemas.ts voor de basisvalidatie. */
+  invalidAdjustment: () =>
+    new ApiError(
+      400,
+      'INVOICE_BATCH_INVALID_ADJUSTMENT',
+      'Het gecorrigeerde aantal uren of kilometers moet nul of positief zijn.',
+    ),
+  /** Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per klant/per week in 1 pdf". Geen enkele werkbon in het gevraagde bereik heeft (nog) een klaarstaande PDF. */
+  noPdfsToBundle: () =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_NO_PDFS_TO_BUNDLE',
+      'Er is voor deze batch (of deze week) nog geen enkele werkbon-PDF beschikbaar.',
+    ),
+  /** Eén of meer werkbonnen in het gevraagde bereik hebben nog geen klaarstaande PDF (bv. nog PDF_GENERATING/PDF_PENDING) — de bundel zou dan onvolledig zijn. */
+  pdfsNotReady: (workOrderNumbers: string[]) =>
+    new ApiError(
+      409,
+      'INVOICE_BATCH_PDFS_NOT_READY',
+      `De PDF van volgende werkbon(nen) is nog niet klaar: ${workOrderNumbers.join(', ')}. Probeer het straks opnieuw.`,
+    ),
 };
 
 /** Phase 12, deel E — personeelsuitbetaling (maandoverzicht per medewerker). */

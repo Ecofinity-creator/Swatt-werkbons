@@ -45,7 +45,19 @@ interface FakeWorkOrder {
 
 function createFakePrisma(workOrders: FakeWorkOrder[]) {
   const batches = new Map<string, { id: string; customerId: string; periodLabel: string; status: string; totalInvoiceableSeconds: number; createdByUserId: string; createdAt: Date }>();
-  const lines = new Map<string, { id: string; invoiceBatchId: string; workOrderId: string; invoiceableSeconds: number }>();
+  const lines = new Map<
+    string,
+    {
+      id: string;
+      invoiceBatchId: string;
+      workOrderId: string;
+      invoiceableSeconds: number;
+      /** Klantvraag 10/9/2026 — zie InvoiceBatchService.setLineAdjustment. */
+      adjustedInvoiceableSeconds: number | null;
+      adjustedKmAmountCents: number | null;
+      adjustmentNote: string | null;
+    }
+  >();
   /** invoiceBatchId → projectId → hourlyRateCents — zie InvoiceBatchProjectRate. */
   const projectRateOverrides = new Map<string, Map<string, number>>();
   let nextId = 1;
@@ -97,7 +109,15 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
         batches.set(id, batch);
         for (const line of data.lines.create) {
           const lineId = genId('line');
-          lines.set(lineId, { id: lineId, invoiceBatchId: id, workOrderId: line.workOrderId, invoiceableSeconds: line.invoiceableSeconds });
+          lines.set(lineId, {
+            id: lineId,
+            invoiceBatchId: id,
+            workOrderId: line.workOrderId,
+            invoiceableSeconds: line.invoiceableSeconds,
+            adjustedInvoiceableSeconds: null,
+            adjustedKmAmountCents: null,
+            adjustmentNote: null,
+          });
         }
         return hydrateBatch(id);
       },
@@ -132,6 +152,16 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
         projectRateOverrides.get(where.invoiceBatchId)?.delete(where.projectId);
       },
     },
+    /** Klantvraag 10/9/2026 — zie InvoiceBatchService.setLineAdjustment. */
+    invoiceBatchLine: {
+      findUnique: async ({ where }: { where: { id: string } }) => (lines.has(where.id) ? { ...lines.get(where.id)! } : null),
+      update: async ({ where, data }: { where: { id: string }; data: Partial<{ adjustedInvoiceableSeconds: number | null; adjustedKmAmountCents: number | null; adjustmentNote: string | null }> }) => {
+        const line = lines.get(where.id);
+        if (!line) throw new Error('regel niet gevonden');
+        Object.assign(line, data);
+        return { ...line };
+      },
+    },
   };
 
   function hydrateBatch(id: string) {
@@ -149,9 +179,14 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
           id: line.id,
           workOrderId: line.workOrderId,
           invoiceableSeconds: line.invoiceableSeconds,
+          adjustedInvoiceableSeconds: line.adjustedInvoiceableSeconds,
+          adjustedKmAmountCents: line.adjustedKmAmountCents,
+          adjustmentNote: line.adjustmentNote,
           workOrder: {
             workOrderNumber: wo?.workOrderNumber ?? '?',
             project: { id: wo?.project.id ?? '?', name: wo?.project.name ?? '?', hourlyRateCents: wo?.project.hourlyRateCents ?? null },
+            kmAmountCents: null as number | null,
+            signature: wo?.signature ?? null,
             timeEntries: wo?.timeEntries ?? [],
           },
         };
@@ -368,6 +403,74 @@ describe('InvoiceBatchService', () => {
       await prisma.invoiceBatch.update({ where: { id: batch.id }, data: { status: 'SUBMITTED_TO_TEAMLEADER' } });
 
       await expect(service.setProjectRate(batch.id, proj1.id, 6500)).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
+    });
+  });
+
+  describe('setLineAdjustment() — klantvraag 10/9/2026: uren/km corrigeren vóór "Maak conceptfactuur in Teamleader"', () => {
+    async function createBatchWithOneLine() {
+      const wo1 = workOrder({
+        id: 'wo1',
+        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:17:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
+      });
+      const { prisma } = createFakePrisma([wo1]);
+      const service = new InvoiceBatchService(prisma);
+      const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
+      return { prisma, service, batch };
+    }
+
+    it('vult een correctie op één regel — de werkelijke invoiceableSeconds blijft ongewijzigd, enkel de override wordt gezet', async () => {
+      const { service, batch } = await createBatchWithOneLine();
+      const line = batch.lines[0]!;
+
+      const updated = await service.setLineAdjustment(batch.id, line.id, {
+        adjustedInvoiceableSeconds: 3600,
+        adjustedKmAmountCents: 500,
+        adjustmentNote: 'Klant akkoord met 1u i.p.v. 2u17',
+      });
+
+      const updatedLine = updated.lines[0]!;
+      expect(updatedLine.invoiceableSeconds).toBe(2 * 60 * 60 + 17 * 60); // werkelijke waarde onaangeroerd
+      expect(updatedLine).toMatchObject({
+        adjustedInvoiceableSeconds: 3600,
+        adjustedKmAmountCents: 500,
+        adjustmentNote: 'Klant akkoord met 1u i.p.v. 2u17',
+      });
+    });
+
+    it('wist de correctie weer bij null', async () => {
+      const { service, batch } = await createBatchWithOneLine();
+      const line = batch.lines[0]!;
+      await service.setLineAdjustment(batch.id, line.id, { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: 500, adjustmentNote: 'test' });
+
+      const updated = await service.setLineAdjustment(batch.id, line.id, { adjustedInvoiceableSeconds: null, adjustedKmAmountCents: null, adjustmentNote: null });
+
+      expect(updated.lines[0]).toMatchObject({ adjustedInvoiceableSeconds: null, adjustedKmAmountCents: null, adjustmentNote: null });
+    });
+
+    it('weigert een regel die niet op deze batch voorkomt', async () => {
+      const { service, batch } = await createBatchWithOneLine();
+
+      await expect(
+        service.setLineAdjustment(batch.id, 'does-not-exist', { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: null, adjustmentNote: null }),
+      ).rejects.toMatchObject({ code: 'INVOICE_BATCH_LINE_NOT_ON_BATCH' });
+    });
+
+    it('weigert op een batch die al naar Teamleader verstuurd is', async () => {
+      const { prisma, service, batch } = await createBatchWithOneLine();
+      const line = batch.lines[0]!;
+      await prisma.invoiceBatch.update({ where: { id: batch.id }, data: { status: 'SUBMITTED_TO_TEAMLEADER' } });
+
+      await expect(
+        service.setLineAdjustment(batch.id, line.id, { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: null, adjustmentNote: null }),
+      ).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
+    });
+
+    it('weigert een onbestaande batch', async () => {
+      const { service } = await createBatchWithOneLine();
+
+      await expect(
+        service.setLineAdjustment('does-not-exist', 'line-1', { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: null, adjustmentNote: null }),
+      ).rejects.toMatchObject({ code: 'INVOICE_BATCH_NOT_FOUND' });
     });
   });
 });

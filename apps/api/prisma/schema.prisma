@@ -1356,6 +1356,22 @@ model InvoiceBatchLine {
   invoiceableSeconds Int      @map("invoiceable_seconds")
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
 
+  /// Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan
+  /// te passen vooraleer de factuur naar teamleader gaat". Beide velden zijn
+  /// nullable overrides (nooit een destructieve wijziging van de origineel
+  /// berekende/bevroren waarde): `null` betekent "geen correctie, gebruik de
+  /// werkelijke waarde" — `invoiceableSeconds` hierboven (bevroren bij
+  /// batch-aanmaak) resp. `WorkOrder.kmAmountCents` (bevroren bij
+  /// ondertekening). Enkel te wijzigen zolang de batch status DRAFT heeft
+  /// (zelfde regel als InvoiceBatchProjectRate hierboven) — zie
+  /// InvoiceBatchService.setLineAdjustment(). `adjustmentNote` is vrije tekst
+  /// zodat de admin kan documenteren waarom er gecorrigeerd werd (auditlog
+  /// legt de oude/nieuwe waarde zelf al vast, deze notitie is voor menselijke
+  /// context op de factuur/werkbonbundel).
+  adjustedInvoiceableSeconds Int?    @map("adjusted_invoiceable_seconds")
+  adjustedKmAmountCents      Int?    @map("adjusted_km_amount_cents")
+  adjustmentNote             String? @map("adjustment_note")
+
   invoiceBatch InvoiceBatch @relation(fields: [invoiceBatchId], references: [id], onDelete: Cascade)
   workOrder    WorkOrder    @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
 
