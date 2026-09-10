@@ -6,8 +6,8 @@ import type {
   InvoiceableWorkOrderSummary,
   ListInvoiceBatchesResponseBody,
   ListInvoiceableWorkOrdersResponseBody,
-  UpdateInvoiceBatchEmployeeRateBody,
-  UpdateInvoiceBatchEmployeeRateResponseBody,
+  UpdateInvoiceBatchProjectRateBody,
+  UpdateInvoiceBatchProjectRateResponseBody,
 } from '@swatt/shared-types';
 import type { FastifyInstance } from 'fastify';
 import { AuditLogService } from '../audit-log/audit-log.service';
@@ -17,11 +17,11 @@ import type { InvoiceBatchRecord, InvoiceableWorkOrderRecord } from './invoice-b
 import { InvoiceBatchService } from './invoice-batch.service';
 import {
   createInvoiceBatchBodySchema,
-  invoiceBatchEmployeeRateParamsSchema,
   invoiceBatchIdParamsSchema,
+  invoiceBatchProjectRateParamsSchema,
   listInvoiceBatchesQuerySchema,
   listInvoiceableWorkOrdersQuerySchema,
-  updateInvoiceBatchEmployeeRateBodySchema,
+  updateInvoiceBatchProjectRateBodySchema,
 } from './invoice-batch.schemas';
 
 /**
@@ -120,17 +120,17 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
     },
   );
 
-  // Facturatie: tarief per medewerker i.p.v. per klant. Vult (of wist, bij
-  // `hourlyRateCents: null`) een eenmalige tariefoverride voor één medewerker
-  // op deze batch — enkel nodig zolang die medewerker geen standaardtarief
-  // heeft bij "Medewerkers" (zie InvoiceBatchService.setEmployeeRate).
+  // Klantvraag 10/9/2026 — tarief per project i.p.v. per medewerker. Vult
+  // (of wist, bij `hourlyRateCents: null`) een eenmalige tariefoverride voor
+  // één project op deze batch — enkel nodig zolang dat project geen
+  // standaardtarief heeft bij "Projecten" (zie InvoiceBatchService.setProjectRate).
   app.post(
-    '/admin/invoice-batches/:id/employee-rates/:employeeId',
+    '/admin/invoice-batches/:id/project-rates/:projectId',
     { preHandler: [app.authenticate, requireRole('ADMIN')] },
-    async (request): Promise<UpdateInvoiceBatchEmployeeRateResponseBody> => {
-      const params = invoiceBatchEmployeeRateParamsSchema.parse(request.params);
-      const body: UpdateInvoiceBatchEmployeeRateBody = updateInvoiceBatchEmployeeRateBodySchema.parse(request.body);
-      const batch = await service.setEmployeeRate(params.id, params.employeeId, body.hourlyRateCents);
+    async (request): Promise<UpdateInvoiceBatchProjectRateResponseBody> => {
+      const params = invoiceBatchProjectRateParamsSchema.parse(request.params);
+      const body: UpdateInvoiceBatchProjectRateBody = updateInvoiceBatchProjectRateBodySchema.parse(request.body);
+      const batch = await service.setProjectRate(params.id, params.projectId, body.hourlyRateCents);
       return { batch: toBatchSummary(batch) };
     },
   );
@@ -154,7 +154,7 @@ function toBatchSummary(batch: InvoiceBatchRecord): InvoiceBatchSummary {
     customerId: batch.customerId,
     customerName: batch.customer.name,
     customerHourlyRateCents: batch.customer.hourlyRateCents,
-    employeeRates: batch.employeeRates,
+    projectRates: batch.projectRates,
     periodLabel: batch.periodLabel,
     status: batch.status,
     totalInvoiceableSeconds: batch.totalInvoiceableSeconds,

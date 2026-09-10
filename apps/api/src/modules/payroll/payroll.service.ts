@@ -15,8 +15,9 @@ import { allocateHoursAcrossEntries, computeRatePercent } from '../rates/rate-ca
  * uniform op `Project` (zie rate-calculation.service.ts) — geen
  * ProjectAssignment-opzoek meer nodig. Daarnaast wordt hier bewust
  * `Employee.payrollRateCents` (kostprijs/uitbetaling) gebruikt als basis,
- * NIET `Employee.defaultHourlyRateCents` (verkoopprijs/facturatie aan de
- * klant, zie teamleader-invoice.service.ts) — dit zijn twee aparte,
+ * NIET `Project.hourlyRateCents` (verkoopprijs/facturatie aan de klant,
+ * klantvraag 10/9/2026 — voorheen `Employee.defaultHourlyRateCents`, zie
+ * teamleader-invoice.service.ts) — dit zijn twee aparte,
  * onafhankelijk instelbare bedragen (Swatts marge zit in het verschil). Het
  * toeslagpercentage zelf is wél identiek voor beide, enkel de basis
  * verschilt — vandaar dat `computeRatePercent()` hier ongewijzigd hergebruikt

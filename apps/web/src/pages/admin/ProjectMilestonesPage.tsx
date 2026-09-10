@@ -101,6 +101,7 @@ export function ProjectMilestonesPage() {
           {selectedProject ? (
             <>
               <InvoicingPanel key={`invoicing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+              <HourlyRatePanel key={`hourly-rate-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <OvertimeSettingsPanel key={`overtime-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <SigningModePanel key={`signing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <KmPricingPanel key={`km-pricing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
@@ -187,6 +188,91 @@ function InvoicingPanel({ project, onUpdated }: { project: ProjectSummary; onUpd
  * hierboven: financiële impact op zowel klantfactuur als
  * personeelsuitbetaling (Phase 12, deel E).
  */
+/**
+ * Klantvraag 10/9/2026 — "de verkoopprijs per uur voor een technieker staat
+ * nu bij de technieker, maar moet verhuizen naar het project, omdat het
+ * afhankelijk is per project." Vervangt het vroegere uurtarief-veld bij
+ * "Medewerkers" (zie UserDetailPage.tsx) als bron voor de
+ * Teamleader-conceptfactuur (zie TeamleaderInvoiceService). Bewust
+ * ADMIN-only, zelfde reden als InvoicingPanel/OvertimeSettingsPanel
+ * hieronder: rechtstreekse financiële impact op de klantfactuur. Leeg =
+ * nog niet ingesteld — een admin kan het tarief dan nog eenmalig invullen
+ * bij het aanmaken van een factuur zelf (zie InvoicingPage.tsx).
+ */
+function HourlyRatePanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
+  const { user: currentUser } = useAuth();
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const [rateInput, setRateInput] = useState(project.hourlyRateCents !== null ? (project.hourlyRateCents / 100).toFixed(2) : '');
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setRateInput(project.hourlyRateCents !== null ? (project.hourlyRateCents / 100).toFixed(2) : '');
+  }, [project]);
+
+  async function save() {
+    const trimmed = rateInput.trim().replace(',', '.');
+    let hourlyRateCents: number | null = null;
+    if (trimmed !== '') {
+      const parsed = Number(trimmed);
+      if (Number.isNaN(parsed) || parsed <= 0) {
+        setError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om het tarief te wissen.');
+        return;
+      }
+      hourlyRateCents = Math.round(parsed * 100);
+    }
+
+    setIsSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await projectsApi.hourlyRate.update(project.id, { hourlyRateCents });
+      setSaved(true);
+      onUpdated();
+    } catch (err) {
+      setError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uurtarief is mislukt.');
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  if (!isAdmin) return null;
+
+  return (
+    <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Verkoopprijs</h2>
+      <p className="mb-4 text-sm text-neutral-500">
+        {project.customerName} — {project.name}
+      </p>
+
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+      {saved && <p className="mb-3 text-sm text-emerald-700">Uurtarief opgeslagen.</p>}
+
+      <div className="flex items-center gap-2">
+        <label className="flex items-center gap-2 text-sm text-neutral-600">
+          Uurtarief €
+          <input
+            type="text"
+            inputMode="decimal"
+            value={rateInput}
+            onChange={(e) => setRateInput(e.target.value)}
+            onBlur={() => void save()}
+            placeholder="Niet ingesteld"
+            disabled={isSaving}
+            className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+          />
+        </label>
+      </div>
+      <p className="mt-3 text-xs text-neutral-500">
+        Standaard uurtarief voor conceptfacturen in Teamleader — geldt voor alle technici die op dit project werken.
+        Toeslagen (overuren/ploegenwerk/nachtwerk) worden hieronder apart ingesteld en gelden met hetzelfde
+        percentage op dit tarief.
+      </p>
+    </section>
+  );
+}
+
 /**
  * Fase 12-herziening: volledige toeslagregeling per project — drempel
  * ("Overuren boven 8u/dag" of "Overuren boven [x]u/week"), of

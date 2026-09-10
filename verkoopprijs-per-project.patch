@@ -1,0 +1,2236 @@
+diff --git a/apps/api/prisma/migrations/20260910140000_project_hourly_rate/migration.sql b/apps/api/prisma/migrations/20260910140000_project_hourly_rate/migration.sql
+new file mode 100644
+index 0000000..88a4707
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260910140000_project_hourly_rate/migration.sql
+@@ -0,0 +1,41 @@
++-- Klantvraag 10/9/2026: "de verkoopprijs per uur voor een technieker staat nu
++-- bij de technieker, maar moet verhuizen naar het project, omdat het
++-- afhankelijk is per project."
++--
++-- 1) Nieuwe kolom `project.hourly_rate_cents` (nullable, geen default — zelfde
++--    "nog niet ingesteld"-conventie als voorheen `employee.default_hourly_rate_cents`).
++--    `employee.default_hourly_rate_cents` zelf blijft bestaan (niet-destructief,
++--    zie het @deprecated-commentaar in schema.prisma) maar wordt nergens meer
++--    gelezen om te factureren.
++ALTER TABLE "project" ADD COLUMN "hourly_rate_cents" INTEGER;
++
++-- 2) `invoice_batch_employee_rate` (eenmalige factuurbatch-override per
++--    medewerker) vervangen door `invoice_batch_project_rate` (per project) —
++--    de override volgt de verhuizing van de verkoopprijs zelf. De oude tabel
++--    bevatte enkel kortstondige, per-factuur hulpwaarden (geen definitieve
++--    financiële vastlegging: dat gebeurt pas bij de Teamleader-conceptfactuur
++--    zelf) — die verliezen hun betekenis zodra de prijsbron verandert, dus
++--    hier bewust een schone vervanging i.p.v. een datamigratie.
++DROP TABLE IF EXISTS "invoice_batch_employee_rate";
++
++CREATE TABLE "invoice_batch_project_rate" (
++    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
++    "invoice_batch_id" UUID NOT NULL,
++    "project_id" UUID NOT NULL,
++    "hourly_rate_cents" INTEGER NOT NULL,
++    "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
++    "updated_at" TIMESTAMPTZ NOT NULL,
++
++    CONSTRAINT "invoice_batch_project_rate_pkey" PRIMARY KEY ("id")
++);
++
++CREATE UNIQUE INDEX "invoice_batch_project_rate_invoice_batch_id_project_id_key"
++    ON "invoice_batch_project_rate"("invoice_batch_id", "project_id");
++
++ALTER TABLE "invoice_batch_project_rate"
++    ADD CONSTRAINT "invoice_batch_project_rate_invoice_batch_id_fkey"
++    FOREIGN KEY ("invoice_batch_id") REFERENCES "invoice_batch"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++ALTER TABLE "invoice_batch_project_rate"
++    ADD CONSTRAINT "invoice_batch_project_rate_project_id_fkey"
++    FOREIGN KEY ("project_id") REFERENCES "project"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index fab7668..c40c545 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -332,16 +332,14 @@ model Employee {
+   displayName String  @map("display_name")
+   phone       String?
+ 
+-  /// Facturatie: standaard uurtarief van deze medewerker (in eurocent), in te
+-  /// stellen door een admin bij "Medewerkers" (zie user.routes.ts). Vervangt
+-  /// sinds deze uitbreiding het per-klant-tarief (Customer.hourlyRateCents,
+-  /// zie de toelichting daar) als bron voor factuurregels: een conceptfactuur
+-  /// wordt geprijsd op basis van wélke medewerker de uren registreerde, niet
+-  /// meer op basis van de klant. Null tot een admin dit invult — ontbreekt dit
+-  /// nog voor een medewerker die op een factuurbatch voorkomt, dan kan de admin
+-  /// het tarief eenmalig voor die factuur invullen op de Facturatie-pagina
+-  /// (zie InvoiceBatchEmployeeRate hieronder) zonder de instellingenpagina te
+-  /// hoeven verlaten.
++  /// @deprecated Klantvraag 10/9/2026 — de VERKOOPPRIJS is verhuisd naar
++  /// `Project.hourlyRateCents` (zie de toelichting daar): de prijs hangt af
++  /// van het project/de afspraak met de klant, niet van wélke technieker de
++  /// uren registreerde. Deze kolom blijft (niet-destructief) bestaan maar
++  /// wordt sinds deze wijziging nergens meer gelezen om te factureren — ook
++  /// uit het instellingenscherm gehaald (zie UserDetailPage.tsx). Verwar dit
++  /// niet met `payrollRateCents` hieronder (KOSTPRIJS), die wél per medewerker
++  /// blijft.
+   defaultHourlyRateCents Int? @map("default_hourly_rate_cents")
+ 
+   /// Fase 12-herziening (op vraag na de eerste versie van deel A/E):
+@@ -380,11 +378,6 @@ model Employee {
+   /// Foto's die deze werknemer aan een werkbon heeft toegevoegd (Phase 6 — zie WorkOrderPhoto hieronder).
+   uploadedWorkOrderPhotos WorkOrderPhoto[]
+ 
+-  /// Eenmalige tariefoverrides per factuurbatch, enkel gebruikt wanneer
+-  /// `defaultHourlyRateCents` hierboven nog niet is ingevuld (zie
+-  /// InvoiceBatchEmployeeRate hieronder).
+-  invoiceBatchRateOverrides InvoiceBatchEmployeeRate[]
+-
+   /// Phase 12, deel E — personeelsuitbetalingen van deze medewerker.
+   payrollBatches PayrollBatch[]
+ 
+@@ -609,6 +602,24 @@ model Project {
+   /// Tarief (eurocent) per km BOVEN de drempel. Default € 0,80/km.
+   kmRateAboveCentsPerKm Int @default(80) @map("km_rate_above_cents_per_km")
+ 
++  /// Klantvraag 10/9/2026 — "de verkoopprijs per uur voor een technieker
++  /// staat nu bij de technieker, maar moet verhuizen naar het project, omdat
++  /// het afhankelijk is per project." Vervangt `Employee.defaultHourlyRateCents`
++  /// (nu @deprecated) als bron voor factuurregels: een conceptfactuur wordt
++  /// voortaan geprijsd op basis van wélk project de uren registreerde, niet
++  /// meer op basis van wélke technieker. `null` tot een admin dit invult bij
++  /// Projecten (zie project.routes.ts) — ontbreekt dit nog voor een project
++  /// dat op een factuurbatch voorkomt, dan kan de admin het tarief eenmalig
++  /// voor die factuur invullen op de Facturatie-pagina (zie
++  /// InvoiceBatchProjectRate hieronder) zonder de projectpagina te hoeven
++  /// verlaten.
++  hourlyRateCents Int? @map("hourly_rate_cents")
++
++  /// Eenmalige tariefoverrides per factuurbatch, enkel gebruikt wanneer
++  /// `hourlyRateCents` hierboven nog niet is ingevuld (zie
++  /// InvoiceBatchProjectRate hieronder).
++  invoiceBatchRateOverrides InvoiceBatchProjectRate[]
++
+   weeklyApprovals WeeklyApproval[]
+ 
+   lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
+@@ -1236,10 +1247,10 @@ model InvoiceBatch {
+   createdByUser  User                @relation(fields: [createdByUserId], references: [id])
+   lines          InvoiceBatchLine[]
+ 
+-  /// Eenmalige tariefoverrides voor medewerkers zonder `Employee.defaultHourlyRateCents`
+-  /// (zie InvoiceBatchEmployeeRate hieronder) — enkel gezet wanneer een admin dit
++  /// Eenmalige tariefoverrides voor projecten zonder `Project.hourlyRateCents`
++  /// (zie InvoiceBatchProjectRate hieronder) — enkel gezet wanneer een admin dit
+   /// bewust voor déze factuur heeft ingevuld op de Facturatie-pagina.
+-  employeeRates  InvoiceBatchEmployeeRate[]
++  projectRates   InvoiceBatchProjectRate[]
+ 
+   @@index([customerId])
+   @@index([periodLabel])
+@@ -1267,27 +1278,33 @@ model InvoiceBatchLine {
+   @@map("invoice_batch_line")
+ }
+ 
+-/// Eénmalige uurtarief-override van één medewerker, voor één specifieke
+-/// InvoiceBatch — enkel nodig zolang `Employee.defaultHourlyRateCents` nog
+-/// niet is ingevuld voor die medewerker (zie de toelichting daar). Ingevuld
+-/// door een admin op de Facturatie-pagina, vlak vóór "Maak conceptfactuur in
+-/// Teamleader"; TeamleaderInvoiceService gebruikt deze waarde enkel als de
+-/// medewerker zelf geen standaardtarief heeft. Verwijderen van de batch
++/// Eénmalige uurtarief-override van één project, voor één specifieke
++/// InvoiceBatch — enkel nodig zolang `Project.hourlyRateCents` nog niet is
++/// ingevuld voor dat project (zie de toelichting daar). Ingevuld door een
++/// admin op de Facturatie-pagina, vlak vóór "Maak conceptfactuur in
++/// Teamleader"; TeamleaderInvoiceService gebruikt deze waarde enkel als het
++/// project zelf geen standaardtarief heeft. Verwijderen van de batch
+ /// (cascade) ruimt deze overrides mee op — ze hebben buiten die ene batch
+ /// geen betekenis.
+-model InvoiceBatchEmployeeRate {
++///
++/// Klantvraag 10/9/2026 — hernoemd/verhuisd van `InvoiceBatchEmployeeRate`
++/// (employeeId) naar dit projectgescopeerde model, samen met de verhuizing
++/// van de verkoopprijs zelf (Employee.defaultHourlyRateCents →
++/// Project.hourlyRateCents). Oude, per-medewerker overrides hadden na die
++/// wijziging geen betekenis meer.
++model InvoiceBatchProjectRate {
+   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+   invoiceBatchId  String   @map("invoice_batch_id") @db.Uuid
+-  employeeId      String   @map("employee_id") @db.Uuid
++  projectId       String   @map("project_id") @db.Uuid
+   hourlyRateCents Int      @map("hourly_rate_cents")
+   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+ 
+   invoiceBatch InvoiceBatch @relation(fields: [invoiceBatchId], references: [id], onDelete: Cascade)
+-  employee     Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
++  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+ 
+-  @@unique([invoiceBatchId, employeeId])
+-  @@map("invoice_batch_employee_rate")
++  @@unique([invoiceBatchId, projectId])
++  @@map("invoice_batch_project_rate")
+ }
+ 
+  /// Phase 12, deel E (sectie "Personeelsuitbetaling"): maandoverzicht per
+diff --git a/apps/api/src/errors.ts b/apps/api/src/errors.ts
+index fbd0d34..940e5a8 100644
+--- a/apps/api/src/errors.ts
++++ b/apps/api/src/errors.ts
+@@ -333,27 +333,34 @@ export const InvoiceBatchErrors = {
+       'INVOICE_BATCH_ALREADY_SUBMITTED',
+       'Voor deze facturatiebatch is al een conceptfactuur aangemaakt in Teamleader.',
+     ),
+-  /** @deprecated Sinds de overstap naar tarief-per-medewerker niet meer gebruikt — zie employeeHourlyRateNotSet hieronder. Blijft bestaan zodat CustomerService/customer.routes.ts (nog steeds een geldig, apart uurtarief-veld op Customer) een passende fout kunnen gooien. */
++  /** @deprecated Sinds de overstap naar tarief-per-project niet meer gebruikt — zie projectHourlyRateNotSet hieronder. Blijft bestaan zodat CustomerService/customer.routes.ts (nog steeds een geldig, apart uurtarief-veld op Customer) een passende fout kunnen gooien. */
+   hourlyRateNotSet: (customerName: string) =>
+     new ApiError(
+       409,
+       'INVOICE_BATCH_HOURLY_RATE_NOT_SET',
+       `Er is nog geen uurtarief ingesteld voor ${customerName}. Vul dit eerst in bij deze facturatiebatch.`,
+     ),
+-  /** Eén of meer medewerkers op deze batch hebben nog geen standaard- of eenmalig uurtarief (zie InvoiceBatchService.resolveEmployeeRates). */
+-  employeeHourlyRateNotSet: (employeeNames: string[]) =>
++  /** Klantvraag 10/9/2026 — één of meer projecten op deze batch hebben nog geen standaard- of eenmalig uurtarief (zie InvoiceBatchService.resolveProjectRates). */
++  projectHourlyRateNotSet: (projectNames: string[]) =>
+     new ApiError(
+       409,
+-      'INVOICE_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET',
+-      `Er is nog geen uurtarief ingesteld voor ${employeeNames.join(', ')}. Vul dit in bij "Medewerkers", of eenmalig hier bij deze facturatiebatch.`,
++      'INVOICE_BATCH_PROJECT_HOURLY_RATE_NOT_SET',
++      `Er is nog geen uurtarief ingesteld voor ${projectNames.join(', ')}. Vul dit in bij "Projecten", of eenmalig hier bij deze facturatiebatch.`,
+     ),
+-  /** De opgegeven medewerker komt niet voor op een werkbon van deze batch — een tarief zou dus niets betekenen. */
++  /** De opgegeven medewerker komt niet voor op een werkbon van deze batch. */
+   employeeNotOnBatch: () =>
+     new ApiError(
+       404,
+       'INVOICE_BATCH_EMPLOYEE_NOT_ON_BATCH',
+       'Deze medewerker komt niet voor op een werkbon van deze facturatiebatch.',
+     ),
++  /** Klantvraag 10/9/2026 — het opgegeven project komt niet voor op een werkbon van deze batch — een tarief zou dus niets betekenen. */
++  projectNotOnBatch: () =>
++    new ApiError(
++      404,
++      'INVOICE_BATCH_PROJECT_NOT_ON_BATCH',
++      'Dit project komt niet voor op een werkbon van deze facturatiebatch.',
++    ),
+ };
+ 
+ /** Phase 12, deel E — personeelsuitbetaling (maandoverzicht per medewerker). */
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts b/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
+index bf336a3..f6a194e 100644
+--- a/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
++++ b/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
+@@ -6,8 +6,8 @@ import type {
+   InvoiceableWorkOrderSummary,
+   ListInvoiceBatchesResponseBody,
+   ListInvoiceableWorkOrdersResponseBody,
+-  UpdateInvoiceBatchEmployeeRateBody,
+-  UpdateInvoiceBatchEmployeeRateResponseBody,
++  UpdateInvoiceBatchProjectRateBody,
++  UpdateInvoiceBatchProjectRateResponseBody,
+ } from '@swatt/shared-types';
+ import type { FastifyInstance } from 'fastify';
+ import { AuditLogService } from '../audit-log/audit-log.service';
+@@ -17,11 +17,11 @@ import type { InvoiceBatchRecord, InvoiceableWorkOrderRecord } from './invoice-b
+ import { InvoiceBatchService } from './invoice-batch.service';
+ import {
+   createInvoiceBatchBodySchema,
+-  invoiceBatchEmployeeRateParamsSchema,
+   invoiceBatchIdParamsSchema,
++  invoiceBatchProjectRateParamsSchema,
+   listInvoiceBatchesQuerySchema,
+   listInvoiceableWorkOrdersQuerySchema,
+-  updateInvoiceBatchEmployeeRateBodySchema,
++  updateInvoiceBatchProjectRateBodySchema,
+ } from './invoice-batch.schemas';
+ 
+ /**
+@@ -120,17 +120,17 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
+     },
+   );
+ 
+-  // Facturatie: tarief per medewerker i.p.v. per klant. Vult (of wist, bij
+-  // `hourlyRateCents: null`) een eenmalige tariefoverride voor één medewerker
+-  // op deze batch — enkel nodig zolang die medewerker geen standaardtarief
+-  // heeft bij "Medewerkers" (zie InvoiceBatchService.setEmployeeRate).
++  // Klantvraag 10/9/2026 — tarief per project i.p.v. per medewerker. Vult
++  // (of wist, bij `hourlyRateCents: null`) een eenmalige tariefoverride voor
++  // één project op deze batch — enkel nodig zolang dat project geen
++  // standaardtarief heeft bij "Projecten" (zie InvoiceBatchService.setProjectRate).
+   app.post(
+-    '/admin/invoice-batches/:id/employee-rates/:employeeId',
++    '/admin/invoice-batches/:id/project-rates/:projectId',
+     { preHandler: [app.authenticate, requireRole('ADMIN')] },
+-    async (request): Promise<UpdateInvoiceBatchEmployeeRateResponseBody> => {
+-      const params = invoiceBatchEmployeeRateParamsSchema.parse(request.params);
+-      const body: UpdateInvoiceBatchEmployeeRateBody = updateInvoiceBatchEmployeeRateBodySchema.parse(request.body);
+-      const batch = await service.setEmployeeRate(params.id, params.employeeId, body.hourlyRateCents);
++    async (request): Promise<UpdateInvoiceBatchProjectRateResponseBody> => {
++      const params = invoiceBatchProjectRateParamsSchema.parse(request.params);
++      const body: UpdateInvoiceBatchProjectRateBody = updateInvoiceBatchProjectRateBodySchema.parse(request.body);
++      const batch = await service.setProjectRate(params.id, params.projectId, body.hourlyRateCents);
+       return { batch: toBatchSummary(batch) };
+     },
+   );
+@@ -154,7 +154,7 @@ function toBatchSummary(batch: InvoiceBatchRecord): InvoiceBatchSummary {
+     customerId: batch.customerId,
+     customerName: batch.customer.name,
+     customerHourlyRateCents: batch.customer.hourlyRateCents,
+-    employeeRates: batch.employeeRates,
++    projectRates: batch.projectRates,
+     periodLabel: batch.periodLabel,
+     status: batch.status,
+     totalInvoiceableSeconds: batch.totalInvoiceableSeconds,
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts b/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts
+index 0bdb260..92b23a8 100644
+--- a/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts
++++ b/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts
+@@ -23,12 +23,12 @@ export const invoiceBatchIdParamsSchema = z.object({
+   id: z.string().uuid(),
+ });
+ 
+-export const invoiceBatchEmployeeRateParamsSchema = z.object({
++export const invoiceBatchProjectRateParamsSchema = z.object({
+   id: z.string().uuid(),
+-  employeeId: z.string().uuid(),
++  projectId: z.string().uuid(),
+ });
+ 
+-/** `null` wist de eenmalige override weer; anders een positief bedrag in eurocent (zie UpdateInvoiceBatchEmployeeRateBody). */
+-export const updateInvoiceBatchEmployeeRateBodySchema = z.object({
++/** `null` wist de eenmalige override weer; anders een positief bedrag in eurocent (zie UpdateInvoiceBatchProjectRateBody). */
++export const updateInvoiceBatchProjectRateBodySchema = z.object({
+   hourlyRateCents: z.number().int().positive().nullable(),
+ });
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch.service.ts b/apps/api/src/modules/invoice-batches/invoice-batch.service.ts
+index b875592..0192e17 100644
+--- a/apps/api/src/modules/invoice-batches/invoice-batch.service.ts
++++ b/apps/api/src/modules/invoice-batches/invoice-batch.service.ts
+@@ -2,9 +2,9 @@ import { Prisma, type PrismaClient } from '@prisma/client';
+ import { InvoiceBatchErrors } from '../../errors';
+ 
+ /**
+- * `lines.workOrder.timeEntries` en `employeeRates` zijn hier nodig (i.p.v. in
++ * `lines.workOrder.timeEntries` en `projectRates` zijn hier nodig (i.p.v. in
+  * teamleader-invoice.service.ts' eigen, losse `WITH_DRAFT_DETAILS`) om
+- * `resolveEmployeeRates()` hieronder ook te kunnen tonen op de
++ * `resolveProjectRates()` hieronder ook te kunnen tonen op de
+  * Facturatie-pagina — niet enkel op het moment van de effectieve
+  * Teamleader-aanroep. Zelfde bewuste duplicatie-patroon als
+  * `computeWorkedSeconds` verderop in dit bestand.
+@@ -22,7 +22,7 @@ const WITH_BATCH_DETAILS = {
+         },
+       },
+     },
+-    employeeRates: true,
++    projectRates: true,
+   },
+ } as const;
+ 
+@@ -33,10 +33,10 @@ export interface InvoiceBatchLineRecord {
+   workOrder: { workOrderNumber: string; project: { name: string } };
+ }
+ 
+-/** Zie InvoiceBatchEmployeeRateSummary in shared-types voor de betekenis van elk veld. */
+-export interface InvoiceBatchEmployeeRateRecord {
+-  employeeId: string;
+-  displayName: string;
++/** Zie InvoiceBatchProjectRateSummary in shared-types voor de betekenis van elk veld. */
++export interface InvoiceBatchProjectRateRecord {
++  projectId: string;
++  projectName: string;
+   defaultHourlyRateCents: number | null;
+   overrideHourlyRateCents: number | null;
+   effectiveHourlyRateCents: number | null;
+@@ -52,8 +52,8 @@ export interface InvoiceBatchRecord {
+   createdAt: Date;
+   customer: { name: string; hourlyRateCents: number | null };
+   lines: InvoiceBatchLineRecord[];
+-  /** Medewerkers op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie resolveEmployeeRates() hieronder. */
+-  employeeRates: InvoiceBatchEmployeeRateRecord[];
++  /** Projecten op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie resolveProjectRates() hieronder. */
++  projectRates: InvoiceBatchProjectRateRecord[];
+   /** Sinds Phase 10b — zie InvoiceBatch in schema.prisma. */
+   teamleaderInvoiceId: string | null;
+   teamleaderSyncError: string | null;
+@@ -63,19 +63,20 @@ export interface InvoiceBatchRecord {
+ /**
+  * Handgeschreven vorm van de `WITH_BATCH_DETAILS`-query hierboven — zelfde
+  * reden als elders in deze codebase (stale gegenereerde Prisma-client in de
+- * sandbox). Enkel de velden die `resolveEmployeeRates()` nodig heeft.
++ * sandbox). Enkel de velden die `resolveProjectRates()` nodig heeft.
+  */
+-interface BatchWithEmployeeDataRow {
++interface BatchWithProjectDataRow {
+   lines: Array<{
+     workOrder: {
++      project: { id: string; name: string; hourlyRateCents: number | null };
+       timeEntries: Array<{
+         timeEntry: {
+-          employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
++          employee: { id: string; displayName: string };
+         };
+       }>;
+     };
+   }>;
+-  employeeRates: Array<{ employeeId: string; hourlyRateCents: number }>;
++  projectRates: Array<{ projectId: string; hourlyRateCents: number }>;
+ }
+ 
+ export interface InvoiceableWorkOrderRecord {
+@@ -214,14 +215,14 @@ export class InvoiceBatchService {
+   }
+ 
+   /**
+-   * Vult (of wist) het eenmalige tariefoverride van één medewerker op deze
+-   * batch (zie InvoiceBatchEmployeeRate in schema.prisma) — enkel nodig
+-   * zolang die medewerker geen `Employee.defaultHourlyRateCents` heeft.
+-   * Enkel toegestaan op een DRAFT-batch, zelfde reden als `remove()`: eens
++   * Vult (of wist) het eenmalige tariefoverride van één project op deze
++   * batch (zie InvoiceBatchProjectRate in schema.prisma) — enkel nodig
++   * zolang dat project geen `Project.hourlyRateCents` heeft. Enkel
++   * toegestaan op een DRAFT-batch, zelfde reden als `remove()`: eens
+    * `invoices.draft` is aangeroepen liggen de geprijsde regels al vast bij
+    * Teamleader.
+    */
+-  async setEmployeeRate(batchId: string, employeeId: string, hourlyRateCents: number | null): Promise<InvoiceBatchRecord> {
++  async setProjectRate(batchId: string, projectId: string, hourlyRateCents: number | null): Promise<InvoiceBatchRecord> {
+     const batch = (await this.prisma.invoiceBatch.findUnique({ where: { id: batchId }, ...WITH_BATCH_DETAILS })) as RawBatch | null;
+     if (!batch) {
+       throw InvoiceBatchErrors.notFound();
+@@ -229,17 +230,17 @@ export class InvoiceBatchService {
+     if (batch.status !== 'DRAFT') {
+       throw InvoiceBatchErrors.alreadySubmittedToTeamleader();
+     }
+-    const knownEmployeeIds = new Set(resolveEmployeeRates(batch).map((rate) => rate.employeeId));
+-    if (!knownEmployeeIds.has(employeeId)) {
+-      throw InvoiceBatchErrors.employeeNotOnBatch();
++    const knownProjectIds = new Set(resolveProjectRates(batch).map((rate) => rate.projectId));
++    if (!knownProjectIds.has(projectId)) {
++      throw InvoiceBatchErrors.projectNotOnBatch();
+     }
+ 
+     if (hourlyRateCents === null) {
+-      await this.prisma.invoiceBatchEmployeeRate.deleteMany({ where: { invoiceBatchId: batchId, employeeId } });
++      await this.prisma.invoiceBatchProjectRate.deleteMany({ where: { invoiceBatchId: batchId, projectId } });
+     } else {
+-      await this.prisma.invoiceBatchEmployeeRate.upsert({
+-        where: { invoiceBatchId_employeeId: { invoiceBatchId: batchId, employeeId } },
+-        create: { invoiceBatchId: batchId, employeeId, hourlyRateCents },
++      await this.prisma.invoiceBatchProjectRate.upsert({
++        where: { invoiceBatchId_projectId: { invoiceBatchId: batchId, projectId } },
++        create: { invoiceBatchId: batchId, projectId, hourlyRateCents },
+         update: { hourlyRateCents },
+       });
+     }
+@@ -360,41 +361,39 @@ function periodLabelOf(date: Date): string {
+   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+ }
+ 
+-/** Zoals `InvoiceBatchRecord`, maar met de ruwe (nog niet-opgeloste) Prisma-vorm van `employeeRates` — de vorm die `WITH_BATCH_DETAILS` effectief teruggeeft. */
+-type RawBatch = Omit<InvoiceBatchRecord, 'employeeRates'> & BatchWithEmployeeDataRow;
++/** Zoals `InvoiceBatchRecord`, maar met de ruwe (nog niet-opgeloste) Prisma-vorm van `projectRates` — de vorm die `WITH_BATCH_DETAILS` effectief teruggeeft. */
++type RawBatch = Omit<InvoiceBatchRecord, 'projectRates'> & BatchWithProjectDataRow;
+ 
+ function toBatchRecord(raw: RawBatch): InvoiceBatchRecord {
+-  return { ...raw, employeeRates: resolveEmployeeRates(raw) };
++  return { ...raw, projectRates: resolveProjectRates(raw) };
+ }
+ 
+ /**
+- * Bepaalt, voor elke medewerker die op minstens één werkbon van deze batch
+- * voorkomt, het tarief waarmee zijn/haar uren geprijsd worden: de eenmalige
+- * override op déze batch (InvoiceBatchEmployeeRate) heeft voorrang op het
+- * standaardtarief uit de instellingen (Employee.defaultHourlyRateCents).
+- * `effectiveHourlyRateCents: null` betekent dat er voor die medewerker nog
+- * geen van beide is ingevuld.
++ * Klantvraag 10/9/2026 — bepaalt, voor elk project dat op minstens één
++ * werkbon van deze batch voorkomt, het tarief waarmee de uren geprijsd
++ * worden: de eenmalige override op déze batch (InvoiceBatchProjectRate)
++ * heeft voorrang op het standaardtarief uit de projectinstellingen
++ * (Project.hourlyRateCents). `effectiveHourlyRateCents: null` betekent dat
++ * er voor dat project nog geen van beide is ingevuld.
+  */
+-function resolveEmployeeRates(batch: BatchWithEmployeeDataRow): InvoiceBatchEmployeeRateRecord[] {
+-  const overrideByEmployeeId = new Map(batch.employeeRates.map((rate) => [rate.employeeId, rate.hourlyRateCents]));
+-  const employeeById = new Map<string, { displayName: string; defaultHourlyRateCents: number | null }>();
++function resolveProjectRates(batch: BatchWithProjectDataRow): InvoiceBatchProjectRateRecord[] {
++  const overrideByProjectId = new Map(batch.projectRates.map((rate) => [rate.projectId, rate.hourlyRateCents]));
++  const projectById = new Map<string, { name: string; hourlyRateCents: number | null }>();
+   for (const line of batch.lines) {
+-    for (const link of line.workOrder.timeEntries) {
+-      const employee = link.timeEntry.employee;
+-      employeeById.set(employee.id, { displayName: employee.displayName, defaultHourlyRateCents: employee.defaultHourlyRateCents });
+-    }
++    const project = line.workOrder.project;
++    projectById.set(project.id, { name: project.name, hourlyRateCents: project.hourlyRateCents });
+   }
+ 
+-  return Array.from(employeeById.entries())
+-    .map(([employeeId, info]) => {
+-      const overrideHourlyRateCents = overrideByEmployeeId.get(employeeId) ?? null;
++  return Array.from(projectById.entries())
++    .map(([projectId, info]) => {
++      const overrideHourlyRateCents = overrideByProjectId.get(projectId) ?? null;
+       return {
+-        employeeId,
+-        displayName: info.displayName,
+-        defaultHourlyRateCents: info.defaultHourlyRateCents,
++        projectId,
++        projectName: info.name,
++        defaultHourlyRateCents: info.hourlyRateCents,
+         overrideHourlyRateCents,
+-        effectiveHourlyRateCents: overrideHourlyRateCents ?? info.defaultHourlyRateCents,
++        effectiveHourlyRateCents: overrideHourlyRateCents ?? info.hourlyRateCents,
+       };
+     })
+-    .sort((a, b) => a.displayName.localeCompare(b.displayName));
++    .sort((a, b) => a.projectName.localeCompare(b.projectName));
+ }
+diff --git a/apps/api/src/modules/payroll/payroll.service.ts b/apps/api/src/modules/payroll/payroll.service.ts
+index 704b91f..85ea51d 100644
+--- a/apps/api/src/modules/payroll/payroll.service.ts
++++ b/apps/api/src/modules/payroll/payroll.service.ts
+@@ -15,8 +15,9 @@ import { allocateHoursAcrossEntries, computeRatePercent } from '../rates/rate-ca
+  * uniform op `Project` (zie rate-calculation.service.ts) — geen
+  * ProjectAssignment-opzoek meer nodig. Daarnaast wordt hier bewust
+  * `Employee.payrollRateCents` (kostprijs/uitbetaling) gebruikt als basis,
+- * NIET `Employee.defaultHourlyRateCents` (verkoopprijs/facturatie aan de
+- * klant, zie teamleader-invoice.service.ts) — dit zijn twee aparte,
++ * NIET `Project.hourlyRateCents` (verkoopprijs/facturatie aan de klant,
++ * klantvraag 10/9/2026 — voorheen `Employee.defaultHourlyRateCents`, zie
++ * teamleader-invoice.service.ts) — dit zijn twee aparte,
+  * onafhankelijk instelbare bedragen (Swatts marge zit in het verschil). Het
+  * toeslagpercentage zelf is wél identiek voor beide, enkel de basis
+  * verschilt — vandaar dat `computeRatePercent()` hier ongewijzigd hergebruikt
+diff --git a/apps/api/src/modules/projects/project.routes.ts b/apps/api/src/modules/projects/project.routes.ts
+index cb2ad8f..092f2cf 100644
+--- a/apps/api/src/modules/projects/project.routes.ts
++++ b/apps/api/src/modules/projects/project.routes.ts
+@@ -6,6 +6,7 @@ import type {
+   ProjectSummary,
+   SelectProjectMilestoneBody,
+   SelectProjectMilestoneResponseBody,
++  UpdateProjectHourlyRateResponseBody,
+   UpdateProjectInvoicingEnabledBody,
+   UpdateProjectInvoicingEnabledResponseBody,
+   UpdateProjectKmSettingsResponseBody,
+@@ -22,6 +23,7 @@ import {
+   projectAssignmentBodySchema,
+   projectIdParamsSchema,
+   selectProjectMilestoneBodySchema,
++  updateProjectHourlyRateBodySchema,
+   updateProjectInvoicingEnabledBodySchema,
+   updateProjectKmSettingsBodySchema,
+   updateProjectOvertimeSettingsBodySchema,
+@@ -330,6 +332,30 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
+       };
+     },
+   );
++
++  /**
++   * Klantvraag 10/9/2026: "de verkoopprijs per uur voor een technieker staat
++   * nu bij de technieker, maar moet verhuizen naar het project, omdat het
++   * afhankelijk is per project." Vervangt `Employee.defaultHourlyRateCents`
++   * (nu @deprecated) als bron voor de Teamleader-conceptfactuur. Bewust
++   * ADMIN-only, zelfde reden als km-settings/overtime-settings hierboven:
++   * rechtstreekse financiële impact op de klantfactuur.
++   */
++  app.post(
++    '/admin/projects/:id/hourly-rate',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request): Promise<UpdateProjectHourlyRateResponseBody> => {
++      const params = projectIdParamsSchema.parse(request.params);
++      const body = updateProjectHourlyRateBodySchema.parse(request.body);
++      await assertProjectExists(app, params.id);
++
++      const project = await app.prisma.project.update({
++        where: { id: params.id },
++        data: { hourlyRateCents: body.hourlyRateCents },
++      });
++      return { hourlyRateCents: project.hourlyRateCents };
++    },
++  );
+ }
+ 
+ function toMilestoneSummary(milestone: {
+@@ -392,6 +418,8 @@ function toProjectSummary(project: {
+   kmFlatFeeThresholdKm: number;
+   kmFlatFeeCents: number | null;
+   kmRateAboveCentsPerKm: number;
++  /** Klantvraag 10/9/2026 — verkoopprijs per uur, `null` zolang nog niet ingesteld. */
++  hourlyRateCents: number | null;
+   customer: { name: string };
+ }): ProjectSummary {
+   return {
+@@ -420,5 +448,6 @@ function toProjectSummary(project: {
+     kmFlatFeeThresholdKm: project.kmFlatFeeThresholdKm,
+     kmFlatFeeCents: project.kmFlatFeeCents,
+     kmRateAboveCentsPerKm: project.kmRateAboveCentsPerKm,
++    hourlyRateCents: project.hourlyRateCents,
+   };
+ }
+diff --git a/apps/api/src/modules/projects/project.schemas.ts b/apps/api/src/modules/projects/project.schemas.ts
+index f63ab6f..1ee342a 100644
+--- a/apps/api/src/modules/projects/project.schemas.ts
++++ b/apps/api/src/modules/projects/project.schemas.ts
+@@ -74,3 +74,13 @@ export const updateProjectKmSettingsBodySchema = z.object({
+   kmFlatFeeCents: z.number().int().min(0).max(1_000_000).nullable(),
+   kmRateAboveCentsPerKm: z.number().int().min(0).max(100_000),
+ });
++
++/**
++ * Klantvraag 10/9/2026 — de verkoopprijs per uur verhuist van de medewerker
++ * naar het project. `hourlyRateCents: null` wist het tarief weer (dan kan
++ * een admin het nog steeds eenmalig invullen bij het aanmaken van een
++ * factuur, zie InvoiceBatchService.setProjectRate).
++ */
++export const updateProjectHourlyRateBodySchema = z.object({
++  hourlyRateCents: z.number().int().positive().nullable(),
++});
+diff --git a/apps/api/src/modules/rates/rate-calculation.service.ts b/apps/api/src/modules/rates/rate-calculation.service.ts
+index 70e7b67..68fde01 100644
+--- a/apps/api/src/modules/rates/rate-calculation.service.ts
++++ b/apps/api/src/modules/rates/rate-calculation.service.ts
+@@ -20,9 +20,10 @@
+  *    toepassing is op resp. de normale uren en de overuren van een project
+  *    (toeslagen tellen op boven 100%, ze worden nooit vermenigvuldigd — zie
+  *    de toelichting in het ontwerpdocument). Dit percentage wordt door de
+- *    aanroeper toegepast op zowel `Employee.defaultHourlyRateCents`
+- *    (facturatie aan de klant) als `Employee.payrollRateCents` (uitbetaling)
+- *    — zelfde percentage, andere basis.
++ *    aanroeper toegepast op zowel `Project.hourlyRateCents` (facturatie aan
++ *    de klant, klantvraag 10/9/2026 — voorheen `Employee.defaultHourlyRateCents`)
++ *    als `Employee.payrollRateCents` (uitbetaling) — zelfde percentage,
++ *    andere basis.
+  *
+  * Belangrijk: ploegenwerk/nachtwerk geldt op ALLE uren van een project (het
+  * is geen overurendrempel-gebonden toeslag), overuren enkel op het deel
+diff --git a/apps/api/src/modules/teamleader/teamleader-invoice.service.ts b/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
+index b38db0a..48d0d0a 100644
+--- a/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
++++ b/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
+@@ -17,12 +17,13 @@ const WITH_DRAFT_DETAILS = {
+         workOrder: {
+           include: {
+             project: true,
++            createdByEmployee: true,
+             timeEntries: { include: { timeEntry: { include: { employee: true } } } },
+           },
+         },
+       },
+     },
+-    employeeRates: true,
++    projectRates: true,
+   },
+ } as const;
+ 
+@@ -34,6 +35,9 @@ interface DraftBatchLineRow {
+     description: string | null;
+     /** Phase 12, deel D (sectie 5) — bevroren km-vergoedingsbedrag, zie WorkOrderSignatureService/WeeklyApprovalService. */
+     kmAmountCents: number | null;
++    /** Sectie 34-scenario: wie de werkbon aanmaakte — gebruikt als "eigenaar" van de km-regel wanneer meerdere medewerkers op dezelfde werkbon registreerden. */
++    createdByEmployeeId: string;
++    createdByEmployee: { id: string; displayName: string };
+     project: {
+       id: string;
+       name: string;
+@@ -46,17 +50,15 @@ interface DraftBatchLineRow {
+       overtimeRatePercent: number;
+       shiftWorkRatePercent: number;
+       nightWorkRatePercent: number;
++      /** Klantvraag 10/9/2026 — verkoopprijs per uur, `null` zolang nog niet ingesteld. */
++      hourlyRateCents: number | null;
+     };
+     timeEntries: Array<{
+       timeEntry: {
+         startedAt: Date;
+         endedAt: Date | null;
+         pausedSeconds: number;
+-        employee: {
+-          id: string;
+-          displayName: string;
+-          defaultHourlyRateCents: number | null;
+-        };
++        employee: { id: string; displayName: string };
+       };
+     }>;
+   };
+@@ -68,8 +70,8 @@ interface DraftBatchRow {
+   customerId: string;
+   customer: { name: string; teamleaderId: string; teamleaderType: string; hourlyRateCents: number | null };
+   lines: DraftBatchLineRow[];
+-  /** Facturatie: eenmalige tariefoverrides per medewerker op déze batch (zie InvoiceBatchEmployeeRate in schema.prisma). */
+-  employeeRates: Array<{ employeeId: string; hourlyRateCents: number }>;
++  /** Facturatie: eenmalige tariefoverrides per project op déze batch (zie InvoiceBatchProjectRate in schema.prisma). */
++  projectRates: Array<{ projectId: string; hourlyRateCents: number }>;
+ }
+ 
+ interface TeamleaderConnectionInvoiceSettings {
+@@ -107,15 +109,42 @@ interface TeamleaderConnectionInvoiceSettings {
+  * wat nodig is om dit snel bij te stellen op basis van de échte foutmelding,
+  * zonder Render-logtoegang nodig te hebben.
+  *
+- * Facturatie: tarief per medewerker i.p.v. per klant (uitbreiding na Phase
+- * 10b). Elke werkbon in de batch wordt hier gesplitst in één factuurregel PER
+- * MEDEWERKER die er uren op registreerde — geprijsd met diens
+- * `Employee.defaultHourlyRateCents`, of (ontbreekt dat nog) de eenmalige
+- * override die een admin voor déze batch invulde (InvoiceBatchEmployeeRate,
+- * zie InvoiceBatchService.setEmployeeRate). `Customer.hourlyRateCents` wordt
+- * hier bewust niet meer gebruikt — dat veld/de bijhorende instelling op de
+- * Facturatie-pagina blijft wel bestaan (zie CustomerService), maar is sinds
+- * deze uitbreiding niet meer de bron voor de conceptfactuur.
++ * Klantvraag 10/9/2026 — twee wijzigingen t.o.v. Phase 10b:
++ *
++ * 1) Facturatie: tarief per PROJECT i.p.v. per medewerker ("de verkoopprijs
++ *    hangt af van het project, niet van de technieker"). Elke werkbon in de
++ *    batch wordt hier geprijsd met `Project.hourlyRateCents`, of (ontbreekt
++ *    dat nog) de eenmalige override die een admin voor déze batch invulde
++ *    (InvoiceBatchProjectRate, zie InvoiceBatchService.setProjectRate).
++ *    `Employee.defaultHourlyRateCents`/`Customer.hourlyRateCents` worden
++ *    hier bewust niet meer gebruikt.
++ *
++ * 2) Factuuropmaak: elke `grouped_lines`-groep krijgt nu een `section` —
++ *    een vetgedrukte hoofding op de Teamleader-factuur met de ISO-week en de
++ *    naam van de technieker (bv. "Week 32 - Peter Janssens"), naar het
++ *    voorbeeld dat Steven aanleverde. Vóór deze wijziging bevatte
++ *    `grouped_lines` altijd precies één groep met alle regels samen; nu is
++ *    het één groep per (technieker, project, ISO-week) — de overurendrempel
++ *    zelf blijft wél berekend per Project.overtimeThresholdType (dag of
++ *    week, zie splitEffectiveHours hieronder), enkel de FACTUURWEERGAVE
++ *    groepeert altijd per kalenderweek.
++ *
++ *    LET OP — de exacte vorm van Teamleader's `section`-veld op
++ *    `grouped_lines` kon (nog) niet rechtstreeks tegen de actuele, live
++ *    OpenAPI-spec geverifieerd worden (het gearchiveerde `apiary.apib` is
++ *    verouderd; de opvolger, `@teamleader/focus-api-specification` op npm,
++ *    is te groot om via de beschikbare tools volledig op te halen). Op basis
++ *    van indirect bewijs — Teamleader's algemene API-conventie om verwante
++ *    velden te nesten (zoals `unit_price: {amount, tax}` en `payment_term:
++ *    {type, days}` hierboven), en een extern leesmodel dat de
++ *    gegroepeerde-regel-hoofding op `invoices.info` als `group_section_title`
++ *    (dus een gestructureerd `section.title`) omschrijft — is hieronder
++ *    gekozen voor `section: { title: string }`. Dit zit bewust geïsoleerd in
++ *    één functie (`buildSection` hieronder): geeft Teamleader hier een fout
++ *    op terug (zichtbaar in `teamleaderSyncError`, business rule 9 — de
++ *    batch gaat dan niet verloren), dan volstaat het die ene functie aan te
++ *    passen (bv. terugvallen op een platte string) op basis van de exacte
++ *    foutmelding.
+  */
+ export class TeamleaderInvoiceService {
+   constructor(
+@@ -136,13 +165,13 @@ export class TeamleaderInvoiceService {
+       throw InvoiceBatchErrors.alreadySubmittedToTeamleader();
+     }
+ 
+-    const rateByEmployeeId = resolveEmployeeRateCents(batch);
+-    const missingRateNames = Array.from(rateByEmployeeId.values())
+-      .filter((employee) => employee.rateCents === null)
+-      .map((employee) => employee.displayName)
++    const rateByProjectId = resolveProjectRateCents(batch);
++    const missingRateNames = Array.from(rateByProjectId.values())
++      .filter((project) => project.rateCents === null)
++      .map((project) => project.projectName)
+       .sort();
+     if (missingRateNames.length > 0) {
+-      throw InvoiceBatchErrors.employeeHourlyRateNotSet(missingRateNames);
++      throw InvoiceBatchErrors.projectHourlyRateNotSet(missingRateNames);
+     }
+ 
+     const connection = (await this.prisma.teamleaderConnection.findUnique({
+@@ -164,7 +193,7 @@ export class TeamleaderInvoiceService {
+       throw TeamleaderErrors.invoiceSettingsNotConfigured();
+     }
+ 
+-    const lineItems = buildLineItemsForBatch(batch, rateByEmployeeId, connection.invoiceTaxRateId!);
++    const groupedLines = buildGroupedLinesForBatch(batch, rateByProjectId, connection.invoiceTaxRateId!);
+ 
+     // `project_id` is optioneel bij invoices.draft — enkel meesturen wanneer
+     // alle werkbonnen in deze batch bij hetzelfde Teamleader-project horen
+@@ -183,7 +212,7 @@ export class TeamleaderInvoiceService {
+       department_id: connection.invoiceDepartmentId,
+       payment_term: { type: connection.invoicePaymentTermType, days: connection.invoicePaymentTermDays },
+       ...(projectId ? { project_id: projectId } : {}),
+-      grouped_lines: [{ line_items: lineItems }],
++      grouped_lines: groupedLines,
+     };
+ 
+     try {
+@@ -211,27 +240,25 @@ export class TeamleaderInvoiceService {
+ }
+ 
+ /**
+- * Bepaalt, voor elke medewerker die op minstens één werkbon van deze batch
+- * voorkomt, het tarief waarmee zijn/haar uren geprijsd worden: de eenmalige
+- * override op déze batch (InvoiceBatchEmployeeRate) heeft voorrang op het
+- * standaardtarief uit de instellingen (Employee.defaultHourlyRateCents).
+- * `rateCents: null` betekent dat er voor die medewerker nog geen van beide is
++ * Bepaalt, voor elk project dat op minstens één werkbon van deze batch
++ * voorkomt, het tarief waarmee de uren geprijsd worden: de eenmalige override
++ * op déze batch (InvoiceBatchProjectRate) heeft voorrang op het
++ * standaardtarief uit de projectinstellingen (Project.hourlyRateCents).
++ * `rateCents: null` betekent dat er voor dat project nog geen van beide is
+  * ingevuld — `createDraftInvoice` weigert dan de Teamleader-aanroep (zie
+- * hierboven). Zelfde resolutielogica als InvoiceBatchService.resolveEmployeeRates
++ * hierboven). Zelfde resolutielogica als InvoiceBatchService.resolveProjectRates
+  * (bewust lokaal gedupliceerd, zie de toelichting bovenaan dit bestand).
+  */
+-function resolveEmployeeRateCents(batch: DraftBatchRow): Map<string, { displayName: string; rateCents: number | null }> {
+-  const overrideByEmployeeId = new Map(batch.employeeRates.map((rate) => [rate.employeeId, rate.hourlyRateCents]));
+-  const result = new Map<string, { displayName: string; rateCents: number | null }>();
++function resolveProjectRateCents(batch: DraftBatchRow): Map<string, { projectName: string; rateCents: number | null }> {
++  const overrideByProjectId = new Map(batch.projectRates.map((rate) => [rate.projectId, rate.hourlyRateCents]));
++  const result = new Map<string, { projectName: string; rateCents: number | null }>();
+   for (const line of batch.lines) {
+-    for (const entry of line.workOrder.timeEntries) {
+-      const employee = entry.timeEntry.employee;
+-      const overrideCents = overrideByEmployeeId.get(employee.id) ?? null;
+-      result.set(employee.id, {
+-        displayName: employee.displayName,
+-        rateCents: overrideCents ?? employee.defaultHourlyRateCents,
+-      });
+-    }
++    const project = line.workOrder.project;
++    const overrideCents = overrideByProjectId.get(project.id) ?? null;
++    result.set(project.id, {
++      projectName: project.name,
++      rateCents: overrideCents ?? project.hourlyRateCents ?? null,
++    });
+   }
+   return result;
+ }
+@@ -243,41 +270,84 @@ function computeWorkedSeconds(entry: { startedAt: Date; endedAt: Date | null; pa
+   return Math.max(0, raw);
+ }
+ 
++type LineItem = { quantity: number; description: string; unit_price: { amount: number; tax: 'excluding' }; tax_rate_id: string };
++
++/** Eén Teamleader `grouped_lines`-groep: een vetgedrukte hoofding ("Week N - naam") boven een reeks factuurregels. */
++interface WeekGroup {
++  employeeId: string;
++  displayName: string;
++  projectId: string;
++  project: DraftBatchLineRow['workOrder']['project'];
++  /** ISO-8601-weeksleutel ("YYYY-Wnn") — zie isoWeekKeyOf hieronder. */
++  weekKey: string;
++  workOrderNumbers: Set<string>;
++  normalHours: number;
++  overtimeHours: number;
++  kmItems: LineItem[];
++}
++
+ /**
+- * Eén werkbon levert voortaan één factuurregel PER MEDEWERKER op (i.p.v. één
+- * regel met een geblende totaal), zodat elke medewerker met zijn/haar eigen
+- * tarief geprijsd wordt. `rateByEmployeeId` bevat op dit punt gegarandeerd
+- * enkel geldige (niet-null) tarieven — `createDraftInvoice` heeft dat al
+- * vooraf gecontroleerd.
++ * Bouwt de volledige `grouped_lines`-array op: één groep per (technieker,
++ * project, ISO-week), elk met een vetgedrukte `section`-hoofding ("Week N -
++ * naam", klantvraag 10/9/2026). Prijzing gebeurt per PROJECT
++ * (`rateByProjectId`), niet meer per technieker — de technieker bepaalt hier
++ * enkel nog in wélke hoofding zijn/haar uren terechtkomen, zodat de klant kan
++ * zien wie welke uren die week uitvoerde.
+  *
+- * Phase 12, deel A: de overurendrempel (dag of week, sectie 1) geldt over de
+- * volledige batch heen — een WEEKLY-drempel van bv. 39u kan pas overschreden
+- * worden door de uren van meerdere werkbonnen/dagen samen op te tellen. Deze
+- * functie groepeert daarom alle tijdregistraties van de hele batch per
+- * (medewerker, project), bucket ze per dag of per week (naargelang
+- * Project.overtimeThresholdType), en splitst pas dán normaal/overuren.
+- * Ploegenwerk/nachtwerk (premiumType) geldt op alle uren van een koppeling,
+- * ongeacht de drempel — zie rate-calculation.service.ts.
++ * Twee stappen, bewust gescheiden:
++ * 1) Normaal/overuren correct splitsen — dit MOET gebeuren op basis van
++ *    Project.overtimeThresholdType (dag- of weekdrempel, sectie 1), exact
++ *    zoals vóór deze wijziging (zie splitEffectiveHours hieronder).
++ * 2) Het RESULTAAT daarvan groeperen voor de factuurWEERGAVE, altijd per
++ *    kalenderweek — ook op een project met een dagdrempel (DAILY): meerdere
++ *    dagbedragen binnen dezelfde week worden dan samengevoegd tot één
++ *    weekhoofding, wat Steven expliciet vroeg ("hoofding in het vet per
++ *    week"), zonder de correctheid van de dagdrempel-berekening zelf aan te
++ *    tasten.
+  */
+-function buildLineItemsForBatch(
++function buildGroupedLinesForBatch(
+   batch: DraftBatchRow,
+-  rateByEmployeeId: Map<string, { displayName: string; rateCents: number | null }>,
++  rateByProjectId: Map<string, { projectName: string; rateCents: number | null }>,
+   taxRateId: string,
+-) {
+-  interface Bucket {
++): Array<{ section: { title: string }; line_items: LineItem[] }> {
++  interface PeriodAccumulator {
++    seconds: number;
++    /** ISO-week van dit period-bucket — een DAILY-periode ligt altijd binnen precies één ISO-week. */
++    weekKey: string;
++  }
++  interface EmployeeProjectBucket {
+     employeeId: string;
+     displayName: string;
+-    projectId: string;
+-    projectName: string;
+-    workOrderNumbers: Set<string>;
+     project: DraftBatchLineRow['workOrder']['project'];
+-    employee: DraftBatchLineRow['workOrder']['timeEntries'][number]['timeEntry']['employee'];
+-    /** periodKey (dag "YYYY-MM-DD" of ISO-week "YYYY-Wnn") → seconden in die periode. */
+-    secondsByPeriod: Map<string, number>;
++    periodsByKey: Map<string, PeriodAccumulator>;
+   }
+ 
+-  const bucketsByEmployeeProject = new Map<string, Bucket>();
++  const empProjectBuckets = new Map<string, EmployeeProjectBucket>();
++  const weekGroups = new Map<string, WeekGroup>();
++
++  function weekGroupFor(employeeId: string, displayName: string, project: DraftBatchLineRow['workOrder']['project'], weekKey: string): WeekGroup {
++    const key = `${employeeId}|${project.id}|${weekKey}`;
++    let group = weekGroups.get(key);
++    if (!group) {
++      group = {
++        employeeId,
++        displayName,
++        projectId: project.id,
++        project,
++        weekKey,
++        workOrderNumbers: new Set(),
++        normalHours: 0,
++        overtimeHours: 0,
++        kmItems: [],
++      };
++      weekGroups.set(key, group);
++    }
++    return group;
++  }
+ 
++  // Stap 1: uren bucketen per (technieker, project) → per periode (dag/week
++  // naargelang de overurendrempel), en meteen de bijhorende weekgroep
++  // aanmaken/vullen met werkbonnummers.
+   for (const line of batch.lines) {
+     const project = line.workOrder.project;
+     for (const entry of line.workOrder.timeEntries) {
+@@ -285,92 +355,129 @@ function buildLineItemsForBatch(
+       if (seconds <= 0) continue;
+ 
+       const employee = entry.timeEntry.employee;
+-      const key = `${employee.id}|${project.id}`;
++      const bucketKey = `${employee.id}|${project.id}`;
+       const periodKey =
+         project.overtimeThresholdType === 'DAILY' ? dayKeyOf(entry.timeEntry.startedAt) : isoWeekKeyOf(entry.timeEntry.startedAt);
++      const weekKey = isoWeekKeyOf(entry.timeEntry.startedAt);
+ 
+-      if (!bucketsByEmployeeProject.has(key)) {
+-        bucketsByEmployeeProject.set(key, {
+-          employeeId: employee.id,
+-          displayName: employee.displayName,
+-          projectId: project.id,
+-          projectName: project.name,
+-          workOrderNumbers: new Set(),
+-          project,
+-          employee,
+-          secondsByPeriod: new Map(),
+-        });
++      if (!empProjectBuckets.has(bucketKey)) {
++        empProjectBuckets.set(bucketKey, { employeeId: employee.id, displayName: employee.displayName, project, periodsByKey: new Map() });
+       }
+-      const bucket = bucketsByEmployeeProject.get(key)!;
+-      bucket.workOrderNumbers.add(line.workOrder.workOrderNumber);
+-      bucket.secondsByPeriod.set(periodKey, (bucket.secondsByPeriod.get(periodKey) ?? 0) + seconds);
++      const bucket = empProjectBuckets.get(bucketKey)!;
++      const period = bucket.periodsByKey.get(periodKey) ?? { seconds: 0, weekKey };
++      period.seconds += seconds;
++      bucket.periodsByKey.set(periodKey, period);
++
++      const group = weekGroupFor(employee.id, employee.displayName, project, weekKey);
++      group.workOrderNumbers.add(line.workOrder.workOrderNumber);
+     }
+   }
+ 
+-  return Array.from(bucketsByEmployeeProject.values()).flatMap((bucket) => {
+-    let normalHours = 0;
+-    let overtimeHours = 0;
+-    for (const seconds of bucket.secondsByPeriod.values()) {
+-      const totalHours = seconds / 3600;
++  // Stap 2: per periode normaal/overuren splitsen (dag- of weekdrempel), en
++  // het resultaat optellen in de bijhorende weekgroep.
++  for (const bucket of empProjectBuckets.values()) {
++    for (const period of bucket.periodsByKey.values()) {
++      const totalHours = period.seconds / 3600;
++      let normalHours = totalHours;
++      let overtimeHours = 0;
+       if (bucket.project.overtimeApplies) {
+         const split = splitEffectiveHours(totalHours, {
+           overtimeThresholdType: bucket.project.overtimeThresholdType,
+           overtimeWeeklyThresholdHours: bucket.project.overtimeWeeklyThresholdHours,
+         });
+-        normalHours += split.normalHours;
+-        overtimeHours += split.overtimeHours;
+-      } else {
+-        normalHours += totalHours;
++        normalHours = split.normalHours;
++        overtimeHours = split.overtimeHours;
+       }
++      const group = weekGroupFor(bucket.employeeId, bucket.displayName, bucket.project, period.weekKey);
++      group.normalHours += normalHours;
++      group.overtimeHours += overtimeHours;
+     }
+-    normalHours = Math.round(normalHours * 100) / 100;
+-    overtimeHours = Math.round(overtimeHours * 100) / 100;
+-
+-    const employeeRate = rateByEmployeeId.get(bucket.employeeId)!;
+-    const { normalPercent, overtimePercent } = computeRatePercent(bucket.project);
+-    const workOrderRefs = Array.from(bucket.workOrderNumbers).sort().join(', ');
+-
+-    const items: Array<{ quantity: number; description: string; unit_price: { amount: number; tax: 'excluding' }; tax_rate_id: string }> = [];
+-    if (normalHours > 0) {
+-      items.push(
+-        buildLineItem(normalHours, employeeRate.rateCents!, normalPercent, taxRateId, `${workOrderRefs} — ${bucket.projectName}: ${employeeRate.displayName}`),
+-      );
+-    }
+-    if (overtimeHours > 0) {
+-      items.push(
+-        buildLineItem(
+-          overtimeHours,
+-          employeeRate.rateCents!,
+-          overtimePercent,
+-          taxRateId,
+-          `${workOrderRefs} — ${bucket.projectName}: ${employeeRate.displayName} (overuren)`,
+-        ),
+-      );
+-    }
+-    return items;
+-  }).concat(buildKmLineItems(batch, taxRateId));
++  }
++
++  addKmItemsToGroups(batch, weekGroupFor, taxRateId);
++
++  return Array.from(weekGroups.values())
++    .filter((group) => group.normalHours > 0 || group.overtimeHours > 0 || group.kmItems.length > 0)
++    .sort((a, b) => a.weekKey.localeCompare(b.weekKey) || a.displayName.localeCompare(b.displayName))
++    .map((group) => {
++      const rate = rateByProjectId.get(group.projectId)!;
++      const { normalPercent, overtimePercent } = computeRatePercent(group.project);
++      const workOrderRefs = Array.from(group.workOrderNumbers).sort().join(', ');
++
++      const items: LineItem[] = [];
++      const normalHours = Math.round(group.normalHours * 100) / 100;
++      const overtimeHours = Math.round(group.overtimeHours * 100) / 100;
++      if (normalHours > 0) {
++        items.push(buildLineItem(normalHours, rate.rateCents!, normalPercent, taxRateId, `${workOrderRefs} — Werkuren`));
++      }
++      if (overtimeHours > 0) {
++        items.push(buildLineItem(overtimeHours, rate.rateCents!, overtimePercent, taxRateId, `${workOrderRefs} — Overuren`));
++      }
++      items.push(...group.kmItems);
++
++      return { section: buildSection(sectionTitle(group)), line_items: items };
++    });
++}
++
++/** "Week 32 - Peter Janssens" — klantvraag 10/9/2026: "een hoofding in het vet per week met daarin de week en de naam van de technieker." */
++function sectionTitle(group: WeekGroup): string {
++  const weekNumber = Number(group.weekKey.split('-W')[1]);
++  return `Week ${weekNumber} - ${group.displayName}`;
++}
++
++/**
++ * Zie het uitgebreide commentaar bovenaan dit bestand over de (nog niet
++ * live-geverifieerde) vorm van Teamleader's `section`-veld. Bewust in één
++ * kleine functie geïsoleerd zodat dit later, indien nodig, op één plek
++ * aangepast kan worden (bv. naar een platte string) zonder de rest van de
++ * groeperingslogica te raken.
++ */
++function buildSection(title: string): { title: string } {
++  return { title };
+ }
+ 
+ /**
+- * Phase 12, deel D (sectie 5) — één aparte "Verplaatsingskosten"-regel per
+- * werkbon met een bevroren `kmAmountCents` (WorkOrderSignatureService/
++ * Phase 12, deel D (sectie 5) — één "verplaatsingskosten"-regel per werkbon
++ * met een bevroren `kmAmountCents` (WorkOrderSignatureService/
+  * WeeklyApprovalService berekenden dit al op het moment van ondertekenen).
+- * Bewust NIET meegeteld in de uren-buckets hierboven: km is een vast bedrag
+- * per werkbon, geen toeslagpercentage op een uurtarief.
++ * Klantvraag 10/9/2026: deze regel hoort nu onder dezelfde weekhoofding als
++ * de uren van de technieker die de werkbon aanmaakte (`createdByEmployeeId`)
++ * — bij meerdere technici op één werkbon (sectie 8) is dat de persoon die de
++ * werkbon startte, een redelijke aanname voor "wie er reisde", zonder de
++ * verplaatsingskost te moeten opsplitsen over meerdere technici.
+  */
+-function buildKmLineItems(batch: DraftBatchRow, taxRateId: string) {
+-  return batch.lines
+-    .filter((line) => line.workOrder.kmAmountCents !== null && line.workOrder.kmAmountCents > 0)
+-    .map((line) => ({
++function addKmItemsToGroups(
++  batch: DraftBatchRow,
++  weekGroupFor: (employeeId: string, displayName: string, project: DraftBatchLineRow['workOrder']['project'], weekKey: string) => WeekGroup,
++  taxRateId: string,
++): void {
++  for (const line of batch.lines) {
++    const workOrder = line.workOrder;
++    if (workOrder.kmAmountCents === null || workOrder.kmAmountCents <= 0) continue;
++
++    const ownEntries = workOrder.timeEntries.filter((entry) => entry.timeEntry.employee.id === workOrder.createdByEmployeeId);
++    const candidateEntries = ownEntries.length > 0 ? ownEntries : workOrder.timeEntries;
++    // Kan in de praktijk niet voorkomen (elke werkbon heeft minstens één
++    // tijdregistratie vóór ze factureerbaar wordt) — defensief overgeslagen
++    // i.p.v. een crash, business rule 9.
++    if (candidateEntries.length === 0) continue;
++
++    const earliest = candidateEntries.reduce((a, b) => (a.timeEntry.startedAt < b.timeEntry.startedAt ? a : b));
++    const weekKey = isoWeekKeyOf(earliest.timeEntry.startedAt);
++
++    const group = weekGroupFor(workOrder.createdByEmployeeId, workOrder.createdByEmployee.displayName, workOrder.project, weekKey);
++    group.workOrderNumbers.add(workOrder.workOrderNumber);
++    group.kmItems.push({
+       quantity: 1,
+-      description: `${line.workOrder.workOrderNumber} — ${line.workOrder.project.name}: verplaatsingskosten`,
+-      unit_price: { amount: line.workOrder.kmAmountCents! / 100, tax: 'excluding' as const },
++      description: `${workOrder.workOrderNumber} — verplaatsingskosten`,
++      unit_price: { amount: workOrder.kmAmountCents / 100, tax: 'excluding' as const },
+       tax_rate_id: taxRateId,
+-    }));
++    });
++  }
+ }
+ 
+ /** Bouwt één Teamleader-factuurregel op basis van uren × basistarief × toeslagpercentage. */
+-function buildLineItem(hours: number, baseRateCents: number, ratePercent: number, taxRateId: string, description: string) {
++function buildLineItem(hours: number, baseRateCents: number, ratePercent: number, taxRateId: string, description: string): LineItem {
+   const amount = Math.round(baseRateCents * (ratePercent / 100)) / 100;
+   return {
+     quantity: hours,
+diff --git a/apps/api/test/invoice-batch.service.test.ts b/apps/api/test/invoice-batch.service.test.ts
+index 307fa49..7d62892 100644
+--- a/apps/api/test/invoice-batch.service.test.ts
++++ b/apps/api/test/invoice-batch.service.test.ts
+@@ -11,6 +11,10 @@ import { InvoiceBatchService } from '../src/modules/invoice-batches/invoice-batc
+  * business rule 7 ("een werkbon mag maar één keer gefactureerd worden")
+  * realistisch getest wordt: aanmaken van een batch maakt de werkbon meteen
+  * onbeschikbaar voor listInvoiceable()/een volgende create().
++ *
++ * Klantvraag 10/9/2026: het uurtarief zit nu op `project.hourlyRateCents`
++ * i.p.v. `employee.defaultHourlyRateCents`, en de eenmalige batch-override is
++ * projectgescopeerd (`invoiceBatchProjectRate` i.p.v. `invoiceBatchEmployeeRate`).
+  */
+ 
+ interface FakeWorkOrder {
+@@ -24,6 +28,7 @@ interface FakeWorkOrder {
+     name: string;
+     projectNumber: string | null;
+     invoicingEnabled: boolean;
++    hourlyRateCents: number | null;
+     customer: { id: string; name: string; hourlyRateCents: number | null };
+   };
+   signature: { signedAt: Date } | null;
+@@ -33,7 +38,7 @@ interface FakeWorkOrder {
+       endedAt: Date | null;
+       pausedSeconds: number;
+       employeeId: string;
+-      employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
++      employee: { id: string; displayName: string };
+     };
+   }>;
+ }
+@@ -41,8 +46,8 @@ interface FakeWorkOrder {
+ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+   const batches = new Map<string, { id: string; customerId: string; periodLabel: string; status: string; totalInvoiceableSeconds: number; createdByUserId: string; createdAt: Date }>();
+   const lines = new Map<string, { id: string; invoiceBatchId: string; workOrderId: string; invoiceableSeconds: number }>();
+-  /** invoiceBatchId → employeeId → hourlyRateCents — zie InvoiceBatchEmployeeRate. */
+-  const employeeRateOverrides = new Map<string, Map<string, number>>();
++  /** invoiceBatchId → projectId → hourlyRateCents — zie InvoiceBatchProjectRate. */
++  const projectRateOverrides = new Map<string, Map<string, number>>();
+   let nextId = 1;
+   const genId = (prefix: string) => `${prefix}-${nextId++}`;
+ 
+@@ -118,13 +123,13 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+         }
+       },
+     },
+-    invoiceBatchEmployeeRate: {
+-      upsert: async ({ create }: { create: { invoiceBatchId: string; employeeId: string; hourlyRateCents: number } }) => {
+-        if (!employeeRateOverrides.has(create.invoiceBatchId)) employeeRateOverrides.set(create.invoiceBatchId, new Map());
+-        employeeRateOverrides.get(create.invoiceBatchId)!.set(create.employeeId, create.hourlyRateCents);
++    invoiceBatchProjectRate: {
++      upsert: async ({ create }: { create: { invoiceBatchId: string; projectId: string; hourlyRateCents: number } }) => {
++        if (!projectRateOverrides.has(create.invoiceBatchId)) projectRateOverrides.set(create.invoiceBatchId, new Map());
++        projectRateOverrides.get(create.invoiceBatchId)!.set(create.projectId, create.hourlyRateCents);
+       },
+-      deleteMany: async ({ where }: { where: { invoiceBatchId: string; employeeId: string } }) => {
+-        employeeRateOverrides.get(where.invoiceBatchId)?.delete(where.employeeId);
++      deleteMany: async ({ where }: { where: { invoiceBatchId: string; projectId: string } }) => {
++        projectRateOverrides.get(where.invoiceBatchId)?.delete(where.projectId);
+       },
+     },
+   };
+@@ -134,7 +139,7 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+     if (!batch) throw new Error('batch niet gevonden');
+     const batchLines = Array.from(lines.values()).filter((line) => line.invoiceBatchId === id);
+     const customer = workOrders.find((wo) => wo.project.customerId === batch.customerId)?.project.customer ?? { id: batch.customerId, name: '?', hourlyRateCents: null };
+-    const overrides = employeeRateOverrides.get(id) ?? new Map<string, number>();
++    const overrides = projectRateOverrides.get(id) ?? new Map<string, number>();
+     return {
+       ...batch,
+       customer,
+@@ -146,12 +151,12 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+           invoiceableSeconds: line.invoiceableSeconds,
+           workOrder: {
+             workOrderNumber: wo?.workOrderNumber ?? '?',
+-            project: { name: wo?.project.name ?? '?' },
++            project: { id: wo?.project.id ?? '?', name: wo?.project.name ?? '?', hourlyRateCents: wo?.project.hourlyRateCents ?? null },
+             timeEntries: wo?.timeEntries ?? [],
+           },
+         };
+       }),
+-      employeeRates: Array.from(overrides.entries()).map(([employeeId, hourlyRateCents]) => ({ employeeId, hourlyRateCents })),
++      projectRates: Array.from(overrides.entries()).map(([projectId, hourlyRateCents]) => ({ projectId, hourlyRateCents })),
+     };
+   }
+ 
+@@ -162,13 +167,15 @@ const janssens = { id: 'cust-janssens', name: 'Janssens BV', hourlyRateCents: 65
+ const deSmet = { id: 'cust-desmet', name: 'De Smet NV', hourlyRateCents: null };
+ const peter = 'emp-peter';
+ const wannes = 'emp-wannes';
++const proj1 = { id: 'proj-1', name: 'Onderhoud HVAC', hourlyRateCents: 6500 as number | null };
++const projZonderTarief = { id: 'proj-2', name: 'Interventie', hourlyRateCents: null as number | null };
+ 
+ function workOrder(overrides: Partial<FakeWorkOrder> & { id: string }): FakeWorkOrder {
+   return {
+     workOrderNumber: `WB-${overrides.id}`,
+     status: 'READY_FOR_INVOICING',
+-    projectId: 'proj-1',
+-    project: { id: 'proj-1', customerId: janssens.id, name: 'Onderhoud HVAC', projectNumber: 'PRO-1', invoicingEnabled: true, customer: janssens },
++    projectId: proj1.id,
++    project: { id: proj1.id, customerId: janssens.id, name: proj1.name, projectNumber: 'PRO-1', invoicingEnabled: true, hourlyRateCents: proj1.hourlyRateCents, customer: janssens },
+     signature: { signedAt: new Date('2026-08-10T10:00:00Z') },
+     timeEntries: [],
+     ...overrides,
+@@ -179,7 +186,7 @@ describe('InvoiceBatchService', () => {
+   it('listInvoiceable() toont enkel READY_FOR_INVOICING werkbonnen die nog niet gebatcht zijn, met correct berekende uren', async () => {
+     const wo1 = workOrder({
+       id: 'wo1',
+-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
++      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
+     });
+     const wo2Draft = workOrder({ id: 'wo2', status: 'DRAFT' });
+     const { prisma } = createFakePrisma([wo1, wo2Draft]);
+@@ -197,12 +204,12 @@ describe('InvoiceBatchService', () => {
+     const wo1 = workOrder({
+       id: 'wo1',
+       signature: { signedAt: new Date('2026-08-10T10:00:00Z') },
+-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
++      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
+     });
+     const wo2 = workOrder({
+       id: 'wo2',
+       signature: { signedAt: new Date('2026-07-15T10:00:00Z') },
+-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-07-15T08:00:00Z'), endedAt: new Date('2026-07-15T09:30:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes', defaultHourlyRateCents: 5500 } } }],
++      timeEntries: [{ timeEntry: { startedAt: new Date('2026-07-15T08:00:00Z'), endedAt: new Date('2026-07-15T09:30:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes' } } }],
+     });
+     const { prisma } = createFakePrisma([wo1, wo2]);
+     const service = new InvoiceBatchService(prisma);
+@@ -214,7 +221,7 @@ describe('InvoiceBatchService', () => {
+   it('create() maakt een batch aan, telt de uren correct op en maakt de werkbon meteen onbeschikbaar voor een volgende batch', async () => {
+     const wo1 = workOrder({
+       id: 'wo1',
+-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:17:00Z'), pausedSeconds: 17 * 60, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
++      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:17:00Z'), pausedSeconds: 17 * 60, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
+     });
+     const { prisma } = createFakePrisma([wo1]);
+     const service = new InvoiceBatchService(prisma);
+@@ -224,9 +231,9 @@ describe('InvoiceBatchService', () => {
+     expect(batch.totalInvoiceableSeconds).toBe(2 * 60 * 60);
+     expect(batch.lines).toHaveLength(1);
+     expect(batch.lines[0]?.workOrder.workOrderNumber).toBe('WB-wo1');
+-    // Facturatie: tarief per medewerker — Peter heeft al een standaardtarief, dus meteen "effectief".
+-    expect(batch.employeeRates).toEqual([
+-      { employeeId: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500, overrideHourlyRateCents: null, effectiveHourlyRateCents: 6500 },
++    // Klantvraag 10/9/2026: tarief per project — het project heeft al een standaardtarief, dus meteen "effectief".
++    expect(batch.projectRates).toEqual([
++      { projectId: proj1.id, projectName: proj1.name, defaultHourlyRateCents: 6500, overrideHourlyRateCents: null, effectiveHourlyRateCents: 6500 },
+     ]);
+ 
+     // Business rule 7: dezelfde werkbon nu niet meer beschikbaar.
+@@ -249,8 +256,8 @@ describe('InvoiceBatchService', () => {
+   it('Phase 12, deel C: een werkbon van een nacalculatie-project (invoicingEnabled=false) verschijnt nooit bij listInvoiceable() en kan niet gebatcht worden', async () => {
+     const wo1 = workOrder({
+       id: 'wo1',
+-      project: { id: 'proj-nacalc', customerId: janssens.id, name: 'Nacalculatie-project', projectNumber: 'PRO-9', invoicingEnabled: false, customer: janssens },
+-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
++      project: { id: 'proj-nacalc', customerId: janssens.id, name: 'Nacalculatie-project', projectNumber: 'PRO-9', invoicingEnabled: false, hourlyRateCents: 6500, customer: janssens },
++      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
+     });
+     const { prisma } = createFakePrisma([wo1]);
+     const service = new InvoiceBatchService(prisma);
+@@ -265,7 +272,7 @@ describe('InvoiceBatchService', () => {
+   });
+ 
+   it('create() weigert wanneer een werkbon niet bij de opgegeven klant hoort', async () => {
+-    const woOther = workOrder({ id: 'wo1', project: { id: 'proj-2', customerId: deSmet.id, name: 'Service', projectNumber: null, invoicingEnabled: true, customer: deSmet } });
++    const woOther = workOrder({ id: 'wo1', project: { id: 'proj-2', customerId: deSmet.id, name: 'Service', projectNumber: null, invoicingEnabled: true, hourlyRateCents: null, customer: deSmet } });
+     const { prisma } = createFakePrisma([woOther]);
+     const service = new InvoiceBatchService(prisma);
+ 
+@@ -284,7 +291,7 @@ describe('InvoiceBatchService', () => {
+   });
+ 
+   it('remove() verwijdert een DRAFT-batch volledig, en geeft de werkbon weer vrij', async () => {
+-    const wo1 = workOrder({ id: 'wo1', timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T09:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }] });
++    const wo1 = workOrder({ id: 'wo1', timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T09:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }] });
+     const { prisma } = createFakePrisma([wo1]);
+     const service = new InvoiceBatchService(prisma);
+     const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
+@@ -301,64 +308,66 @@ describe('InvoiceBatchService', () => {
+     await expect(service.remove('does-not-exist')).rejects.toMatchObject({ code: 'INVOICE_BATCH_NOT_FOUND' });
+   });
+ 
+-  describe('setEmployeeRate() — tarief per medewerker i.p.v. per klant', () => {
+-    it('vult een eenmalige override voor een medewerker zonder standaardtarief', async () => {
+-      const woWannes = workOrder({
++  describe('setProjectRate() — klantvraag 10/9/2026: tarief per project i.p.v. per medewerker', () => {
++    it('vult een eenmalige override voor een project zonder standaardtarief', async () => {
++      const woZonderTarief = workOrder({
+         id: 'wo1',
+-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes', defaultHourlyRateCents: null } } }],
++        project: { id: projZonderTarief.id, customerId: janssens.id, name: projZonderTarief.name, projectNumber: 'PRO-2', invoicingEnabled: true, hourlyRateCents: null, customer: janssens },
++        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes' } } }],
+       });
+-      const { prisma } = createFakePrisma([woWannes]);
++      const { prisma } = createFakePrisma([woZonderTarief]);
+       const service = new InvoiceBatchService(prisma);
+       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
+-      expect(batch.employeeRates).toEqual([
+-        { employeeId: wannes, displayName: 'Wannes', defaultHourlyRateCents: null, overrideHourlyRateCents: null, effectiveHourlyRateCents: null },
++      expect(batch.projectRates).toEqual([
++        { projectId: projZonderTarief.id, projectName: projZonderTarief.name, defaultHourlyRateCents: null, overrideHourlyRateCents: null, effectiveHourlyRateCents: null },
+       ]);
+ 
+-      const updated = await service.setEmployeeRate(batch.id, wannes, 4800);
++      const updated = await service.setProjectRate(batch.id, projZonderTarief.id, 4800);
+ 
+-      expect(updated.employeeRates).toEqual([
+-        { employeeId: wannes, displayName: 'Wannes', defaultHourlyRateCents: null, overrideHourlyRateCents: 4800, effectiveHourlyRateCents: 4800 },
++      expect(updated.projectRates).toEqual([
++        { projectId: projZonderTarief.id, projectName: projZonderTarief.name, defaultHourlyRateCents: null, overrideHourlyRateCents: 4800, effectiveHourlyRateCents: 4800 },
+       ]);
+     });
+ 
+     it('wist de override weer bij hourlyRateCents: null', async () => {
+-      const woWannes = workOrder({
++      const woZonderTarief = workOrder({
+         id: 'wo1',
+-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes', defaultHourlyRateCents: null } } }],
++        project: { id: projZonderTarief.id, customerId: janssens.id, name: projZonderTarief.name, projectNumber: 'PRO-2', invoicingEnabled: true, hourlyRateCents: null, customer: janssens },
++        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes' } } }],
+       });
+-      const { prisma } = createFakePrisma([woWannes]);
++      const { prisma } = createFakePrisma([woZonderTarief]);
+       const service = new InvoiceBatchService(prisma);
+       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
+-      await service.setEmployeeRate(batch.id, wannes, 4800);
++      await service.setProjectRate(batch.id, projZonderTarief.id, 4800);
+ 
+-      const updated = await service.setEmployeeRate(batch.id, wannes, null);
++      const updated = await service.setProjectRate(batch.id, projZonderTarief.id, null);
+ 
+-      expect(updated.employeeRates[0]).toMatchObject({ overrideHourlyRateCents: null, effectiveHourlyRateCents: null });
++      expect(updated.projectRates[0]).toMatchObject({ overrideHourlyRateCents: null, effectiveHourlyRateCents: null });
+     });
+ 
+-    it('weigert een medewerker die niet op deze batch voorkomt', async () => {
++    it('weigert een project dat niet op deze batch voorkomt', async () => {
+       const wo1 = workOrder({
+         id: 'wo1',
+-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
++        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
+       });
+       const { prisma } = createFakePrisma([wo1]);
+       const service = new InvoiceBatchService(prisma);
+       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
+ 
+-      await expect(service.setEmployeeRate(batch.id, wannes, 4800)).rejects.toMatchObject({ code: 'INVOICE_BATCH_EMPLOYEE_NOT_ON_BATCH' });
++      await expect(service.setProjectRate(batch.id, projZonderTarief.id, 4800)).rejects.toMatchObject({ code: 'INVOICE_BATCH_PROJECT_NOT_ON_BATCH' });
+     });
+ 
+     it('weigert op een batch die al naar Teamleader verstuurd is', async () => {
+       const wo1 = workOrder({
+         id: 'wo1',
+-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: null } } }],
++        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
+       });
+       const { prisma } = createFakePrisma([wo1]);
+       const service = new InvoiceBatchService(prisma);
+       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
+       await prisma.invoiceBatch.update({ where: { id: batch.id }, data: { status: 'SUBMITTED_TO_TEAMLEADER' } });
+ 
+-      await expect(service.setEmployeeRate(batch.id, peter, 6500)).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
++      await expect(service.setProjectRate(batch.id, proj1.id, 6500)).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
+     });
+   });
+ });
+diff --git a/apps/api/test/teamleader-invoice.service.test.ts b/apps/api/test/teamleader-invoice.service.test.ts
+index 9ac1abd..d12bff0 100644
+--- a/apps/api/test/teamleader-invoice.service.test.ts
++++ b/apps/api/test/teamleader-invoice.service.test.ts
+@@ -5,12 +5,15 @@ import { TeamleaderApiError, type TeamleaderClient } from '../src/modules/teamle
+ import { TEAMLEADER_CONNECTION_SINGLETON_ID } from '../src/modules/teamleader/teamleader-auth.service';
+ 
+ /**
+- * Unit-tests voor "Maak conceptfactuur in Teamleader" (Phase 10b, sectie 17;
+- * sinds de uitbreiding "tarief per medewerker i.p.v. per klant" geprijsd op
+- * basis van Employee.defaultHourlyRateCents / InvoiceBatchEmployeeRate i.p.v.
+- * Customer.hourlyRateCents). Fake-Prisma bootst enkel `invoiceBatch.findUnique`/
+- * `.update` en `teamleaderConnection.findUnique` na — precies wat deze service
+- * gebruikt.
++ * Unit-tests voor "Maak conceptfactuur in Teamleader" (Phase 10b, sectie 17).
++ *
++ * Klantvraag 10/9/2026 — twee wijzigingen t.o.v. Phase 10b, beide hier
++ * getest: (1) prijzing per PROJECT (`Project.hourlyRateCents` /
++ * `InvoiceBatchProjectRate`) i.p.v. per medewerker, en (2) `grouped_lines`
++ * bevat nu één groep per (technieker, project, ISO-week), elk met een
++ * `section`-hoofding ("Week N - naam"). Fake-Prisma bootst enkel
++ * `invoiceBatch.findUnique`/`.update` en `teamleaderConnection.findUnique`
++ * na — precies wat deze service gebruikt.
+  */
+ 
+ interface FakeConnectionSettings {
+@@ -24,11 +27,21 @@ interface FakeTimeEntry {
+   startedAt: Date;
+   endedAt: Date | null;
+   pausedSeconds: number;
+-  employee: {
+-    id: string;
+-    displayName: string;
+-    defaultHourlyRateCents: number | null;
+-  };
++  employee: { id: string; displayName: string };
++}
++
++interface FakeProject {
++  id: string;
++  name: string;
++  teamleaderId: string;
++  overtimeThresholdType: 'DAILY' | 'WEEKLY';
++  overtimeWeeklyThresholdHours: number | null;
++  overtimeApplies: boolean;
++  premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
++  overtimeRatePercent: number;
++  shiftWorkRatePercent: number;
++  nightWorkRatePercent: number;
++  hourlyRateCents: number | null;
+ }
+ 
+ interface FakeBatch {
+@@ -38,26 +51,16 @@ interface FakeBatch {
+   customer: { name: string; teamleaderId: string; teamleaderType: string; hourlyRateCents: number | null };
+   teamleaderInvoiceId?: string | null;
+   teamleaderSyncError?: string | null;
+-  employeeRates: Array<{ employeeId: string; hourlyRateCents: number }>;
++  projectRates: Array<{ projectId: string; hourlyRateCents: number }>;
+   lines: Array<{
+     invoiceableSeconds: number;
+     workOrder: {
+       workOrderNumber: string;
+       description: string | null;
+       kmAmountCents: number | null;
+-      project: {
+-        id: string;
+-        name: string;
+-        teamleaderId: string;
+-        overtimeThresholdType: 'DAILY' | 'WEEKLY';
+-        overtimeWeeklyThresholdHours: number | null;
+-        /** Fase 12-herziening: toeslagregeling zit nu uniform op Project, niet meer per ProjectAssignment/Employee. */
+-        overtimeApplies: boolean;
+-        premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK';
+-        overtimeRatePercent: number;
+-        shiftWorkRatePercent: number;
+-        nightWorkRatePercent: number;
+-      };
++      createdByEmployeeId: string;
++      createdByEmployee: { id: string; displayName: string };
++      project: FakeProject;
+       timeEntries: Array<{ timeEntry: FakeTimeEntry }>;
+     };
+   }>;
+@@ -96,7 +99,7 @@ const validSettings: FakeConnectionSettings = {
+   invoicePaymentTermDays: 0,
+ }
+ 
+-const peter = { id: 'emp-peter', displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 };
++const peter = { id: 'emp-peter', displayName: 'Peter Janssens' };
+ 
+ /** Fase 12-herziening: default toeslagregeling van een project — geen toeslag actief, standaardpercentages. */
+ const NO_PREMIUM = {
+@@ -107,7 +110,17 @@ const NO_PREMIUM = {
+   nightWorkRatePercent: 150,
+ };
+ 
+-/** 2u17 gewerkt (08:00 → 10:17, geen pauze) — zelfde uren als het oorspronkelijke voorbeeld. */
++const project1: FakeProject = {
++  id: 'proj-1',
++  name: 'Onderhoud HVAC',
++  teamleaderId: 'tl-proj-1',
++  overtimeThresholdType: 'DAILY',
++  overtimeWeeklyThresholdHours: null,
++  hourlyRateCents: 6500,
++  ...NO_PREMIUM,
++};
++
++/** 2u17 gewerkt (08:00 → 10:17, geen pauze, donderdag 20/08/2026 = ISO-week 34) — zelfde uren als het oorspronkelijke voorbeeld. */
+ function peterTimeEntry(overrides: Partial<FakeTimeEntry['employee']> = {}) {
+   return {
+     timeEntry: {
+@@ -125,7 +138,9 @@ const baseLine = {
+     workOrderNumber: 'WB-2026-000123',
+     description: 'Onderhoud uitgevoerd.',
+     kmAmountCents: null as number | null,
+-    project: { id: 'proj-1', name: 'Onderhoud HVAC', teamleaderId: 'tl-proj-1', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, ...NO_PREMIUM },
++    createdByEmployeeId: peter.id,
++    createdByEmployee: peter,
++    project: project1,
+     timeEntries: [peterTimeEntry()],
+   },
+ };
+@@ -136,14 +151,20 @@ function baseBatch(overrides: Partial<FakeBatch> = {}): FakeBatch {
+     status: 'DRAFT',
+     customerId: 'cust-1',
+     customer: { name: 'Janssens BV', teamleaderId: 'tl-cust-1', teamleaderType: 'company', hourlyRateCents: null },
+-    employeeRates: [],
++    projectRates: [],
+     lines: [baseLine],
+     ...overrides,
+   };
+ }
+ 
++/** Elke groep in `grouped_lines` draagt nu een `section`-hoofding — dit haalt gewoon alle line_items uit alle groepen samen op, voor tests die niet specifiek de groepering zelf testen. */
++function allLineItems(payload: Record<string, unknown>): Array<Record<string, unknown>> {
++  const groups = payload.grouped_lines as Array<{ section?: { title: string }; line_items: Array<Record<string, unknown>> }>;
++  return groups.flatMap((group) => group.line_items);
++}
++
+ describe('TeamleaderInvoiceService', () => {
+-  it('maakt een conceptfactuur aan en zet de batch op SUBMITTED_TO_TEAMLEADER — geprijsd met het standaardtarief van de medewerker', async () => {
++  it('maakt een conceptfactuur aan en zet de batch op SUBMITTED_TO_TEAMLEADER — geprijsd met het standaardtarief van het project', async () => {
+     const { prisma, getState } = createFakePrisma(baseBatch(), validSettings);
+     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+     const service = new TeamleaderInvoiceService(prisma, client);
+@@ -160,17 +181,21 @@ describe('TeamleaderInvoiceService', () => {
+     expect(payload.department_id).toBe('dep-1');
+     expect(payload.payment_term).toEqual({ type: 'CASH', days: 0 });
+     expect(payload.project_id).toBe('tl-proj-1'); // enkele batchregel ⇒ project_id wordt meegestuurd
+-    const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items;
++
++    const groups = payload.grouped_lines as Array<{ section: { title: string }; line_items: Array<Record<string, unknown>> }>;
++    expect(groups).toHaveLength(1);
++    expect(groups[0]?.section).toEqual({ title: 'Week 34 - Peter Janssens' }); // 20/08/2026 = ISO-week 34
++
++    const lineItems = groups[0]?.line_items ?? [];
+     expect(lineItems).toHaveLength(1);
+-    expect(lineItems?.[0]?.quantity).toBeCloseTo(2.28, 2); // 2u17 → 2,28u
+-    expect(lineItems?.[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' }); // Peters defaultHourlyRateCents (6500)
+-    expect(lineItems?.[0]?.tax_rate_id).toBe('tax-21');
+-    expect(lineItems?.[0]?.description).toContain('WB-2026-000123');
+-    expect(lineItems?.[0]?.description).toContain('Peter Janssens');
++    expect(lineItems[0]?.quantity).toBeCloseTo(2.28, 2); // 2u17 → 2,28u
++    expect(lineItems[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' }); // Project.hourlyRateCents (6500)
++    expect(lineItems[0]?.tax_rate_id).toBe('tax-21');
++    expect(lineItems[0]?.description).toContain('WB-2026-000123');
+   });
+ 
+-  it('splitst één werkbon in aparte factuurregels per medewerker, elk met hun eigen tarief', async () => {
+-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: 5500 };
++  it('splitst één werkbon in aparte weekgroepen per medewerker, elk geprijsd met hetzelfde projecttarief', async () => {
++    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters' };
+     const multiEmployeeLine = {
+       ...baseLine,
+       workOrder: {
+@@ -195,37 +220,25 @@ describe('TeamleaderInvoiceService', () => {
+     await service.createDraftInvoice('batch-1');
+ 
+     const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+-    const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+-    expect(lineItems).toHaveLength(2);
+-
+-    const peterLine = lineItems.find((item) => (item.description as string).includes('Peter Janssens'));
+-    const wannesLine = lineItems.find((item) => (item.description as string).includes('Wannes Peeters'));
+-    expect(peterLine?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
+-    expect(peterLine?.quantity).toBeCloseTo(2.28, 2);
+-    expect(wannesLine?.unit_price).toEqual({ amount: 55, tax: 'excluding' });
+-    expect(wannesLine?.quantity).toBeCloseTo(7.75, 2); // 8u15 - 0u30 pauze = 7u45
++    const groups = payload.grouped_lines as Array<{ section: { title: string }; line_items: Array<Record<string, unknown>> }>;
++    // Zelfde project, zelfde week, maar twee verschillende technici ⇒ twee aparte hoofdingen.
++    expect(groups).toHaveLength(2);
++    expect(groups.map((g) => g.section.title).sort()).toEqual(['Week 34 - Peter Janssens', 'Week 34 - Wannes Peeters']);
++
++    const peterGroup = groups.find((g) => g.section.title.includes('Peter'))!;
++    const wannesGroup = groups.find((g) => g.section.title.includes('Wannes'))!;
++    // Beiden geprijsd met hetzelfde projecttarief (6500) — het is nu de sectiehoofding, niet het tarief, die per technieker verschilt.
++    expect(peterGroup.line_items[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
++    expect(peterGroup.line_items[0]?.quantity).toBeCloseTo(2.28, 2);
++    expect(wannesGroup.line_items[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
++    expect(wannesGroup.line_items[0]?.quantity).toBeCloseTo(7.75, 2); // 8u15 - 0u30 pauze = 7u45
+   });
+ 
+-  it('gebruikt de eenmalige batch-override wanneer de medewerker geen standaardtarief heeft', async () => {
+-    const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters', defaultHourlyRateCents: null };
+-    const line = {
+-      ...baseLine,
+-      workOrder: {
+-        ...baseLine.workOrder,
+-        timeEntries: [
+-          {
+-            timeEntry: {
+-              startedAt: new Date('2026-08-20T08:00:00Z'),
+-              endedAt: new Date('2026-08-20T10:00:00Z'),
+-              pausedSeconds: 0,
+-              employee: wannes,
+-            },
+-          },
+-        ],
+-      },
+-    };
++  it('gebruikt de eenmalige batch-override wanneer het project geen standaardtarief heeft', async () => {
++    const projectZonderTarief = { ...project1, hourlyRateCents: null };
++    const line = { ...baseLine, workOrder: { ...baseLine.workOrder, project: projectZonderTarief } };
+     const { prisma } = createFakePrisma(
+-      baseBatch({ lines: [line], employeeRates: [{ employeeId: 'emp-wannes', hourlyRateCents: 4800 }] }),
++      baseBatch({ lines: [line], projectRates: [{ projectId: project1.id, hourlyRateCents: 4800 }] }),
+       validSettings,
+     );
+     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+@@ -234,7 +247,7 @@ describe('TeamleaderInvoiceService', () => {
+     await service.createDraftInvoice('batch-1');
+ 
+     const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+-    const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
++    const lineItems = allLineItems(payload);
+     expect(lineItems).toHaveLength(1);
+     expect(lineItems[0]?.unit_price).toEqual({ amount: 48, tax: 'excluding' }); // override, niet het (ontbrekende) standaardtarief
+   });
+@@ -242,7 +255,7 @@ describe('TeamleaderInvoiceService', () => {
+   it('laat project_id weg wanneer de batch werkbonnen van verschillende projecten bevat', async () => {
+     const otherProjectLine = {
+       ...baseLine,
+-      workOrder: { ...baseLine.workOrder, project: { id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2', overtimeThresholdType: 'DAILY' as const, overtimeWeeklyThresholdHours: null, ...NO_PREMIUM } },
++      workOrder: { ...baseLine.workOrder, project: { ...project1, id: 'proj-2', name: 'Interventie', teamleaderId: 'tl-proj-2' } },
+     };
+     const { prisma } = createFakePrisma(baseBatch({ lines: [baseLine, otherProjectLine] }), validSettings);
+     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+@@ -254,14 +267,14 @@ describe('TeamleaderInvoiceService', () => {
+     expect(payload.project_id).toBeUndefined();
+   });
+ 
+-  it('weigert wanneer een medewerker op de batch nog geen uurtarief heeft (noch standaard, noch een eenmalige override)', async () => {
+-    const zonderTarief = { id: 'emp-zonder-tarief', displayName: 'Steven Zonder Tarief', defaultHourlyRateCents: null };
+-    const line = { ...baseLine, workOrder: { ...baseLine.workOrder, timeEntries: [peterTimeEntry(), { timeEntry: { ...peterTimeEntry().timeEntry, employee: zonderTarief } }] } };
++  it('weigert wanneer een project op de batch nog geen uurtarief heeft (noch standaard, noch een eenmalige override)', async () => {
++    const projectZonderTarief = { ...project1, id: 'proj-zonder-tarief', name: 'Project Zonder Tarief', hourlyRateCents: null };
++    const line = { ...baseLine, workOrder: { ...baseLine.workOrder, project: projectZonderTarief } };
+     const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+     const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+     const service = new TeamleaderInvoiceService(prisma, client);
+ 
+-    await expect(service.createDraftInvoice('batch-1')).rejects.toMatchObject({ code: 'INVOICE_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET' });
++    await expect(service.createDraftInvoice('batch-1')).rejects.toMatchObject({ code: 'INVOICE_BATCH_PROJECT_HOURLY_RATE_NOT_SET' });
+     expect(client.post).not.toHaveBeenCalled();
+   });
+ 
+@@ -274,23 +287,19 @@ describe('TeamleaderInvoiceService', () => {
+       await service.createDraftInvoice('batch-1');
+ 
+       const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+-      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
++      const lineItems = allLineItems(payload);
+       expect(lineItems).toHaveLength(1); // geen aparte overurenregel
+       expect(lineItems[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
+       expect(lineItems[0]?.quantity).toBeCloseTo(2.28, 2);
+     });
+ 
+-    it('DAILY-drempel: één werkbon van 9u30 op een project met overtimeApplies=true levert twee regels op (8u normaal, 1u30 overuren)', async () => {
++    it('DAILY-drempel: één werkbon van 9u30 op een project met overtimeApplies=true levert twee regels op (8u normaal, 1u30 overuren) binnen dezelfde weekgroep', async () => {
++      const project = { ...project1, overtimeApplies: true, premiumType: 'NONE' as const };
+       const line = {
+         ...baseLine,
+         workOrder: {
+           ...baseLine.workOrder,
+-          project: {
+-            ...baseLine.workOrder.project,
+-            overtimeThresholdType: 'DAILY' as const,
+-            overtimeApplies: true,
+-            premiumType: 'NONE' as const,
+-          },
++          project,
+           timeEntries: [
+             {
+               timeEntry: {
+@@ -310,21 +319,23 @@ describe('TeamleaderInvoiceService', () => {
+       await service.createDraftInvoice('batch-1');
+ 
+       const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+-      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
++      const groups = payload.grouped_lines as Array<{ section: { title: string }; line_items: Array<Record<string, unknown>> }>;
++      expect(groups).toHaveLength(1); // zelfde technieker/project/week ⇒ één hoofding
++      const lineItems = groups[0]?.line_items ?? [];
+       expect(lineItems).toHaveLength(2);
+ 
+-      const normal = lineItems.find((item) => !(item.description as string).includes('overuren'));
+-      const overtime = lineItems.find((item) => (item.description as string).includes('overuren'));
++      const normal = lineItems.find((item) => (item.description as string).includes('Werkuren'));
++      const overtime = lineItems.find((item) => (item.description as string).includes('Overuren'));
+       expect(normal?.quantity).toBeCloseTo(8, 2);
+       expect(normal?.unit_price).toEqual({ amount: 65, tax: 'excluding' }); // 100% van 6500
+       expect(overtime?.quantity).toBeCloseTo(1.5, 2);
+       expect(overtime?.unit_price).toEqual({ amount: 97.5, tax: 'excluding' }); // 150% van 6500
+     });
+ 
+-    it('WEEKLY-drempel over meerdere werkbonnen heen: acceptatiecriterium uit het ontwerp — 39u normaal + 3u overuren bij nachtwerk (200%)', async () => {
++    it('WEEKLY-drempel over meerdere werkbonnen heen: acceptatiecriterium uit het ontwerp — 39u normaal + 3u overuren bij nachtwerk (200%), samengevoegd onder één weekhoofding', async () => {
+       // Peter werkt 3 dagen van 14u (42u totaal) op een WEEKLY-project met drempel 39u, plus nachtwerktoeslag.
+       const project = {
+-        ...baseLine.workOrder.project,
++        ...project1,
+         overtimeThresholdType: 'WEEKLY' as const,
+         overtimeWeeklyThresholdHours: 39,
+         overtimeApplies: true,
+@@ -345,11 +356,14 @@ describe('TeamleaderInvoiceService', () => {
+       await service.createDraftInvoice('batch-1');
+ 
+       const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+-      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
+-      expect(lineItems).toHaveLength(2); // 3 werkbonnen, maar samengevoegd tot 1 normale + 1 overuren-regel (zelfde week, zelfde project/medewerker)
+-
+-      const normal = lineItems.find((item) => !(item.description as string).includes('overuren'));
+-      const overtime = lineItems.find((item) => (item.description as string).includes('overuren'));
++      const groups = payload.grouped_lines as Array<{ section: { title: string }; line_items: Array<Record<string, unknown>> }>;
++      expect(groups).toHaveLength(1); // 3 werkbonnen, zelfde week/technieker/project ⇒ 1 hoofding
++      expect(groups[0]?.section).toEqual({ title: 'Week 34 - Peter Janssens' });
++      const lineItems = groups[0]?.line_items ?? [];
++      expect(lineItems).toHaveLength(2); // samengevoegd tot 1 normale + 1 overuren-regel
++
++      const normal = lineItems.find((item) => (item.description as string).includes('Werkuren'));
++      const overtime = lineItems.find((item) => (item.description as string).includes('Overuren'));
+       expect(normal?.quantity).toBeCloseTo(39, 2);
+       expect(normal?.unit_price).toEqual({ amount: 97.5, tax: 'excluding' }); // 150% (nachtwerk) van 6500
+       expect(overtime?.quantity).toBeCloseTo(3, 2);
+@@ -362,7 +376,7 @@ describe('TeamleaderInvoiceService', () => {
+   });
+ 
+   describe('Phase 12, deel D — km-vergoeding', () => {
+-    it('voegt een aparte "verplaatsingskosten"-regel toe wanneer kmAmountCents bevroren is op de werkbon', async () => {
++    it('voegt een aparte "verplaatsingskosten"-regel toe onder dezelfde weekhoofding, wanneer kmAmountCents bevroren is op de werkbon', async () => {
+       const line = { ...baseLine, workOrder: { ...baseLine.workOrder, kmAmountCents: 868 } }; // 12,4km enkel @ €0,35/km, heen-terug (zie distance.service.test.ts)
+       const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+       const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+@@ -371,7 +385,9 @@ describe('TeamleaderInvoiceService', () => {
+       await service.createDraftInvoice('batch-1');
+ 
+       const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+-      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
++      const groups = payload.grouped_lines as Array<{ section: { title: string }; line_items: Array<Record<string, unknown>> }>;
++      expect(groups).toHaveLength(1); // zelfde technieker (createdByEmployee) + week ⇒ samengevoegd onder één hoofding
++      const lineItems = groups[0]?.line_items ?? [];
+       expect(lineItems).toHaveLength(2); // 1 uren-regel + 1 km-regel
+ 
+       const kmLine = lineItems.find((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'));
+@@ -388,7 +404,7 @@ describe('TeamleaderInvoiceService', () => {
+       await service.createDraftInvoice('batch-1');
+ 
+       const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+-      const lineItems = (payload.grouped_lines as Array<{ line_items: Array<Record<string, unknown>> }>)[0]?.line_items ?? [];
++      const lineItems = allLineItems(payload);
+       expect(lineItems.some((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'))).toBe(false);
+     });
+   });
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 1b72335..61627f2 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -56,8 +56,10 @@ import type {
+   UpdateCompanySettingsBody,
+   UpdateCustomerHourlyRateBody,
+   UpdateCustomerHourlyRateResponseBody,
+-  UpdateInvoiceBatchEmployeeRateBody,
+-  UpdateInvoiceBatchEmployeeRateResponseBody,
++  UpdateInvoiceBatchProjectRateBody,
++  UpdateInvoiceBatchProjectRateResponseBody,
++  UpdateProjectHourlyRateBody,
++  UpdateProjectHourlyRateResponseBody,
+   UpdateTeamleaderSettingsBody,
+   UpdateUserBody,
+   UpdateUserResponseBody,
+@@ -427,9 +429,10 @@ export const invoiceBatchesApi = {
+   remove: (id: string) => request<void>(`/admin/invoice-batches/${id}/remove`, { method: 'POST' }),
+   /** Phase 10b — sectie 17: "Maak conceptfactuur in Teamleader". Geeft altijd de bijgewerkte batch terug, ook bij een mislukte Teamleader-aanroep (business rule 9). */
+   createTeamleaderDraft: (id: string) =>
+-    request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),  /** Facturatie: eenmalige tariefoverride voor één medewerker op deze batch (zie InvoiceBatchService.setEmployeeRate). */
+-  setEmployeeRate: (batchId: string, employeeId: string, body: UpdateInvoiceBatchEmployeeRateBody) =>
+-    request<UpdateInvoiceBatchEmployeeRateResponseBody>(`/admin/invoice-batches/${batchId}/employee-rates/${employeeId}`, {
++    request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),
++  /** Klantvraag 10/9/2026 — eenmalige tariefoverride voor één project op deze batch (zie InvoiceBatchService.setProjectRate). */
++  setProjectRate: (batchId: string, projectId: string, body: UpdateInvoiceBatchProjectRateBody) =>
++    request<UpdateInvoiceBatchProjectRateResponseBody>(`/admin/invoice-batches/${batchId}/project-rates/${projectId}`, {
+       method: 'POST',
+       body: JSON.stringify(body),
+     }),
+@@ -565,4 +568,12 @@ export const projectsApi = {
+         body: JSON.stringify(body),
+       }),
+   },
++  /** Klantvraag 10/9/2026 — verkoopprijs per uur, verhuisd van de medewerker naar het project. ADMIN-only. */
++  hourlyRate: {
++    update: (projectId: string, body: UpdateProjectHourlyRateBody) =>
++      request<UpdateProjectHourlyRateResponseBody>(`/admin/projects/${projectId}/hourly-rate`, {
++        method: 'POST',
++        body: JSON.stringify(body),
++      }),
++  },
+ };
+diff --git a/apps/web/src/pages/admin/InvoicingPage.tsx b/apps/web/src/pages/admin/InvoicingPage.tsx
+index 6a41cdd..243c049 100644
+--- a/apps/web/src/pages/admin/InvoicingPage.tsx
++++ b/apps/web/src/pages/admin/InvoicingPage.tsx
+@@ -1,4 +1,4 @@
+-import type { InvoiceBatchEmployeeRateSummary, InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
++import type { InvoiceBatchProjectRateSummary, InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
+ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+ import { Link } from 'react-router-dom';
+ import { invoiceBatchesApi } from '../../api/client';
+@@ -10,9 +10,9 @@ function formatEuroCents(cents: number | null): string {
+   return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+ }
+ 
+-/** "Maak conceptfactuur in Teamleader" mag pas als elke medewerker op deze batch een (standaard- of eenmalig) tarief heeft. */
+-function allEmployeeRatesSet(batch: InvoiceBatchSummary): boolean {
+-  return batch.employeeRates.every((rate) => rate.effectiveHourlyRateCents !== null);
++/** "Maak conceptfactuur in Teamleader" mag pas als elk project op deze batch een (standaard- of eenmalig) tarief heeft. */
++function allProjectRatesSet(batch: InvoiceBatchSummary): boolean {
++  return batch.projectRates.every((rate) => rate.effectiveHourlyRateCents !== null);
+ }
+ 
+ function currentPeriodLabel(): string {
+@@ -80,13 +80,12 @@ function groupByCustomerAndProject(workOrders: InvoiceableWorkOrderSummary[]): P
+  * latere actie op een reeds voorbereide batch — zie TeamleaderInvoiceService
+  * voor de volledige toelichting.
+  *
+- * Facturatie: tarief per medewerker i.p.v. per klant (uitbreiding na Phase
+- * 10b). Elke batch toont hier per betrokken medewerker het uurtarief waarmee
+- * de conceptfactuur geprijsd wordt (standaardtarief uit "Medewerkers", of —
+- * ontbreekt dat nog — een eenmalige override die hier, vlak vóór het
+- * aanmaken van de factuur, ingevuld kan worden). "Maak conceptfactuur in
+- * Teamleader" blijft uitgeschakeld zolang niet elke medewerker een tarief
+- * heeft.
++ * Klantvraag 10/9/2026: tarief per PROJECT i.p.v. per medewerker. Elke batch
++ * toont hier per betrokken project het uurtarief waarmee de conceptfactuur
++ * geprijsd wordt (standaardtarief uit "Projecten", of — ontbreekt dat nog —
++ * een eenmalige override die hier, vlak vóór het aanmaken van de factuur,
++ * ingevuld kan worden). "Maak conceptfactuur in Teamleader" blijft
++ * uitgeschakeld zolang niet elk project een tarief heeft.
+  */
+ export function InvoicingPage() {
+   const [periodLabel, setPeriodLabel] = useState(currentPeriodLabel());
+@@ -100,9 +99,9 @@ export function InvoicingPage() {
+   const [prepareError, setPrepareError] = useState<string | null>(null);
+   const [removingBatchId, setRemovingBatchId] = useState<string | null>(null);
+ 
+-  // Facturatie: tarief per medewerker bewerken (eenmalige override, zie
+-  // InvoiceBatchEmployeeRateSummary), en "Maak conceptfactuur in Teamleader".
+-  const [editingRate, setEditingRate] = useState<{ batchId: string; employeeId: string } | null>(null);
++  // Klantvraag 10/9/2026: tarief per project bewerken (eenmalige override, zie
++  // InvoiceBatchProjectRateSummary), en "Maak conceptfactuur in Teamleader".
++  const [editingRate, setEditingRate] = useState<{ batchId: string; projectId: string } | null>(null);
+   const [rateInputValue, setRateInputValue] = useState('');
+   const [isSavingRate, setIsSavingRate] = useState(false);
+   const [rateError, setRateError] = useState<string | null>(null);
+@@ -188,13 +187,13 @@ export function InvoicingPage() {
+     }
+   }
+ 
+-  function handleStartEditRate(batchId: string, rate: InvoiceBatchEmployeeRateSummary) {
+-    setEditingRate({ batchId, employeeId: rate.employeeId });
++  function handleStartEditRate(batchId: string, rate: InvoiceBatchProjectRateSummary) {
++    setEditingRate({ batchId, projectId: rate.projectId });
+     setRateInputValue(rate.overrideHourlyRateCents !== null ? (rate.overrideHourlyRateCents / 100).toFixed(2) : '');
+     setRateError(null);
+   }
+ 
+-  async function handleSaveRate(batchId: string, employeeId: string) {
++  async function handleSaveRate(batchId: string, projectId: string) {
+     const trimmed = rateInputValue.trim().replace(',', '.');
+     const euros = trimmed === '' ? null : Number(trimmed);
+     if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
+@@ -204,7 +203,7 @@ export function InvoicingPage() {
+     setIsSavingRate(true);
+     setRateError(null);
+     try {
+-      await invoiceBatchesApi.setEmployeeRate(batchId, employeeId, {
++      await invoiceBatchesApi.setProjectRate(batchId, projectId, {
+         hourlyRateCents: euros === null ? null : Math.round(euros * 100),
+       });
+       setEditingRate(null);
+@@ -385,7 +384,7 @@ export function InvoicingPage() {
+                   <th className="px-4 py-3">Klant</th>
+                   <th className="px-4 py-3">Werkbonnen</th>
+                   <th className="px-4 py-3">Uren</th>
+-                  <th className="px-4 py-3">Tarieven (per medewerker)</th>
++                  <th className="px-4 py-3">Tarieven (per project)</th>
+                   <th className="px-4 py-3">Voorbereid op</th>
+                   <th className="px-4 py-3">Teamleader</th>
+                   <th className="px-4 py-3" />
+@@ -400,12 +399,12 @@ export function InvoicingPage() {
+                       <td className="px-4 py-3 text-neutral-600">{formatHm(batch.totalInvoiceableSeconds)} u</td>
+                       <td className="px-4 py-3 text-neutral-600">
+                         <ul className="space-y-1">
+-                          {batch.employeeRates.map((rate) => {
+-                            const isEditing = editingRate?.batchId === batch.id && editingRate.employeeId === rate.employeeId;
++                          {batch.projectRates.map((rate) => {
++                            const isEditing = editingRate?.batchId === batch.id && editingRate.projectId === rate.projectId;
+                             return (
+-                              <li key={rate.employeeId}>
++                              <li key={rate.projectId}>
+                                 <div className="flex items-center gap-1">
+-                                  <span className="font-medium text-neutral-700">{rate.displayName}:</span>
++                                  <span className="font-medium text-neutral-700">{rate.projectName}:</span>
+                                   {isEditing ? (
+                                     <>
+                                       <input
+@@ -418,7 +417,7 @@ export function InvoicingPage() {
+                                       />
+                                       <button
+                                         type="button"
+-                                        onClick={() => void handleSaveRate(batch.id, rate.employeeId)}
++                                        onClick={() => void handleSaveRate(batch.id, rate.projectId)}
+                                         disabled={isSavingRate}
+                                         className="text-xs font-semibold text-swatt-gold-dark underline disabled:opacity-50"
+                                       >
+@@ -474,12 +473,12 @@ export function InvoicingPage() {
+                           <button
+                             type="button"
+                             onClick={() => void handleCreateTeamleaderDraft(batch.id)}
+-                            disabled={creatingDraftBatchId === batch.id || !allEmployeeRatesSet(batch)}
++                            disabled={creatingDraftBatchId === batch.id || !allProjectRatesSet(batch)}
+                             title={
+-                              !allEmployeeRatesSet(batch)
+-                                ? `Vul eerst een uurtarief in voor: ${batch.employeeRates
++                              !allProjectRatesSet(batch)
++                                ? `Vul eerst een uurtarief in voor: ${batch.projectRates
+                                     .filter((rate) => rate.effectiveHourlyRateCents === null)
+-                                    .map((rate) => rate.displayName)
++                                    .map((rate) => rate.projectName)
+                                     .join(', ')}.`
+                                 : undefined
+                             }
+diff --git a/apps/web/src/pages/admin/ProjectMilestonesPage.tsx b/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
+index d406463..de12e44 100644
+--- a/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
++++ b/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
+@@ -101,6 +101,7 @@ export function ProjectMilestonesPage() {
+           {selectedProject ? (
+             <>
+               <InvoicingPanel key={`invoicing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
++              <HourlyRatePanel key={`hourly-rate-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+               <OvertimeSettingsPanel key={`overtime-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+               <SigningModePanel key={`signing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+               <KmPricingPanel key={`km-pricing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+@@ -187,6 +188,91 @@ function InvoicingPanel({ project, onUpdated }: { project: ProjectSummary; onUpd
+  * hierboven: financiële impact op zowel klantfactuur als
+  * personeelsuitbetaling (Phase 12, deel E).
+  */
++/**
++ * Klantvraag 10/9/2026 — "de verkoopprijs per uur voor een technieker staat
++ * nu bij de technieker, maar moet verhuizen naar het project, omdat het
++ * afhankelijk is per project." Vervangt het vroegere uurtarief-veld bij
++ * "Medewerkers" (zie UserDetailPage.tsx) als bron voor de
++ * Teamleader-conceptfactuur (zie TeamleaderInvoiceService). Bewust
++ * ADMIN-only, zelfde reden als InvoicingPanel/OvertimeSettingsPanel
++ * hieronder: rechtstreekse financiële impact op de klantfactuur. Leeg =
++ * nog niet ingesteld — een admin kan het tarief dan nog eenmalig invullen
++ * bij het aanmaken van een factuur zelf (zie InvoicingPage.tsx).
++ */
++function HourlyRatePanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
++  const { user: currentUser } = useAuth();
++  const isAdmin = currentUser?.role === 'ADMIN';
++  const [rateInput, setRateInput] = useState(project.hourlyRateCents !== null ? (project.hourlyRateCents / 100).toFixed(2) : '');
++  const [isSaving, setIsSaving] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [saved, setSaved] = useState(false);
++
++  useEffect(() => {
++    setRateInput(project.hourlyRateCents !== null ? (project.hourlyRateCents / 100).toFixed(2) : '');
++  }, [project]);
++
++  async function save() {
++    const trimmed = rateInput.trim().replace(',', '.');
++    let hourlyRateCents: number | null = null;
++    if (trimmed !== '') {
++      const parsed = Number(trimmed);
++      if (Number.isNaN(parsed) || parsed <= 0) {
++        setError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om het tarief te wissen.');
++        return;
++      }
++      hourlyRateCents = Math.round(parsed * 100);
++    }
++
++    setIsSaving(true);
++    setError(null);
++    setSaved(false);
++    try {
++      await projectsApi.hourlyRate.update(project.id, { hourlyRateCents });
++      setSaved(true);
++      onUpdated();
++    } catch (err) {
++      setError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uurtarief is mislukt.');
++    } finally {
++      setIsSaving(false);
++    }
++  }
++
++  if (!isAdmin) return null;
++
++  return (
++    <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
++      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Verkoopprijs</h2>
++      <p className="mb-4 text-sm text-neutral-500">
++        {project.customerName} — {project.name}
++      </p>
++
++      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
++      {saved && <p className="mb-3 text-sm text-emerald-700">Uurtarief opgeslagen.</p>}
++
++      <div className="flex items-center gap-2">
++        <label className="flex items-center gap-2 text-sm text-neutral-600">
++          Uurtarief €
++          <input
++            type="text"
++            inputMode="decimal"
++            value={rateInput}
++            onChange={(e) => setRateInput(e.target.value)}
++            onBlur={() => void save()}
++            placeholder="Niet ingesteld"
++            disabled={isSaving}
++            className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++          />
++        </label>
++      </div>
++      <p className="mt-3 text-xs text-neutral-500">
++        Standaard uurtarief voor conceptfacturen in Teamleader — geldt voor alle technici die op dit project werken.
++        Toeslagen (overuren/ploegenwerk/nachtwerk) worden hieronder apart ingesteld en gelden met hetzelfde
++        percentage op dit tarief.
++      </p>
++    </section>
++  );
++}
++
+ /**
+  * Fase 12-herziening: volledige toeslagregeling per project — drempel
+  * ("Overuren boven 8u/dag" of "Overuren boven [x]u/week"), of
+diff --git a/apps/web/src/pages/admin/UserDetailPage.tsx b/apps/web/src/pages/admin/UserDetailPage.tsx
+index c6a5b22..2ba2b69 100644
+--- a/apps/web/src/pages/admin/UserDetailPage.tsx
++++ b/apps/web/src/pages/admin/UserDetailPage.tsx
+@@ -38,13 +38,10 @@ export function UserDetailPage() {
+   const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
+   const [isSavingTeamleaderLink, setIsSavingTeamleaderLink] = useState(false);
+ 
+-  // Facturatie: standaard uurtarief per medewerker (zie Employee.defaultHourlyRateCents) — VERKOOPPRIJS (klant).
+-  const [hourlyRateInputValue, setHourlyRateInputValue] = useState('');
+-  const [isSavingHourlyRate, setIsSavingHourlyRate] = useState(false);
+-  const [hourlyRateError, setHourlyRateError] = useState<string | null>(null);
+-
+-  // Fase 12-herziening: KOSTPRIJS (uitbetaling aan medewerker/onderaannemer),
+-  // los van de verkoopprijs hierboven — zie Employee.payrollRateCents.
++  // Fase 12-herziening / klantvraag 10/9/2026: KOSTPRIJS (uitbetaling aan
++  // medewerker/onderaannemer) — de VERKOOPPRIJS staat sinds klantvraag
++  // 10/9/2026 niet meer hier, maar op het project (zie ProjectMilestonesPage.tsx,
++  // HourlyRatePanel), zie Employee.payrollRateCents.
+   const [payrollRateInputValue, setPayrollRateInputValue] = useState('');
+   const [isSavingPayrollRate, setIsSavingPayrollRate] = useState(false);
+   const [payrollRateError, setPayrollRateError] = useState<string | null>(null);
+@@ -78,9 +75,6 @@ export function UserDetailPage() {
+ 
+   useEffect(() => {
+     if (user?.employee) {
+-      setHourlyRateInputValue(
+-        user.employee.defaultHourlyRateCents !== null ? (user.employee.defaultHourlyRateCents / 100).toFixed(2) : '',
+-      );
+       setPayrollRateInputValue(
+         user.employee.payrollRateCents !== null ? (user.employee.payrollRateCents / 100).toFixed(2) : '',
+       );
+@@ -118,30 +112,7 @@ export function UserDetailPage() {
+     }
+   }
+ 
+-  /** Facturatie: standaard uurtarief van deze medewerker. Leeg opslaan wist het weer (dan kan het nog steeds eenmalig ingevuld worden bij het aanmaken van een factuur, zie InvoicingPage). */
+-  async function saveHourlyRate() {
+-    if (!userId) return;
+-    const trimmed = hourlyRateInputValue.trim().replace(',', '.');
+-    const euros = trimmed === '' ? null : Number(trimmed);
+-    if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
+-      setHourlyRateError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om het tarief te wissen.');
+-      return;
+-    }
+-    setIsSavingHourlyRate(true);
+-    setHourlyRateError(null);
+-    try {
+-      const response = await usersApi.update(userId, {
+-        defaultHourlyRateCents: euros === null ? null : Math.round(euros * 100),
+-      });
+-      setUser(response.user);
+-    } catch (err) {
+-      setHourlyRateError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uurtarief is mislukt.');
+-    } finally {
+-      setIsSavingHourlyRate(false);
+-    }
+-  }
+-
+-  /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (los van het facturatietarief hierboven). */
++  /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (los van het facturatietarief, dat sinds klantvraag 10/9/2026 op het project staat). */
+   async function savePayrollRate() {
+     if (!userId) return;
+     const trimmed = payrollRateInputValue.trim().replace(',', '.');
+@@ -375,39 +346,12 @@ export function UserDetailPage() {
+ 
+           {user.employee && (
+             <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+-              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Uurtarieven</h2>
++              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Kostprijs</h2>
+               <p className="mb-4 text-sm text-neutral-500">
+-                Twee aparte bedragen — Swatts marge zit in het verschil. Toeslagen (overuren/ploegenwerk/nachtwerk)
+-                worden sinds de herziening per project ingesteld (zie de projectpagina) en gelden met hetzelfde
+-                percentage op beide tarieven hieronder.
+-              </p>
+-
+-              <div className="mb-4 flex items-center gap-2">
+-                <label className="flex items-center gap-2 text-sm text-neutral-600">
+-                  Verkoopprijs (klant) €
+-                  <input
+-                    type="text"
+-                    inputMode="decimal"
+-                    value={hourlyRateInputValue}
+-                    onChange={(e) => setHourlyRateInputValue(e.target.value)}
+-                    placeholder="65,00"
+-                    disabled={isSavingHourlyRate}
+-                    className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+-                  />
+-                </label>
+-                <button
+-                  type="button"
+-                  onClick={() => void saveHourlyRate()}
+-                  disabled={isSavingHourlyRate}
+-                  className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+-                >
+-                  {isSavingHourlyRate ? 'Bezig...' : 'Opslaan'}
+-                </button>
+-              </div>
+-              {hourlyRateError && <p className="mb-4 text-xs text-red-700">{hourlyRateError}</p>}
+-              <p className="mb-4 text-xs text-neutral-400">
+-                Standaard uurtarief voor conceptfacturen in Teamleader (sectie 17). Nog niet ingevuld? Dan kan een
+-                admin het tarief eenmalig invullen bij het aanmaken van de factuur zelf.
++                Wat effectief uitbetaald wordt aan deze medewerker/onderaannemer. De verkoopprijs (facturatie aan de
++                klant) staat sinds klantvraag 10/9/2026 niet meer per medewerker, maar per project (Backoffice →
++                Projecten) — Swatts marge zit in het verschil tussen beide. Toeslagen (overuren/ploegenwerk/nachtwerk)
++                worden per project ingesteld en gelden met hetzelfde percentage op beide tarieven.
+               </p>
+ 
+               <div className="flex items-center gap-2">
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 07166f9..310e9c4 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -122,7 +122,7 @@ export interface AdminUserSummary {
+     id: string;
+     displayName: string;
+     phone: string | null;
+-    /** Facturatie: standaard uurtarief van deze medewerker (in eurocent) — de VERKOOPPRIJS, gebruikt om de klant te factureren, zie Employee.defaultHourlyRateCents. */
++    /** @deprecated Klantvraag 10/9/2026 — de VERKOOPPRIJS staat sinds deze wijziging op het project (ProjectSummary.hourlyRateCents), niet meer bij de medewerker. Zie Employee.defaultHourlyRateCents in schema.prisma. */
+     defaultHourlyRateCents: number | null;
+     /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (Phase 12, deel E), zie Employee.payrollRateCents. Los van defaultHourlyRateCents hierboven. */
+     payrollRateCents: number | null;
+@@ -216,6 +216,16 @@ export interface ProjectSummary {
+   kmFlatFeeThresholdKm: number;
+   kmFlatFeeCents: number | null;
+   kmRateAboveCentsPerKm: number;
++  /**
++   * Klantvraag 10/9/2026 — verkoopprijs per uur, verhuisd van de medewerker
++   * naar het project (zie Project.hourlyRateCents; vervangt het
++   * @deprecated Employee.defaultHourlyRateCents als bron voor de
++   * Teamleader-conceptfactuur). `null` zolang nog niet ingesteld — ontbreekt
++   * dit nog voor een project op een factuurbatch, dan kan een admin het
++   * eenmalig invullen bij het aanmaken van de factuur (zie
++   * InvoiceBatchProjectRateSummary).
++   */
++  hourlyRateCents: number | null;
+ }
+ 
+ export interface ListProjectsResponseBody {
+@@ -284,6 +294,15 @@ export interface UpdateProjectKmSettingsResponseBody {
+   kmRateAboveCentsPerKm: number;
+ }
+ 
++/** Body/response van POST /admin/projects/:id/hourly-rate (klantvraag 10/9/2026 — ADMIN-only). `hourlyRateCents: null` wist het tarief weer. */
++export interface UpdateProjectHourlyRateBody {
++  hourlyRateCents: number | null;
++}
++
++export interface UpdateProjectHourlyRateResponseBody {
++  hourlyRateCents: number | null;
++}
++
+ /** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */
+ /** Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt" — één rij per tijdregistratie, over ALLE openstaande werkbonnen van de week heen (niet enkel die van de medewerker die de onderteken-actie start, zie WeeklyApprovalService.listPendingForEmployee()). */
+ export interface PendingWeekEntrySummary {
+@@ -988,16 +1007,17 @@ export interface InvoiceBatchLineSummary {
+ }
+ 
+ /**
+- * Eén medewerker die op minstens één werkbon van deze InvoiceBatch voorkomt,
+- * met het tarief waarmee zijn/haar uren geprijsd worden op de conceptfactuur.
+- * `effectiveHourlyRateCents` is `overrideHourlyRateCents ?? defaultHourlyRateCents`
+- * — `null` betekent dat er voor deze medewerker nog geen tarief is (noch een
+- * standaardtarief in de instellingen, noch een eenmalige override op deze
+- * batch) en "Maak conceptfactuur in Teamleader" dus nog niet mogelijk is.
++ * Klantvraag 10/9/2026 — één project dat op minstens één werkbon van deze
++ * InvoiceBatch voorkomt, met het tarief waarmee de uren erop geprijsd worden
++ * op de conceptfactuur. `effectiveHourlyRateCents` is
++ * `overrideHourlyRateCents ?? defaultHourlyRateCents` — `null` betekent dat
++ * er voor dit project nog geen tarief is (noch een standaardtarief bij
++ * "Projecten", noch een eenmalige override op deze batch) en "Maak
++ * conceptfactuur in Teamleader" dus nog niet mogelijk is.
+  */
+-export interface InvoiceBatchEmployeeRateSummary {
+-  employeeId: string;
+-  displayName: string;
++export interface InvoiceBatchProjectRateSummary {
++  projectId: string;
++  projectName: string;
+   defaultHourlyRateCents: number | null;
+   overrideHourlyRateCents: number | null;
+   effectiveHourlyRateCents: number | null;
+@@ -1008,10 +1028,10 @@ export interface InvoiceBatchSummary {
+   id: string;
+   customerId: string;
+   customerName: string;
+-  /** @deprecated Sinds de overstap naar tarief-per-medewerker niet meer gebruikt om de conceptfactuur te prijzen — zie `employeeRates`. Blijft bestaan als Customer-veld, puur informatief. */
++  /** @deprecated Sinds de overstap naar tarief-per-project niet meer gebruikt om de conceptfactuur te prijzen — zie `projectRates`. Blijft bestaan als Customer-veld, puur informatief. */
+   customerHourlyRateCents: number | null;
+-  /** Medewerker(s) op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie InvoiceBatchEmployeeRateSummary. */
+-  employeeRates: InvoiceBatchEmployeeRateSummary[];
++  /** Project(en) op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie InvoiceBatchProjectRateSummary. */
++  projectRates: InvoiceBatchProjectRateSummary[];
+   periodLabel: string;
+   status: InvoiceBatchStatus;
+   totalInvoiceableSeconds: number;
+@@ -1051,12 +1071,12 @@ export interface CreateTeamleaderDraftInvoiceResponseBody {
+   syncResult: { success: boolean; message: string | null };
+ }
+ 
+-/** Body van POST /admin/invoice-batches/:id/employee-rates/:employeeId — `null` wist de override weer (valt dan terug op `Employee.defaultHourlyRateCents`, indien ingevuld). */
+-export interface UpdateInvoiceBatchEmployeeRateBody {
++/** Body van POST /admin/invoice-batches/:id/project-rates/:projectId — `null` wist de override weer (valt dan terug op `Project.hourlyRateCents`, indien ingevuld). */
++export interface UpdateInvoiceBatchProjectRateBody {
+   hourlyRateCents: number | null;
+ }
+ 
+-export interface UpdateInvoiceBatchEmployeeRateResponseBody {
++export interface UpdateInvoiceBatchProjectRateResponseBody {
+   batch: InvoiceBatchSummary;
+ }
+ 

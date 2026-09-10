@@ -6,6 +6,7 @@ import type {
   ProjectSummary,
   SelectProjectMilestoneBody,
   SelectProjectMilestoneResponseBody,
+  UpdateProjectHourlyRateResponseBody,
   UpdateProjectInvoicingEnabledBody,
   UpdateProjectInvoicingEnabledResponseBody,
   UpdateProjectKmSettingsResponseBody,
@@ -22,6 +23,7 @@ import {
   projectAssignmentBodySchema,
   projectIdParamsSchema,
   selectProjectMilestoneBodySchema,
+  updateProjectHourlyRateBodySchema,
   updateProjectInvoicingEnabledBodySchema,
   updateProjectKmSettingsBodySchema,
   updateProjectOvertimeSettingsBodySchema,
@@ -330,6 +332,30 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
       };
     },
   );
+
+  /**
+   * Klantvraag 10/9/2026: "de verkoopprijs per uur voor een technieker staat
+   * nu bij de technieker, maar moet verhuizen naar het project, omdat het
+   * afhankelijk is per project." Vervangt `Employee.defaultHourlyRateCents`
+   * (nu @deprecated) als bron voor de Teamleader-conceptfactuur. Bewust
+   * ADMIN-only, zelfde reden als km-settings/overtime-settings hierboven:
+   * rechtstreekse financiële impact op de klantfactuur.
+   */
+  app.post(
+    '/admin/projects/:id/hourly-rate',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<UpdateProjectHourlyRateResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const body = updateProjectHourlyRateBodySchema.parse(request.body);
+      await assertProjectExists(app, params.id);
+
+      const project = await app.prisma.project.update({
+        where: { id: params.id },
+        data: { hourlyRateCents: body.hourlyRateCents },
+      });
+      return { hourlyRateCents: project.hourlyRateCents };
+    },
+  );
 }
 
 function toMilestoneSummary(milestone: {
@@ -392,6 +418,8 @@ function toProjectSummary(project: {
   kmFlatFeeThresholdKm: number;
   kmFlatFeeCents: number | null;
   kmRateAboveCentsPerKm: number;
+  /** Klantvraag 10/9/2026 — verkoopprijs per uur, `null` zolang nog niet ingesteld. */
+  hourlyRateCents: number | null;
   customer: { name: string };
 }): ProjectSummary {
   return {
@@ -420,5 +448,6 @@ function toProjectSummary(project: {
     kmFlatFeeThresholdKm: project.kmFlatFeeThresholdKm,
     kmFlatFeeCents: project.kmFlatFeeCents,
     kmRateAboveCentsPerKm: project.kmRateAboveCentsPerKm,
+    hourlyRateCents: project.hourlyRateCents,
   };
 }

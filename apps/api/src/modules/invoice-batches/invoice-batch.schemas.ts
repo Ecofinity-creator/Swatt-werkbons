@@ -23,12 +23,12 @@ export const invoiceBatchIdParamsSchema = z.object({
   id: z.string().uuid(),
 });
 
-export const invoiceBatchEmployeeRateParamsSchema = z.object({
+export const invoiceBatchProjectRateParamsSchema = z.object({
   id: z.string().uuid(),
-  employeeId: z.string().uuid(),
+  projectId: z.string().uuid(),
 });
 
-/** `null` wist de eenmalige override weer; anders een positief bedrag in eurocent (zie UpdateInvoiceBatchEmployeeRateBody). */
-export const updateInvoiceBatchEmployeeRateBodySchema = z.object({
+/** `null` wist de eenmalige override weer; anders een positief bedrag in eurocent (zie UpdateInvoiceBatchProjectRateBody). */
+export const updateInvoiceBatchProjectRateBodySchema = z.object({
   hourlyRateCents: z.number().int().positive().nullable(),
 });

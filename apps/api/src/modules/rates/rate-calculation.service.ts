@@ -20,9 +20,10 @@
  *    toepassing is op resp. de normale uren en de overuren van een project
  *    (toeslagen tellen op boven 100%, ze worden nooit vermenigvuldigd — zie
  *    de toelichting in het ontwerpdocument). Dit percentage wordt door de
- *    aanroeper toegepast op zowel `Employee.defaultHourlyRateCents`
- *    (facturatie aan de klant) als `Employee.payrollRateCents` (uitbetaling)
- *    — zelfde percentage, andere basis.
+ *    aanroeper toegepast op zowel `Project.hourlyRateCents` (facturatie aan
+ *    de klant, klantvraag 10/9/2026 — voorheen `Employee.defaultHourlyRateCents`)
+ *    als `Employee.payrollRateCents` (uitbetaling) — zelfde percentage,
+ *    andere basis.
  *
  * Belangrijk: ploegenwerk/nachtwerk geldt op ALLE uren van een project (het
  * is geen overurendrempel-gebonden toeslag), overuren enkel op het deel

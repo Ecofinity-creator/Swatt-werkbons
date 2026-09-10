@@ -122,7 +122,7 @@ export interface AdminUserSummary {
     id: string;
     displayName: string;
     phone: string | null;
-    /** Facturatie: standaard uurtarief van deze medewerker (in eurocent) — de VERKOOPPRIJS, gebruikt om de klant te factureren, zie Employee.defaultHourlyRateCents. */
+    /** @deprecated Klantvraag 10/9/2026 — de VERKOOPPRIJS staat sinds deze wijziging op het project (ProjectSummary.hourlyRateCents), niet meer bij de medewerker. Zie Employee.defaultHourlyRateCents in schema.prisma. */
     defaultHourlyRateCents: number | null;
     /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (Phase 12, deel E), zie Employee.payrollRateCents. Los van defaultHourlyRateCents hierboven. */
     payrollRateCents: number | null;
@@ -216,6 +216,16 @@ export interface ProjectSummary {
   kmFlatFeeThresholdKm: number;
   kmFlatFeeCents: number | null;
   kmRateAboveCentsPerKm: number;
+  /**
+   * Klantvraag 10/9/2026 — verkoopprijs per uur, verhuisd van de medewerker
+   * naar het project (zie Project.hourlyRateCents; vervangt het
+   * @deprecated Employee.defaultHourlyRateCents als bron voor de
+   * Teamleader-conceptfactuur). `null` zolang nog niet ingesteld — ontbreekt
+   * dit nog voor een project op een factuurbatch, dan kan een admin het
+   * eenmalig invullen bij het aanmaken van de factuur (zie
+   * InvoiceBatchProjectRateSummary).
+   */
+  hourlyRateCents: number | null;
 }
 
 export interface ListProjectsResponseBody {
@@ -282,6 +292,15 @@ export interface UpdateProjectKmSettingsResponseBody {
   kmFlatFeeThresholdKm: number;
   kmFlatFeeCents: number | null;
   kmRateAboveCentsPerKm: number;
+}
+
+/** Body/response van POST /admin/projects/:id/hourly-rate (klantvraag 10/9/2026 — ADMIN-only). `hourlyRateCents: null` wist het tarief weer. */
+export interface UpdateProjectHourlyRateBody {
+  hourlyRateCents: number | null;
+}
+
+export interface UpdateProjectHourlyRateResponseBody {
+  hourlyRateCents: number | null;
 }
 
 /** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */
@@ -988,16 +1007,17 @@ export interface InvoiceBatchLineSummary {
 }
 
 /**
- * Eén medewerker die op minstens één werkbon van deze InvoiceBatch voorkomt,
- * met het tarief waarmee zijn/haar uren geprijsd worden op de conceptfactuur.
- * `effectiveHourlyRateCents` is `overrideHourlyRateCents ?? defaultHourlyRateCents`
- * — `null` betekent dat er voor deze medewerker nog geen tarief is (noch een
- * standaardtarief in de instellingen, noch een eenmalige override op deze
- * batch) en "Maak conceptfactuur in Teamleader" dus nog niet mogelijk is.
+ * Klantvraag 10/9/2026 — één project dat op minstens één werkbon van deze
+ * InvoiceBatch voorkomt, met het tarief waarmee de uren erop geprijsd worden
+ * op de conceptfactuur. `effectiveHourlyRateCents` is
+ * `overrideHourlyRateCents ?? defaultHourlyRateCents` — `null` betekent dat
+ * er voor dit project nog geen tarief is (noch een standaardtarief bij
+ * "Projecten", noch een eenmalige override op deze batch) en "Maak
+ * conceptfactuur in Teamleader" dus nog niet mogelijk is.
  */
-export interface InvoiceBatchEmployeeRateSummary {
-  employeeId: string;
-  displayName: string;
+export interface InvoiceBatchProjectRateSummary {
+  projectId: string;
+  projectName: string;
   defaultHourlyRateCents: number | null;
   overrideHourlyRateCents: number | null;
   effectiveHourlyRateCents: number | null;
@@ -1008,10 +1028,10 @@ export interface InvoiceBatchSummary {
   id: string;
   customerId: string;
   customerName: string;
-  /** @deprecated Sinds de overstap naar tarief-per-medewerker niet meer gebruikt om de conceptfactuur te prijzen — zie `employeeRates`. Blijft bestaan als Customer-veld, puur informatief. */
+  /** @deprecated Sinds de overstap naar tarief-per-project niet meer gebruikt om de conceptfactuur te prijzen — zie `projectRates`. Blijft bestaan als Customer-veld, puur informatief. */
   customerHourlyRateCents: number | null;
-  /** Medewerker(s) op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie InvoiceBatchEmployeeRateSummary. */
-  employeeRates: InvoiceBatchEmployeeRateSummary[];
+  /** Project(en) op deze batch en hun (standaard- of eenmalig ingevuld) uurtarief — zie InvoiceBatchProjectRateSummary. */
+  projectRates: InvoiceBatchProjectRateSummary[];
   periodLabel: string;
   status: InvoiceBatchStatus;
   totalInvoiceableSeconds: number;
@@ -1051,12 +1071,12 @@ export interface CreateTeamleaderDraftInvoiceResponseBody {
   syncResult: { success: boolean; message: string | null };
 }
 
-/** Body van POST /admin/invoice-batches/:id/employee-rates/:employeeId — `null` wist de override weer (valt dan terug op `Employee.defaultHourlyRateCents`, indien ingevuld). */
-export interface UpdateInvoiceBatchEmployeeRateBody {
+/** Body van POST /admin/invoice-batches/:id/project-rates/:projectId — `null` wist de override weer (valt dan terug op `Project.hourlyRateCents`, indien ingevuld). */
+export interface UpdateInvoiceBatchProjectRateBody {
   hourlyRateCents: number | null;
 }
 
-export interface UpdateInvoiceBatchEmployeeRateResponseBody {
+export interface UpdateInvoiceBatchProjectRateResponseBody {
   batch: InvoiceBatchSummary;
 }
 

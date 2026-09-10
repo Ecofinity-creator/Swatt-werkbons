@@ -74,3 +74,13 @@ export const updateProjectKmSettingsBodySchema = z.object({
   kmFlatFeeCents: z.number().int().min(0).max(1_000_000).nullable(),
   kmRateAboveCentsPerKm: z.number().int().min(0).max(100_000),
 });
+
+/**
+ * Klantvraag 10/9/2026 — de verkoopprijs per uur verhuist van de medewerker
+ * naar het project. `hourlyRateCents: null` wist het tarief weer (dan kan
+ * een admin het nog steeds eenmalig invullen bij het aanmaken van een
+ * factuur, zie InvoiceBatchService.setProjectRate).
+ */
+export const updateProjectHourlyRateBodySchema = z.object({
+  hourlyRateCents: z.number().int().positive().nullable(),
+});

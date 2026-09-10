@@ -11,6 +11,10 @@ import { InvoiceBatchService } from '../src/modules/invoice-batches/invoice-batc
  * business rule 7 ("een werkbon mag maar één keer gefactureerd worden")
  * realistisch getest wordt: aanmaken van een batch maakt de werkbon meteen
  * onbeschikbaar voor listInvoiceable()/een volgende create().
+ *
+ * Klantvraag 10/9/2026: het uurtarief zit nu op `project.hourlyRateCents`
+ * i.p.v. `employee.defaultHourlyRateCents`, en de eenmalige batch-override is
+ * projectgescopeerd (`invoiceBatchProjectRate` i.p.v. `invoiceBatchEmployeeRate`).
  */
 
 interface FakeWorkOrder {
@@ -24,6 +28,7 @@ interface FakeWorkOrder {
     name: string;
     projectNumber: string | null;
     invoicingEnabled: boolean;
+    hourlyRateCents: number | null;
     customer: { id: string; name: string; hourlyRateCents: number | null };
   };
   signature: { signedAt: Date } | null;
@@ -33,7 +38,7 @@ interface FakeWorkOrder {
       endedAt: Date | null;
       pausedSeconds: number;
       employeeId: string;
-      employee: { id: string; displayName: string; defaultHourlyRateCents: number | null };
+      employee: { id: string; displayName: string };
     };
   }>;
 }
@@ -41,8 +46,8 @@ interface FakeWorkOrder {
 function createFakePrisma(workOrders: FakeWorkOrder[]) {
   const batches = new Map<string, { id: string; customerId: string; periodLabel: string; status: string; totalInvoiceableSeconds: number; createdByUserId: string; createdAt: Date }>();
   const lines = new Map<string, { id: string; invoiceBatchId: string; workOrderId: string; invoiceableSeconds: number }>();
-  /** invoiceBatchId → employeeId → hourlyRateCents — zie InvoiceBatchEmployeeRate. */
-  const employeeRateOverrides = new Map<string, Map<string, number>>();
+  /** invoiceBatchId → projectId → hourlyRateCents — zie InvoiceBatchProjectRate. */
+  const projectRateOverrides = new Map<string, Map<string, number>>();
   let nextId = 1;
   const genId = (prefix: string) => `${prefix}-${nextId++}`;
 
@@ -118,13 +123,13 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
         }
       },
     },
-    invoiceBatchEmployeeRate: {
-      upsert: async ({ create }: { create: { invoiceBatchId: string; employeeId: string; hourlyRateCents: number } }) => {
-        if (!employeeRateOverrides.has(create.invoiceBatchId)) employeeRateOverrides.set(create.invoiceBatchId, new Map());
-        employeeRateOverrides.get(create.invoiceBatchId)!.set(create.employeeId, create.hourlyRateCents);
+    invoiceBatchProjectRate: {
+      upsert: async ({ create }: { create: { invoiceBatchId: string; projectId: string; hourlyRateCents: number } }) => {
+        if (!projectRateOverrides.has(create.invoiceBatchId)) projectRateOverrides.set(create.invoiceBatchId, new Map());
+        projectRateOverrides.get(create.invoiceBatchId)!.set(create.projectId, create.hourlyRateCents);
       },
-      deleteMany: async ({ where }: { where: { invoiceBatchId: string; employeeId: string } }) => {
-        employeeRateOverrides.get(where.invoiceBatchId)?.delete(where.employeeId);
+      deleteMany: async ({ where }: { where: { invoiceBatchId: string; projectId: string } }) => {
+        projectRateOverrides.get(where.invoiceBatchId)?.delete(where.projectId);
       },
     },
   };
@@ -134,7 +139,7 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
     if (!batch) throw new Error('batch niet gevonden');
     const batchLines = Array.from(lines.values()).filter((line) => line.invoiceBatchId === id);
     const customer = workOrders.find((wo) => wo.project.customerId === batch.customerId)?.project.customer ?? { id: batch.customerId, name: '?', hourlyRateCents: null };
-    const overrides = employeeRateOverrides.get(id) ?? new Map<string, number>();
+    const overrides = projectRateOverrides.get(id) ?? new Map<string, number>();
     return {
       ...batch,
       customer,
@@ -146,12 +151,12 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
           invoiceableSeconds: line.invoiceableSeconds,
           workOrder: {
             workOrderNumber: wo?.workOrderNumber ?? '?',
-            project: { name: wo?.project.name ?? '?' },
+            project: { id: wo?.project.id ?? '?', name: wo?.project.name ?? '?', hourlyRateCents: wo?.project.hourlyRateCents ?? null },
             timeEntries: wo?.timeEntries ?? [],
           },
         };
       }),
-      employeeRates: Array.from(overrides.entries()).map(([employeeId, hourlyRateCents]) => ({ employeeId, hourlyRateCents })),
+      projectRates: Array.from(overrides.entries()).map(([projectId, hourlyRateCents]) => ({ projectId, hourlyRateCents })),
     };
   }
 
@@ -162,13 +167,15 @@ const janssens = { id: 'cust-janssens', name: 'Janssens BV', hourlyRateCents: 65
 const deSmet = { id: 'cust-desmet', name: 'De Smet NV', hourlyRateCents: null };
 const peter = 'emp-peter';
 const wannes = 'emp-wannes';
+const proj1 = { id: 'proj-1', name: 'Onderhoud HVAC', hourlyRateCents: 6500 as number | null };
+const projZonderTarief = { id: 'proj-2', name: 'Interventie', hourlyRateCents: null as number | null };
 
 function workOrder(overrides: Partial<FakeWorkOrder> & { id: string }): FakeWorkOrder {
   return {
     workOrderNumber: `WB-${overrides.id}`,
     status: 'READY_FOR_INVOICING',
-    projectId: 'proj-1',
-    project: { id: 'proj-1', customerId: janssens.id, name: 'Onderhoud HVAC', projectNumber: 'PRO-1', invoicingEnabled: true, customer: janssens },
+    projectId: proj1.id,
+    project: { id: proj1.id, customerId: janssens.id, name: proj1.name, projectNumber: 'PRO-1', invoicingEnabled: true, hourlyRateCents: proj1.hourlyRateCents, customer: janssens },
     signature: { signedAt: new Date('2026-08-10T10:00:00Z') },
     timeEntries: [],
     ...overrides,
@@ -179,7 +186,7 @@ describe('InvoiceBatchService', () => {
   it('listInvoiceable() toont enkel READY_FOR_INVOICING werkbonnen die nog niet gebatcht zijn, met correct berekende uren', async () => {
     const wo1 = workOrder({
       id: 'wo1',
-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
+      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
     });
     const wo2Draft = workOrder({ id: 'wo2', status: 'DRAFT' });
     const { prisma } = createFakePrisma([wo1, wo2Draft]);
@@ -197,12 +204,12 @@ describe('InvoiceBatchService', () => {
     const wo1 = workOrder({
       id: 'wo1',
       signature: { signedAt: new Date('2026-08-10T10:00:00Z') },
-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
+      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
     });
     const wo2 = workOrder({
       id: 'wo2',
       signature: { signedAt: new Date('2026-07-15T10:00:00Z') },
-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-07-15T08:00:00Z'), endedAt: new Date('2026-07-15T09:30:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes', defaultHourlyRateCents: 5500 } } }],
+      timeEntries: [{ timeEntry: { startedAt: new Date('2026-07-15T08:00:00Z'), endedAt: new Date('2026-07-15T09:30:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes' } } }],
     });
     const { prisma } = createFakePrisma([wo1, wo2]);
     const service = new InvoiceBatchService(prisma);
@@ -214,7 +221,7 @@ describe('InvoiceBatchService', () => {
   it('create() maakt een batch aan, telt de uren correct op en maakt de werkbon meteen onbeschikbaar voor een volgende batch', async () => {
     const wo1 = workOrder({
       id: 'wo1',
-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:17:00Z'), pausedSeconds: 17 * 60, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
+      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:17:00Z'), pausedSeconds: 17 * 60, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
     });
     const { prisma } = createFakePrisma([wo1]);
     const service = new InvoiceBatchService(prisma);
@@ -224,9 +231,9 @@ describe('InvoiceBatchService', () => {
     expect(batch.totalInvoiceableSeconds).toBe(2 * 60 * 60);
     expect(batch.lines).toHaveLength(1);
     expect(batch.lines[0]?.workOrder.workOrderNumber).toBe('WB-wo1');
-    // Facturatie: tarief per medewerker — Peter heeft al een standaardtarief, dus meteen "effectief".
-    expect(batch.employeeRates).toEqual([
-      { employeeId: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500, overrideHourlyRateCents: null, effectiveHourlyRateCents: 6500 },
+    // Klantvraag 10/9/2026: tarief per project — het project heeft al een standaardtarief, dus meteen "effectief".
+    expect(batch.projectRates).toEqual([
+      { projectId: proj1.id, projectName: proj1.name, defaultHourlyRateCents: 6500, overrideHourlyRateCents: null, effectiveHourlyRateCents: 6500 },
     ]);
 
     // Business rule 7: dezelfde werkbon nu niet meer beschikbaar.
@@ -249,8 +256,8 @@ describe('InvoiceBatchService', () => {
   it('Phase 12, deel C: een werkbon van een nacalculatie-project (invoicingEnabled=false) verschijnt nooit bij listInvoiceable() en kan niet gebatcht worden', async () => {
     const wo1 = workOrder({
       id: 'wo1',
-      project: { id: 'proj-nacalc', customerId: janssens.id, name: 'Nacalculatie-project', projectNumber: 'PRO-9', invoicingEnabled: false, customer: janssens },
-      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
+      project: { id: 'proj-nacalc', customerId: janssens.id, name: 'Nacalculatie-project', projectNumber: 'PRO-9', invoicingEnabled: false, hourlyRateCents: 6500, customer: janssens },
+      timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
     });
     const { prisma } = createFakePrisma([wo1]);
     const service = new InvoiceBatchService(prisma);
@@ -265,7 +272,7 @@ describe('InvoiceBatchService', () => {
   });
 
   it('create() weigert wanneer een werkbon niet bij de opgegeven klant hoort', async () => {
-    const woOther = workOrder({ id: 'wo1', project: { id: 'proj-2', customerId: deSmet.id, name: 'Service', projectNumber: null, invoicingEnabled: true, customer: deSmet } });
+    const woOther = workOrder({ id: 'wo1', project: { id: 'proj-2', customerId: deSmet.id, name: 'Service', projectNumber: null, invoicingEnabled: true, hourlyRateCents: null, customer: deSmet } });
     const { prisma } = createFakePrisma([woOther]);
     const service = new InvoiceBatchService(prisma);
 
@@ -284,7 +291,7 @@ describe('InvoiceBatchService', () => {
   });
 
   it('remove() verwijdert een DRAFT-batch volledig, en geeft de werkbon weer vrij', async () => {
-    const wo1 = workOrder({ id: 'wo1', timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T09:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }] });
+    const wo1 = workOrder({ id: 'wo1', timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T09:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }] });
     const { prisma } = createFakePrisma([wo1]);
     const service = new InvoiceBatchService(prisma);
     const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
@@ -301,64 +308,66 @@ describe('InvoiceBatchService', () => {
     await expect(service.remove('does-not-exist')).rejects.toMatchObject({ code: 'INVOICE_BATCH_NOT_FOUND' });
   });
 
-  describe('setEmployeeRate() — tarief per medewerker i.p.v. per klant', () => {
-    it('vult een eenmalige override voor een medewerker zonder standaardtarief', async () => {
-      const woWannes = workOrder({
+  describe('setProjectRate() — klantvraag 10/9/2026: tarief per project i.p.v. per medewerker', () => {
+    it('vult een eenmalige override voor een project zonder standaardtarief', async () => {
+      const woZonderTarief = workOrder({
         id: 'wo1',
-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes', defaultHourlyRateCents: null } } }],
+        project: { id: projZonderTarief.id, customerId: janssens.id, name: projZonderTarief.name, projectNumber: 'PRO-2', invoicingEnabled: true, hourlyRateCents: null, customer: janssens },
+        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes' } } }],
       });
-      const { prisma } = createFakePrisma([woWannes]);
+      const { prisma } = createFakePrisma([woZonderTarief]);
       const service = new InvoiceBatchService(prisma);
       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
-      expect(batch.employeeRates).toEqual([
-        { employeeId: wannes, displayName: 'Wannes', defaultHourlyRateCents: null, overrideHourlyRateCents: null, effectiveHourlyRateCents: null },
+      expect(batch.projectRates).toEqual([
+        { projectId: projZonderTarief.id, projectName: projZonderTarief.name, defaultHourlyRateCents: null, overrideHourlyRateCents: null, effectiveHourlyRateCents: null },
       ]);
 
-      const updated = await service.setEmployeeRate(batch.id, wannes, 4800);
+      const updated = await service.setProjectRate(batch.id, projZonderTarief.id, 4800);
 
-      expect(updated.employeeRates).toEqual([
-        { employeeId: wannes, displayName: 'Wannes', defaultHourlyRateCents: null, overrideHourlyRateCents: 4800, effectiveHourlyRateCents: 4800 },
+      expect(updated.projectRates).toEqual([
+        { projectId: projZonderTarief.id, projectName: projZonderTarief.name, defaultHourlyRateCents: null, overrideHourlyRateCents: 4800, effectiveHourlyRateCents: 4800 },
       ]);
     });
 
     it('wist de override weer bij hourlyRateCents: null', async () => {
-      const woWannes = workOrder({
+      const woZonderTarief = workOrder({
         id: 'wo1',
-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes', defaultHourlyRateCents: null } } }],
+        project: { id: projZonderTarief.id, customerId: janssens.id, name: projZonderTarief.name, projectNumber: 'PRO-2', invoicingEnabled: true, hourlyRateCents: null, customer: janssens },
+        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: wannes, employee: { id: wannes, displayName: 'Wannes' } } }],
       });
-      const { prisma } = createFakePrisma([woWannes]);
+      const { prisma } = createFakePrisma([woZonderTarief]);
       const service = new InvoiceBatchService(prisma);
       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
-      await service.setEmployeeRate(batch.id, wannes, 4800);
+      await service.setProjectRate(batch.id, projZonderTarief.id, 4800);
 
-      const updated = await service.setEmployeeRate(batch.id, wannes, null);
+      const updated = await service.setProjectRate(batch.id, projZonderTarief.id, null);
 
-      expect(updated.employeeRates[0]).toMatchObject({ overrideHourlyRateCents: null, effectiveHourlyRateCents: null });
+      expect(updated.projectRates[0]).toMatchObject({ overrideHourlyRateCents: null, effectiveHourlyRateCents: null });
     });
 
-    it('weigert een medewerker die niet op deze batch voorkomt', async () => {
+    it('weigert een project dat niet op deze batch voorkomt', async () => {
       const wo1 = workOrder({
         id: 'wo1',
-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: 6500 } } }],
+        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
       });
       const { prisma } = createFakePrisma([wo1]);
       const service = new InvoiceBatchService(prisma);
       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
 
-      await expect(service.setEmployeeRate(batch.id, wannes, 4800)).rejects.toMatchObject({ code: 'INVOICE_BATCH_EMPLOYEE_NOT_ON_BATCH' });
+      await expect(service.setProjectRate(batch.id, projZonderTarief.id, 4800)).rejects.toMatchObject({ code: 'INVOICE_BATCH_PROJECT_NOT_ON_BATCH' });
     });
 
     it('weigert op een batch die al naar Teamleader verstuurd is', async () => {
       const wo1 = workOrder({
         id: 'wo1',
-        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens', defaultHourlyRateCents: null } } }],
+        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:00:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
       });
       const { prisma } = createFakePrisma([wo1]);
       const service = new InvoiceBatchService(prisma);
       const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
       await prisma.invoiceBatch.update({ where: { id: batch.id }, data: { status: 'SUBMITTED_TO_TEAMLEADER' } });
 
-      await expect(service.setEmployeeRate(batch.id, peter, 6500)).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
+      await expect(service.setProjectRate(batch.id, proj1.id, 6500)).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
     });
   });
 });

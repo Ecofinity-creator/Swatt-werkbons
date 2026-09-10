@@ -38,13 +38,10 @@ export function UserDetailPage() {
   const [teamleaderUsers, setTeamleaderUsers] = useState<TeamleaderUserOption[] | null>(null);
   const [isSavingTeamleaderLink, setIsSavingTeamleaderLink] = useState(false);
 
-  // Facturatie: standaard uurtarief per medewerker (zie Employee.defaultHourlyRateCents) — VERKOOPPRIJS (klant).
-  const [hourlyRateInputValue, setHourlyRateInputValue] = useState('');
-  const [isSavingHourlyRate, setIsSavingHourlyRate] = useState(false);
-  const [hourlyRateError, setHourlyRateError] = useState<string | null>(null);
-
-  // Fase 12-herziening: KOSTPRIJS (uitbetaling aan medewerker/onderaannemer),
-  // los van de verkoopprijs hierboven — zie Employee.payrollRateCents.
+  // Fase 12-herziening / klantvraag 10/9/2026: KOSTPRIJS (uitbetaling aan
+  // medewerker/onderaannemer) — de VERKOOPPRIJS staat sinds klantvraag
+  // 10/9/2026 niet meer hier, maar op het project (zie ProjectMilestonesPage.tsx,
+  // HourlyRatePanel), zie Employee.payrollRateCents.
   const [payrollRateInputValue, setPayrollRateInputValue] = useState('');
   const [isSavingPayrollRate, setIsSavingPayrollRate] = useState(false);
   const [payrollRateError, setPayrollRateError] = useState<string | null>(null);
@@ -78,9 +75,6 @@ export function UserDetailPage() {
 
   useEffect(() => {
     if (user?.employee) {
-      setHourlyRateInputValue(
-        user.employee.defaultHourlyRateCents !== null ? (user.employee.defaultHourlyRateCents / 100).toFixed(2) : '',
-      );
       setPayrollRateInputValue(
         user.employee.payrollRateCents !== null ? (user.employee.payrollRateCents / 100).toFixed(2) : '',
       );
@@ -118,30 +112,7 @@ export function UserDetailPage() {
     }
   }
 
-  /** Facturatie: standaard uurtarief van deze medewerker. Leeg opslaan wist het weer (dan kan het nog steeds eenmalig ingevuld worden bij het aanmaken van een factuur, zie InvoicingPage). */
-  async function saveHourlyRate() {
-    if (!userId) return;
-    const trimmed = hourlyRateInputValue.trim().replace(',', '.');
-    const euros = trimmed === '' ? null : Number(trimmed);
-    if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
-      setHourlyRateError('Vul een geldig bedrag in (bv. 65,00), of laat leeg om het tarief te wissen.');
-      return;
-    }
-    setIsSavingHourlyRate(true);
-    setHourlyRateError(null);
-    try {
-      const response = await usersApi.update(userId, {
-        defaultHourlyRateCents: euros === null ? null : Math.round(euros * 100),
-      });
-      setUser(response.user);
-    } catch (err) {
-      setHourlyRateError(err instanceof ApiRequestError ? err.message : 'Opslaan van het uurtarief is mislukt.');
-    } finally {
-      setIsSavingHourlyRate(false);
-    }
-  }
-
-  /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (los van het facturatietarief hierboven). */
+  /** Fase 12-herziening: KOSTPRIJS — wat effectief uitbetaald wordt aan deze medewerker/onderaannemer (los van het facturatietarief, dat sinds klantvraag 10/9/2026 op het project staat). */
   async function savePayrollRate() {
     if (!userId) return;
     const trimmed = payrollRateInputValue.trim().replace(',', '.');
@@ -375,39 +346,12 @@ export function UserDetailPage() {
 
           {user.employee && (
             <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
-              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Uurtarieven</h2>
+              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Kostprijs</h2>
               <p className="mb-4 text-sm text-neutral-500">
-                Twee aparte bedragen — Swatts marge zit in het verschil. Toeslagen (overuren/ploegenwerk/nachtwerk)
-                worden sinds de herziening per project ingesteld (zie de projectpagina) en gelden met hetzelfde
-                percentage op beide tarieven hieronder.
-              </p>
-
-              <div className="mb-4 flex items-center gap-2">
-                <label className="flex items-center gap-2 text-sm text-neutral-600">
-                  Verkoopprijs (klant) €
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={hourlyRateInputValue}
-                    onChange={(e) => setHourlyRateInputValue(e.target.value)}
-                    placeholder="65,00"
-                    disabled={isSavingHourlyRate}
-                    className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void saveHourlyRate()}
-                  disabled={isSavingHourlyRate}
-                  className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                >
-                  {isSavingHourlyRate ? 'Bezig...' : 'Opslaan'}
-                </button>
-              </div>
-              {hourlyRateError && <p className="mb-4 text-xs text-red-700">{hourlyRateError}</p>}
-              <p className="mb-4 text-xs text-neutral-400">
-                Standaard uurtarief voor conceptfacturen in Teamleader (sectie 17). Nog niet ingevuld? Dan kan een
-                admin het tarief eenmalig invullen bij het aanmaken van de factuur zelf.
+                Wat effectief uitbetaald wordt aan deze medewerker/onderaannemer. De verkoopprijs (facturatie aan de
+                klant) staat sinds klantvraag 10/9/2026 niet meer per medewerker, maar per project (Backoffice →
+                Projecten) — Swatts marge zit in het verschil tussen beide. Toeslagen (overuren/ploegenwerk/nachtwerk)
+                worden per project ingesteld en gelden met hetzelfde percentage op beide tarieven.
               </p>
 
               <div className="flex items-center gap-2">

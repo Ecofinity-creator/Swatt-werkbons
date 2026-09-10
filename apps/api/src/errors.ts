@@ -333,26 +333,33 @@ export const InvoiceBatchErrors = {
       'INVOICE_BATCH_ALREADY_SUBMITTED',
       'Voor deze facturatiebatch is al een conceptfactuur aangemaakt in Teamleader.',
     ),
-  /** @deprecated Sinds de overstap naar tarief-per-medewerker niet meer gebruikt — zie employeeHourlyRateNotSet hieronder. Blijft bestaan zodat CustomerService/customer.routes.ts (nog steeds een geldig, apart uurtarief-veld op Customer) een passende fout kunnen gooien. */
+  /** @deprecated Sinds de overstap naar tarief-per-project niet meer gebruikt — zie projectHourlyRateNotSet hieronder. Blijft bestaan zodat CustomerService/customer.routes.ts (nog steeds een geldig, apart uurtarief-veld op Customer) een passende fout kunnen gooien. */
   hourlyRateNotSet: (customerName: string) =>
     new ApiError(
       409,
       'INVOICE_BATCH_HOURLY_RATE_NOT_SET',
       `Er is nog geen uurtarief ingesteld voor ${customerName}. Vul dit eerst in bij deze facturatiebatch.`,
     ),
-  /** Eén of meer medewerkers op deze batch hebben nog geen standaard- of eenmalig uurtarief (zie InvoiceBatchService.resolveEmployeeRates). */
-  employeeHourlyRateNotSet: (employeeNames: string[]) =>
+  /** Klantvraag 10/9/2026 — één of meer projecten op deze batch hebben nog geen standaard- of eenmalig uurtarief (zie InvoiceBatchService.resolveProjectRates). */
+  projectHourlyRateNotSet: (projectNames: string[]) =>
     new ApiError(
       409,
-      'INVOICE_BATCH_EMPLOYEE_HOURLY_RATE_NOT_SET',
-      `Er is nog geen uurtarief ingesteld voor ${employeeNames.join(', ')}. Vul dit in bij "Medewerkers", of eenmalig hier bij deze facturatiebatch.`,
+      'INVOICE_BATCH_PROJECT_HOURLY_RATE_NOT_SET',
+      `Er is nog geen uurtarief ingesteld voor ${projectNames.join(', ')}. Vul dit in bij "Projecten", of eenmalig hier bij deze facturatiebatch.`,
     ),
-  /** De opgegeven medewerker komt niet voor op een werkbon van deze batch — een tarief zou dus niets betekenen. */
+  /** De opgegeven medewerker komt niet voor op een werkbon van deze batch. */
   employeeNotOnBatch: () =>
     new ApiError(
       404,
       'INVOICE_BATCH_EMPLOYEE_NOT_ON_BATCH',
       'Deze medewerker komt niet voor op een werkbon van deze facturatiebatch.',
+    ),
+  /** Klantvraag 10/9/2026 — het opgegeven project komt niet voor op een werkbon van deze batch — een tarief zou dus niets betekenen. */
+  projectNotOnBatch: () =>
+    new ApiError(
+      404,
+      'INVOICE_BATCH_PROJECT_NOT_ON_BATCH',
+      'Dit project komt niet voor op een werkbon van deze facturatiebatch.',
     ),
 };
 

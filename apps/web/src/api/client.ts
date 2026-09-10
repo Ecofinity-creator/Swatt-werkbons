@@ -56,8 +56,10 @@ import type {
   UpdateCompanySettingsBody,
   UpdateCustomerHourlyRateBody,
   UpdateCustomerHourlyRateResponseBody,
-  UpdateInvoiceBatchEmployeeRateBody,
-  UpdateInvoiceBatchEmployeeRateResponseBody,
+  UpdateInvoiceBatchProjectRateBody,
+  UpdateInvoiceBatchProjectRateResponseBody,
+  UpdateProjectHourlyRateBody,
+  UpdateProjectHourlyRateResponseBody,
   UpdateTeamleaderSettingsBody,
   UpdateUserBody,
   UpdateUserResponseBody,
@@ -427,9 +429,10 @@ export const invoiceBatchesApi = {
   remove: (id: string) => request<void>(`/admin/invoice-batches/${id}/remove`, { method: 'POST' }),
   /** Phase 10b — sectie 17: "Maak conceptfactuur in Teamleader". Geeft altijd de bijgewerkte batch terug, ook bij een mislukte Teamleader-aanroep (business rule 9). */
   createTeamleaderDraft: (id: string) =>
-    request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),  /** Facturatie: eenmalige tariefoverride voor één medewerker op deze batch (zie InvoiceBatchService.setEmployeeRate). */
-  setEmployeeRate: (batchId: string, employeeId: string, body: UpdateInvoiceBatchEmployeeRateBody) =>
-    request<UpdateInvoiceBatchEmployeeRateResponseBody>(`/admin/invoice-batches/${batchId}/employee-rates/${employeeId}`, {
+    request<CreateTeamleaderDraftInvoiceResponseBody>(`/admin/invoice-batches/${id}/teamleader-draft`, { method: 'POST' }),
+  /** Klantvraag 10/9/2026 — eenmalige tariefoverride voor één project op deze batch (zie InvoiceBatchService.setProjectRate). */
+  setProjectRate: (batchId: string, projectId: string, body: UpdateInvoiceBatchProjectRateBody) =>
+    request<UpdateInvoiceBatchProjectRateResponseBody>(`/admin/invoice-batches/${batchId}/project-rates/${projectId}`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -561,6 +564,14 @@ export const projectsApi = {
   kmSettings: {
     update: (projectId: string, body: UpdateProjectKmSettingsBody) =>
       request<UpdateProjectKmSettingsResponseBody>(`/admin/projects/${projectId}/km-settings`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+  },
+  /** Klantvraag 10/9/2026 — verkoopprijs per uur, verhuisd van de medewerker naar het project. ADMIN-only. */
+  hourlyRate: {
+    update: (projectId: string, body: UpdateProjectHourlyRateBody) =>
+      request<UpdateProjectHourlyRateResponseBody>(`/admin/projects/${projectId}/hourly-rate`, {
         method: 'POST',
         body: JSON.stringify(body),
       }),

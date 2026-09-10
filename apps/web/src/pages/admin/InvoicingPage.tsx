@@ -1,4 +1,4 @@
-import type { InvoiceBatchEmployeeRateSummary, InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
+import type { InvoiceBatchProjectRateSummary, InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { invoiceBatchesApi } from '../../api/client';
@@ -10,9 +10,9 @@ function formatEuroCents(cents: number | null): string {
   return `€ ${(cents / 100).toLocaleString('nl-BE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** "Maak conceptfactuur in Teamleader" mag pas als elke medewerker op deze batch een (standaard- of eenmalig) tarief heeft. */
-function allEmployeeRatesSet(batch: InvoiceBatchSummary): boolean {
-  return batch.employeeRates.every((rate) => rate.effectiveHourlyRateCents !== null);
+/** "Maak conceptfactuur in Teamleader" mag pas als elk project op deze batch een (standaard- of eenmalig) tarief heeft. */
+function allProjectRatesSet(batch: InvoiceBatchSummary): boolean {
+  return batch.projectRates.every((rate) => rate.effectiveHourlyRateCents !== null);
 }
 
 function currentPeriodLabel(): string {
@@ -80,13 +80,12 @@ function groupByCustomerAndProject(workOrders: InvoiceableWorkOrderSummary[]): P
  * latere actie op een reeds voorbereide batch — zie TeamleaderInvoiceService
  * voor de volledige toelichting.
  *
- * Facturatie: tarief per medewerker i.p.v. per klant (uitbreiding na Phase
- * 10b). Elke batch toont hier per betrokken medewerker het uurtarief waarmee
- * de conceptfactuur geprijsd wordt (standaardtarief uit "Medewerkers", of —
- * ontbreekt dat nog — een eenmalige override die hier, vlak vóór het
- * aanmaken van de factuur, ingevuld kan worden). "Maak conceptfactuur in
- * Teamleader" blijft uitgeschakeld zolang niet elke medewerker een tarief
- * heeft.
+ * Klantvraag 10/9/2026: tarief per PROJECT i.p.v. per medewerker. Elke batch
+ * toont hier per betrokken project het uurtarief waarmee de conceptfactuur
+ * geprijsd wordt (standaardtarief uit "Projecten", of — ontbreekt dat nog —
+ * een eenmalige override die hier, vlak vóór het aanmaken van de factuur,
+ * ingevuld kan worden). "Maak conceptfactuur in Teamleader" blijft
+ * uitgeschakeld zolang niet elk project een tarief heeft.
  */
 export function InvoicingPage() {
   const [periodLabel, setPeriodLabel] = useState(currentPeriodLabel());
@@ -100,9 +99,9 @@ export function InvoicingPage() {
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const [removingBatchId, setRemovingBatchId] = useState<string | null>(null);
 
-  // Facturatie: tarief per medewerker bewerken (eenmalige override, zie
-  // InvoiceBatchEmployeeRateSummary), en "Maak conceptfactuur in Teamleader".
-  const [editingRate, setEditingRate] = useState<{ batchId: string; employeeId: string } | null>(null);
+  // Klantvraag 10/9/2026: tarief per project bewerken (eenmalige override, zie
+  // InvoiceBatchProjectRateSummary), en "Maak conceptfactuur in Teamleader".
+  const [editingRate, setEditingRate] = useState<{ batchId: string; projectId: string } | null>(null);
   const [rateInputValue, setRateInputValue] = useState('');
   const [isSavingRate, setIsSavingRate] = useState(false);
   const [rateError, setRateError] = useState<string | null>(null);
@@ -188,13 +187,13 @@ export function InvoicingPage() {
     }
   }
 
-  function handleStartEditRate(batchId: string, rate: InvoiceBatchEmployeeRateSummary) {
-    setEditingRate({ batchId, employeeId: rate.employeeId });
+  function handleStartEditRate(batchId: string, rate: InvoiceBatchProjectRateSummary) {
+    setEditingRate({ batchId, projectId: rate.projectId });
     setRateInputValue(rate.overrideHourlyRateCents !== null ? (rate.overrideHourlyRateCents / 100).toFixed(2) : '');
     setRateError(null);
   }
 
-  async function handleSaveRate(batchId: string, employeeId: string) {
+  async function handleSaveRate(batchId: string, projectId: string) {
     const trimmed = rateInputValue.trim().replace(',', '.');
     const euros = trimmed === '' ? null : Number(trimmed);
     if (trimmed !== '' && (Number.isNaN(euros) || (euros as number) <= 0)) {
@@ -204,7 +203,7 @@ export function InvoicingPage() {
     setIsSavingRate(true);
     setRateError(null);
     try {
-      await invoiceBatchesApi.setEmployeeRate(batchId, employeeId, {
+      await invoiceBatchesApi.setProjectRate(batchId, projectId, {
         hourlyRateCents: euros === null ? null : Math.round(euros * 100),
       });
       setEditingRate(null);
@@ -385,7 +384,7 @@ export function InvoicingPage() {
                   <th className="px-4 py-3">Klant</th>
                   <th className="px-4 py-3">Werkbonnen</th>
                   <th className="px-4 py-3">Uren</th>
-                  <th className="px-4 py-3">Tarieven (per medewerker)</th>
+                  <th className="px-4 py-3">Tarieven (per project)</th>
                   <th className="px-4 py-3">Voorbereid op</th>
                   <th className="px-4 py-3">Teamleader</th>
                   <th className="px-4 py-3" />
@@ -400,12 +399,12 @@ export function InvoicingPage() {
                       <td className="px-4 py-3 text-neutral-600">{formatHm(batch.totalInvoiceableSeconds)} u</td>
                       <td className="px-4 py-3 text-neutral-600">
                         <ul className="space-y-1">
-                          {batch.employeeRates.map((rate) => {
-                            const isEditing = editingRate?.batchId === batch.id && editingRate.employeeId === rate.employeeId;
+                          {batch.projectRates.map((rate) => {
+                            const isEditing = editingRate?.batchId === batch.id && editingRate.projectId === rate.projectId;
                             return (
-                              <li key={rate.employeeId}>
+                              <li key={rate.projectId}>
                                 <div className="flex items-center gap-1">
-                                  <span className="font-medium text-neutral-700">{rate.displayName}:</span>
+                                  <span className="font-medium text-neutral-700">{rate.projectName}:</span>
                                   {isEditing ? (
                                     <>
                                       <input
@@ -418,7 +417,7 @@ export function InvoicingPage() {
                                       />
                                       <button
                                         type="button"
-                                        onClick={() => void handleSaveRate(batch.id, rate.employeeId)}
+                                        onClick={() => void handleSaveRate(batch.id, rate.projectId)}
                                         disabled={isSavingRate}
                                         className="text-xs font-semibold text-swatt-gold-dark underline disabled:opacity-50"
                                       >
@@ -474,12 +473,12 @@ export function InvoicingPage() {
                           <button
                             type="button"
                             onClick={() => void handleCreateTeamleaderDraft(batch.id)}
-                            disabled={creatingDraftBatchId === batch.id || !allEmployeeRatesSet(batch)}
+                            disabled={creatingDraftBatchId === batch.id || !allProjectRatesSet(batch)}
                             title={
-                              !allEmployeeRatesSet(batch)
-                                ? `Vul eerst een uurtarief in voor: ${batch.employeeRates
+                              !allProjectRatesSet(batch)
+                                ? `Vul eerst een uurtarief in voor: ${batch.projectRates
                                     .filter((rate) => rate.effectiveHourlyRateCents === null)
-                                    .map((rate) => rate.displayName)
+                                    .map((rate) => rate.projectName)
                                     .join(', ')}.`
                                 : undefined
                             }

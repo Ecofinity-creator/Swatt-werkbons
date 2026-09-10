@@ -332,16 +332,14 @@ model Employee {
   displayName String  @map("display_name")
   phone       String?
 
-  /// Facturatie: standaard uurtarief van deze medewerker (in eurocent), in te
-  /// stellen door een admin bij "Medewerkers" (zie user.routes.ts). Vervangt
-  /// sinds deze uitbreiding het per-klant-tarief (Customer.hourlyRateCents,
-  /// zie de toelichting daar) als bron voor factuurregels: een conceptfactuur
-  /// wordt geprijsd op basis van wélke medewerker de uren registreerde, niet
-  /// meer op basis van de klant. Null tot een admin dit invult — ontbreekt dit
-  /// nog voor een medewerker die op een factuurbatch voorkomt, dan kan de admin
-  /// het tarief eenmalig voor die factuur invullen op de Facturatie-pagina
-  /// (zie InvoiceBatchEmployeeRate hieronder) zonder de instellingenpagina te
-  /// hoeven verlaten.
+  /// @deprecated Klantvraag 10/9/2026 — de VERKOOPPRIJS is verhuisd naar
+  /// `Project.hourlyRateCents` (zie de toelichting daar): de prijs hangt af
+  /// van het project/de afspraak met de klant, niet van wélke technieker de
+  /// uren registreerde. Deze kolom blijft (niet-destructief) bestaan maar
+  /// wordt sinds deze wijziging nergens meer gelezen om te factureren — ook
+  /// uit het instellingenscherm gehaald (zie UserDetailPage.tsx). Verwar dit
+  /// niet met `payrollRateCents` hieronder (KOSTPRIJS), die wél per medewerker
+  /// blijft.
   defaultHourlyRateCents Int? @map("default_hourly_rate_cents")
 
   /// Fase 12-herziening (op vraag na de eerste versie van deel A/E):
@@ -379,11 +377,6 @@ model Employee {
 
   /// Foto's die deze werknemer aan een werkbon heeft toegevoegd (Phase 6 — zie WorkOrderPhoto hieronder).
   uploadedWorkOrderPhotos WorkOrderPhoto[]
-
-  /// Eenmalige tariefoverrides per factuurbatch, enkel gebruikt wanneer
-  /// `defaultHourlyRateCents` hierboven nog niet is ingevuld (zie
-  /// InvoiceBatchEmployeeRate hieronder).
-  invoiceBatchRateOverrides InvoiceBatchEmployeeRate[]
 
   /// Phase 12, deel E — personeelsuitbetalingen van deze medewerker.
   payrollBatches PayrollBatch[]
@@ -608,6 +601,24 @@ model Project {
 
   /// Tarief (eurocent) per km BOVEN de drempel. Default € 0,80/km.
   kmRateAboveCentsPerKm Int @default(80) @map("km_rate_above_cents_per_km")
+
+  /// Klantvraag 10/9/2026 — "de verkoopprijs per uur voor een technieker
+  /// staat nu bij de technieker, maar moet verhuizen naar het project, omdat
+  /// het afhankelijk is per project." Vervangt `Employee.defaultHourlyRateCents`
+  /// (nu @deprecated) als bron voor factuurregels: een conceptfactuur wordt
+  /// voortaan geprijsd op basis van wélk project de uren registreerde, niet
+  /// meer op basis van wélke technieker. `null` tot een admin dit invult bij
+  /// Projecten (zie project.routes.ts) — ontbreekt dit nog voor een project
+  /// dat op een factuurbatch voorkomt, dan kan de admin het tarief eenmalig
+  /// voor die factuur invullen op de Facturatie-pagina (zie
+  /// InvoiceBatchProjectRate hieronder) zonder de projectpagina te hoeven
+  /// verlaten.
+  hourlyRateCents Int? @map("hourly_rate_cents")
+
+  /// Eenmalige tariefoverrides per factuurbatch, enkel gebruikt wanneer
+  /// `hourlyRateCents` hierboven nog niet is ingevuld (zie
+  /// InvoiceBatchProjectRate hieronder).
+  invoiceBatchRateOverrides InvoiceBatchProjectRate[]
 
   weeklyApprovals WeeklyApproval[]
 
@@ -1236,10 +1247,10 @@ model InvoiceBatch {
   createdByUser  User                @relation(fields: [createdByUserId], references: [id])
   lines          InvoiceBatchLine[]
 
-  /// Eenmalige tariefoverrides voor medewerkers zonder `Employee.defaultHourlyRateCents`
-  /// (zie InvoiceBatchEmployeeRate hieronder) — enkel gezet wanneer een admin dit
+  /// Eenmalige tariefoverrides voor projecten zonder `Project.hourlyRateCents`
+  /// (zie InvoiceBatchProjectRate hieronder) — enkel gezet wanneer een admin dit
   /// bewust voor déze factuur heeft ingevuld op de Facturatie-pagina.
-  employeeRates  InvoiceBatchEmployeeRate[]
+  projectRates   InvoiceBatchProjectRate[]
 
   @@index([customerId])
   @@index([periodLabel])
@@ -1267,27 +1278,33 @@ model InvoiceBatchLine {
   @@map("invoice_batch_line")
 }
 
-/// Eénmalige uurtarief-override van één medewerker, voor één specifieke
-/// InvoiceBatch — enkel nodig zolang `Employee.defaultHourlyRateCents` nog
-/// niet is ingevuld voor die medewerker (zie de toelichting daar). Ingevuld
-/// door een admin op de Facturatie-pagina, vlak vóór "Maak conceptfactuur in
-/// Teamleader"; TeamleaderInvoiceService gebruikt deze waarde enkel als de
-/// medewerker zelf geen standaardtarief heeft. Verwijderen van de batch
+/// Eénmalige uurtarief-override van één project, voor één specifieke
+/// InvoiceBatch — enkel nodig zolang `Project.hourlyRateCents` nog niet is
+/// ingevuld voor dat project (zie de toelichting daar). Ingevuld door een
+/// admin op de Facturatie-pagina, vlak vóór "Maak conceptfactuur in
+/// Teamleader"; TeamleaderInvoiceService gebruikt deze waarde enkel als het
+/// project zelf geen standaardtarief heeft. Verwijderen van de batch
 /// (cascade) ruimt deze overrides mee op — ze hebben buiten die ene batch
 /// geen betekenis.
-model InvoiceBatchEmployeeRate {
+///
+/// Klantvraag 10/9/2026 — hernoemd/verhuisd van `InvoiceBatchEmployeeRate`
+/// (employeeId) naar dit projectgescopeerde model, samen met de verhuizing
+/// van de verkoopprijs zelf (Employee.defaultHourlyRateCents →
+/// Project.hourlyRateCents). Oude, per-medewerker overrides hadden na die
+/// wijziging geen betekenis meer.
+model InvoiceBatchProjectRate {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   invoiceBatchId  String   @map("invoice_batch_id") @db.Uuid
-  employeeId      String   @map("employee_id") @db.Uuid
+  projectId       String   @map("project_id") @db.Uuid
   hourlyRateCents Int      @map("hourly_rate_cents")
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   invoiceBatch InvoiceBatch @relation(fields: [invoiceBatchId], references: [id], onDelete: Cascade)
-  employee     Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  @@unique([invoiceBatchId, employeeId])
-  @@map("invoice_batch_employee_rate")
+  @@unique([invoiceBatchId, projectId])
+  @@map("invoice_batch_project_rate")
 }
 
  /// Phase 12, deel E (sectie "Personeelsuitbetaling"): maandoverzicht per

@@ -17,12 +17,13 @@ const WITH_DRAFT_DETAILS = {
         workOrder: {
           include: {
             project: true,
+            createdByEmployee: true,
             timeEntries: { include: { timeEntry: { include: { employee: true } } } },
           },
         },
       },
     },
-    employeeRates: true,
+    projectRates: true,
   },
 } as const;
 
@@ -34,6 +35,9 @@ interface DraftBatchLineRow {
     description: string | null;
     /** Phase 12, deel D (sectie 5) — bevroren km-vergoedingsbedrag, zie WorkOrderSignatureService/WeeklyApprovalService. */
     kmAmountCents: number | null;
+    /** Sectie 34-scenario: wie de werkbon aanmaakte — gebruikt als "eigenaar" van de km-regel wanneer meerdere medewerkers op dezelfde werkbon registreerden. */
+    createdByEmployeeId: string;
+    createdByEmployee: { id: string; displayName: string };
     project: {
       id: string;
       name: string;
@@ -46,17 +50,15 @@ interface DraftBatchLineRow {
       overtimeRatePercent: number;
       shiftWorkRatePercent: number;
       nightWorkRatePercent: number;
+      /** Klantvraag 10/9/2026 — verkoopprijs per uur, `null` zolang nog niet ingesteld. */
+      hourlyRateCents: number | null;
     };
     timeEntries: Array<{
       timeEntry: {
         startedAt: Date;
         endedAt: Date | null;
         pausedSeconds: number;
-        employee: {
-          id: string;
-          displayName: string;
-          defaultHourlyRateCents: number | null;
-        };
+        employee: { id: string; displayName: string };
       };
     }>;
   };
@@ -68,8 +70,8 @@ interface DraftBatchRow {
   customerId: string;
   customer: { name: string; teamleaderId: string; teamleaderType: string; hourlyRateCents: number | null };
   lines: DraftBatchLineRow[];
-  /** Facturatie: eenmalige tariefoverrides per medewerker op déze batch (zie InvoiceBatchEmployeeRate in schema.prisma). */
-  employeeRates: Array<{ employeeId: string; hourlyRateCents: number }>;
+  /** Facturatie: eenmalige tariefoverrides per project op déze batch (zie InvoiceBatchProjectRate in schema.prisma). */
+  projectRates: Array<{ projectId: string; hourlyRateCents: number }>;
 }
 
 interface TeamleaderConnectionInvoiceSettings {
@@ -107,15 +109,42 @@ interface TeamleaderConnectionInvoiceSettings {
  * wat nodig is om dit snel bij te stellen op basis van de échte foutmelding,
  * zonder Render-logtoegang nodig te hebben.
  *
- * Facturatie: tarief per medewerker i.p.v. per klant (uitbreiding na Phase
- * 10b). Elke werkbon in de batch wordt hier gesplitst in één factuurregel PER
- * MEDEWERKER die er uren op registreerde — geprijsd met diens
- * `Employee.defaultHourlyRateCents`, of (ontbreekt dat nog) de eenmalige
- * override die een admin voor déze batch invulde (InvoiceBatchEmployeeRate,
- * zie InvoiceBatchService.setEmployeeRate). `Customer.hourlyRateCents` wordt
- * hier bewust niet meer gebruikt — dat veld/de bijhorende instelling op de
- * Facturatie-pagina blijft wel bestaan (zie CustomerService), maar is sinds
- * deze uitbreiding niet meer de bron voor de conceptfactuur.
+ * Klantvraag 10/9/2026 — twee wijzigingen t.o.v. Phase 10b:
+ *
+ * 1) Facturatie: tarief per PROJECT i.p.v. per medewerker ("de verkoopprijs
+ *    hangt af van het project, niet van de technieker"). Elke werkbon in de
+ *    batch wordt hier geprijsd met `Project.hourlyRateCents`, of (ontbreekt
+ *    dat nog) de eenmalige override die een admin voor déze batch invulde
+ *    (InvoiceBatchProjectRate, zie InvoiceBatchService.setProjectRate).
+ *    `Employee.defaultHourlyRateCents`/`Customer.hourlyRateCents` worden
+ *    hier bewust niet meer gebruikt.
+ *
+ * 2) Factuuropmaak: elke `grouped_lines`-groep krijgt nu een `section` —
+ *    een vetgedrukte hoofding op de Teamleader-factuur met de ISO-week en de
+ *    naam van de technieker (bv. "Week 32 - Peter Janssens"), naar het
+ *    voorbeeld dat Steven aanleverde. Vóór deze wijziging bevatte
+ *    `grouped_lines` altijd precies één groep met alle regels samen; nu is
+ *    het één groep per (technieker, project, ISO-week) — de overurendrempel
+ *    zelf blijft wél berekend per Project.overtimeThresholdType (dag of
+ *    week, zie splitEffectiveHours hieronder), enkel de FACTUURWEERGAVE
+ *    groepeert altijd per kalenderweek.
+ *
+ *    LET OP — de exacte vorm van Teamleader's `section`-veld op
+ *    `grouped_lines` kon (nog) niet rechtstreeks tegen de actuele, live
+ *    OpenAPI-spec geverifieerd worden (het gearchiveerde `apiary.apib` is
+ *    verouderd; de opvolger, `@teamleader/focus-api-specification` op npm,
+ *    is te groot om via de beschikbare tools volledig op te halen). Op basis
+ *    van indirect bewijs — Teamleader's algemene API-conventie om verwante
+ *    velden te nesten (zoals `unit_price: {amount, tax}` en `payment_term:
+ *    {type, days}` hierboven), en een extern leesmodel dat de
+ *    gegroepeerde-regel-hoofding op `invoices.info` als `group_section_title`
+ *    (dus een gestructureerd `section.title`) omschrijft — is hieronder
+ *    gekozen voor `section: { title: string }`. Dit zit bewust geïsoleerd in
+ *    één functie (`buildSection` hieronder): geeft Teamleader hier een fout
+ *    op terug (zichtbaar in `teamleaderSyncError`, business rule 9 — de
+ *    batch gaat dan niet verloren), dan volstaat het die ene functie aan te
+ *    passen (bv. terugvallen op een platte string) op basis van de exacte
+ *    foutmelding.
  */
 export class TeamleaderInvoiceService {
   constructor(
@@ -136,13 +165,13 @@ export class TeamleaderInvoiceService {
       throw InvoiceBatchErrors.alreadySubmittedToTeamleader();
     }
 
-    const rateByEmployeeId = resolveEmployeeRateCents(batch);
-    const missingRateNames = Array.from(rateByEmployeeId.values())
-      .filter((employee) => employee.rateCents === null)
-      .map((employee) => employee.displayName)
+    const rateByProjectId = resolveProjectRateCents(batch);
+    const missingRateNames = Array.from(rateByProjectId.values())
+      .filter((project) => project.rateCents === null)
+      .map((project) => project.projectName)
       .sort();
     if (missingRateNames.length > 0) {
-      throw InvoiceBatchErrors.employeeHourlyRateNotSet(missingRateNames);
+      throw InvoiceBatchErrors.projectHourlyRateNotSet(missingRateNames);
     }
 
     const connection = (await this.prisma.teamleaderConnection.findUnique({
@@ -164,7 +193,7 @@ export class TeamleaderInvoiceService {
       throw TeamleaderErrors.invoiceSettingsNotConfigured();
     }
 
-    const lineItems = buildLineItemsForBatch(batch, rateByEmployeeId, connection.invoiceTaxRateId!);
+    const groupedLines = buildGroupedLinesForBatch(batch, rateByProjectId, connection.invoiceTaxRateId!);
 
     // `project_id` is optioneel bij invoices.draft — enkel meesturen wanneer
     // alle werkbonnen in deze batch bij hetzelfde Teamleader-project horen
@@ -183,7 +212,7 @@ export class TeamleaderInvoiceService {
       department_id: connection.invoiceDepartmentId,
       payment_term: { type: connection.invoicePaymentTermType, days: connection.invoicePaymentTermDays },
       ...(projectId ? { project_id: projectId } : {}),
-      grouped_lines: [{ line_items: lineItems }],
+      grouped_lines: groupedLines,
     };
 
     try {
@@ -211,27 +240,25 @@ export class TeamleaderInvoiceService {
 }
 
 /**
- * Bepaalt, voor elke medewerker die op minstens één werkbon van deze batch
- * voorkomt, het tarief waarmee zijn/haar uren geprijsd worden: de eenmalige
- * override op déze batch (InvoiceBatchEmployeeRate) heeft voorrang op het
- * standaardtarief uit de instellingen (Employee.defaultHourlyRateCents).
- * `rateCents: null` betekent dat er voor die medewerker nog geen van beide is
+ * Bepaalt, voor elk project dat op minstens één werkbon van deze batch
+ * voorkomt, het tarief waarmee de uren geprijsd worden: de eenmalige override
+ * op déze batch (InvoiceBatchProjectRate) heeft voorrang op het
+ * standaardtarief uit de projectinstellingen (Project.hourlyRateCents).
+ * `rateCents: null` betekent dat er voor dat project nog geen van beide is
  * ingevuld — `createDraftInvoice` weigert dan de Teamleader-aanroep (zie
- * hierboven). Zelfde resolutielogica als InvoiceBatchService.resolveEmployeeRates
+ * hierboven). Zelfde resolutielogica als InvoiceBatchService.resolveProjectRates
  * (bewust lokaal gedupliceerd, zie de toelichting bovenaan dit bestand).
  */
-function resolveEmployeeRateCents(batch: DraftBatchRow): Map<string, { displayName: string; rateCents: number | null }> {
-  const overrideByEmployeeId = new Map(batch.employeeRates.map((rate) => [rate.employeeId, rate.hourlyRateCents]));
-  const result = new Map<string, { displayName: string; rateCents: number | null }>();
+function resolveProjectRateCents(batch: DraftBatchRow): Map<string, { projectName: string; rateCents: number | null }> {
+  const overrideByProjectId = new Map(batch.projectRates.map((rate) => [rate.projectId, rate.hourlyRateCents]));
+  const result = new Map<string, { projectName: string; rateCents: number | null }>();
   for (const line of batch.lines) {
-    for (const entry of line.workOrder.timeEntries) {
-      const employee = entry.timeEntry.employee;
-      const overrideCents = overrideByEmployeeId.get(employee.id) ?? null;
-      result.set(employee.id, {
-        displayName: employee.displayName,
-        rateCents: overrideCents ?? employee.defaultHourlyRateCents,
-      });
-    }
+    const project = line.workOrder.project;
+    const overrideCents = overrideByProjectId.get(project.id) ?? null;
+    result.set(project.id, {
+      projectName: project.name,
+      rateCents: overrideCents ?? project.hourlyRateCents ?? null,
+    });
   }
   return result;
 }
@@ -243,41 +270,84 @@ function computeWorkedSeconds(entry: { startedAt: Date; endedAt: Date | null; pa
   return Math.max(0, raw);
 }
 
+type LineItem = { quantity: number; description: string; unit_price: { amount: number; tax: 'excluding' }; tax_rate_id: string };
+
+/** Eén Teamleader `grouped_lines`-groep: een vetgedrukte hoofding ("Week N - naam") boven een reeks factuurregels. */
+interface WeekGroup {
+  employeeId: string;
+  displayName: string;
+  projectId: string;
+  project: DraftBatchLineRow['workOrder']['project'];
+  /** ISO-8601-weeksleutel ("YYYY-Wnn") — zie isoWeekKeyOf hieronder. */
+  weekKey: string;
+  workOrderNumbers: Set<string>;
+  normalHours: number;
+  overtimeHours: number;
+  kmItems: LineItem[];
+}
+
 /**
- * Eén werkbon levert voortaan één factuurregel PER MEDEWERKER op (i.p.v. één
- * regel met een geblende totaal), zodat elke medewerker met zijn/haar eigen
- * tarief geprijsd wordt. `rateByEmployeeId` bevat op dit punt gegarandeerd
- * enkel geldige (niet-null) tarieven — `createDraftInvoice` heeft dat al
- * vooraf gecontroleerd.
+ * Bouwt de volledige `grouped_lines`-array op: één groep per (technieker,
+ * project, ISO-week), elk met een vetgedrukte `section`-hoofding ("Week N -
+ * naam", klantvraag 10/9/2026). Prijzing gebeurt per PROJECT
+ * (`rateByProjectId`), niet meer per technieker — de technieker bepaalt hier
+ * enkel nog in wélke hoofding zijn/haar uren terechtkomen, zodat de klant kan
+ * zien wie welke uren die week uitvoerde.
  *
- * Phase 12, deel A: de overurendrempel (dag of week, sectie 1) geldt over de
- * volledige batch heen — een WEEKLY-drempel van bv. 39u kan pas overschreden
- * worden door de uren van meerdere werkbonnen/dagen samen op te tellen. Deze
- * functie groepeert daarom alle tijdregistraties van de hele batch per
- * (medewerker, project), bucket ze per dag of per week (naargelang
- * Project.overtimeThresholdType), en splitst pas dán normaal/overuren.
- * Ploegenwerk/nachtwerk (premiumType) geldt op alle uren van een koppeling,
- * ongeacht de drempel — zie rate-calculation.service.ts.
+ * Twee stappen, bewust gescheiden:
+ * 1) Normaal/overuren correct splitsen — dit MOET gebeuren op basis van
+ *    Project.overtimeThresholdType (dag- of weekdrempel, sectie 1), exact
+ *    zoals vóór deze wijziging (zie splitEffectiveHours hieronder).
+ * 2) Het RESULTAAT daarvan groeperen voor de factuurWEERGAVE, altijd per
+ *    kalenderweek — ook op een project met een dagdrempel (DAILY): meerdere
+ *    dagbedragen binnen dezelfde week worden dan samengevoegd tot één
+ *    weekhoofding, wat Steven expliciet vroeg ("hoofding in het vet per
+ *    week"), zonder de correctheid van de dagdrempel-berekening zelf aan te
+ *    tasten.
  */
-function buildLineItemsForBatch(
+function buildGroupedLinesForBatch(
   batch: DraftBatchRow,
-  rateByEmployeeId: Map<string, { displayName: string; rateCents: number | null }>,
+  rateByProjectId: Map<string, { projectName: string; rateCents: number | null }>,
   taxRateId: string,
-) {
-  interface Bucket {
+): Array<{ section: { title: string }; line_items: LineItem[] }> {
+  interface PeriodAccumulator {
+    seconds: number;
+    /** ISO-week van dit period-bucket — een DAILY-periode ligt altijd binnen precies één ISO-week. */
+    weekKey: string;
+  }
+  interface EmployeeProjectBucket {
     employeeId: string;
     displayName: string;
-    projectId: string;
-    projectName: string;
-    workOrderNumbers: Set<string>;
     project: DraftBatchLineRow['workOrder']['project'];
-    employee: DraftBatchLineRow['workOrder']['timeEntries'][number]['timeEntry']['employee'];
-    /** periodKey (dag "YYYY-MM-DD" of ISO-week "YYYY-Wnn") → seconden in die periode. */
-    secondsByPeriod: Map<string, number>;
+    periodsByKey: Map<string, PeriodAccumulator>;
   }
 
-  const bucketsByEmployeeProject = new Map<string, Bucket>();
+  const empProjectBuckets = new Map<string, EmployeeProjectBucket>();
+  const weekGroups = new Map<string, WeekGroup>();
 
+  function weekGroupFor(employeeId: string, displayName: string, project: DraftBatchLineRow['workOrder']['project'], weekKey: string): WeekGroup {
+    const key = `${employeeId}|${project.id}|${weekKey}`;
+    let group = weekGroups.get(key);
+    if (!group) {
+      group = {
+        employeeId,
+        displayName,
+        projectId: project.id,
+        project,
+        weekKey,
+        workOrderNumbers: new Set(),
+        normalHours: 0,
+        overtimeHours: 0,
+        kmItems: [],
+      };
+      weekGroups.set(key, group);
+    }
+    return group;
+  }
+
+  // Stap 1: uren bucketen per (technieker, project) → per periode (dag/week
+  // naargelang de overurendrempel), en meteen de bijhorende weekgroep
+  // aanmaken/vullen met werkbonnummers.
   for (const line of batch.lines) {
     const project = line.workOrder.project;
     for (const entry of line.workOrder.timeEntries) {
@@ -285,92 +355,129 @@ function buildLineItemsForBatch(
       if (seconds <= 0) continue;
 
       const employee = entry.timeEntry.employee;
-      const key = `${employee.id}|${project.id}`;
+      const bucketKey = `${employee.id}|${project.id}`;
       const periodKey =
         project.overtimeThresholdType === 'DAILY' ? dayKeyOf(entry.timeEntry.startedAt) : isoWeekKeyOf(entry.timeEntry.startedAt);
+      const weekKey = isoWeekKeyOf(entry.timeEntry.startedAt);
 
-      if (!bucketsByEmployeeProject.has(key)) {
-        bucketsByEmployeeProject.set(key, {
-          employeeId: employee.id,
-          displayName: employee.displayName,
-          projectId: project.id,
-          projectName: project.name,
-          workOrderNumbers: new Set(),
-          project,
-          employee,
-          secondsByPeriod: new Map(),
-        });
+      if (!empProjectBuckets.has(bucketKey)) {
+        empProjectBuckets.set(bucketKey, { employeeId: employee.id, displayName: employee.displayName, project, periodsByKey: new Map() });
       }
-      const bucket = bucketsByEmployeeProject.get(key)!;
-      bucket.workOrderNumbers.add(line.workOrder.workOrderNumber);
-      bucket.secondsByPeriod.set(periodKey, (bucket.secondsByPeriod.get(periodKey) ?? 0) + seconds);
+      const bucket = empProjectBuckets.get(bucketKey)!;
+      const period = bucket.periodsByKey.get(periodKey) ?? { seconds: 0, weekKey };
+      period.seconds += seconds;
+      bucket.periodsByKey.set(periodKey, period);
+
+      const group = weekGroupFor(employee.id, employee.displayName, project, weekKey);
+      group.workOrderNumbers.add(line.workOrder.workOrderNumber);
     }
   }
 
-  return Array.from(bucketsByEmployeeProject.values()).flatMap((bucket) => {
-    let normalHours = 0;
-    let overtimeHours = 0;
-    for (const seconds of bucket.secondsByPeriod.values()) {
-      const totalHours = seconds / 3600;
+  // Stap 2: per periode normaal/overuren splitsen (dag- of weekdrempel), en
+  // het resultaat optellen in de bijhorende weekgroep.
+  for (const bucket of empProjectBuckets.values()) {
+    for (const period of bucket.periodsByKey.values()) {
+      const totalHours = period.seconds / 3600;
+      let normalHours = totalHours;
+      let overtimeHours = 0;
       if (bucket.project.overtimeApplies) {
         const split = splitEffectiveHours(totalHours, {
           overtimeThresholdType: bucket.project.overtimeThresholdType,
           overtimeWeeklyThresholdHours: bucket.project.overtimeWeeklyThresholdHours,
         });
-        normalHours += split.normalHours;
-        overtimeHours += split.overtimeHours;
-      } else {
-        normalHours += totalHours;
+        normalHours = split.normalHours;
+        overtimeHours = split.overtimeHours;
       }
+      const group = weekGroupFor(bucket.employeeId, bucket.displayName, bucket.project, period.weekKey);
+      group.normalHours += normalHours;
+      group.overtimeHours += overtimeHours;
     }
-    normalHours = Math.round(normalHours * 100) / 100;
-    overtimeHours = Math.round(overtimeHours * 100) / 100;
+  }
 
-    const employeeRate = rateByEmployeeId.get(bucket.employeeId)!;
-    const { normalPercent, overtimePercent } = computeRatePercent(bucket.project);
-    const workOrderRefs = Array.from(bucket.workOrderNumbers).sort().join(', ');
+  addKmItemsToGroups(batch, weekGroupFor, taxRateId);
 
-    const items: Array<{ quantity: number; description: string; unit_price: { amount: number; tax: 'excluding' }; tax_rate_id: string }> = [];
-    if (normalHours > 0) {
-      items.push(
-        buildLineItem(normalHours, employeeRate.rateCents!, normalPercent, taxRateId, `${workOrderRefs} — ${bucket.projectName}: ${employeeRate.displayName}`),
-      );
-    }
-    if (overtimeHours > 0) {
-      items.push(
-        buildLineItem(
-          overtimeHours,
-          employeeRate.rateCents!,
-          overtimePercent,
-          taxRateId,
-          `${workOrderRefs} — ${bucket.projectName}: ${employeeRate.displayName} (overuren)`,
-        ),
-      );
-    }
-    return items;
-  }).concat(buildKmLineItems(batch, taxRateId));
+  return Array.from(weekGroups.values())
+    .filter((group) => group.normalHours > 0 || group.overtimeHours > 0 || group.kmItems.length > 0)
+    .sort((a, b) => a.weekKey.localeCompare(b.weekKey) || a.displayName.localeCompare(b.displayName))
+    .map((group) => {
+      const rate = rateByProjectId.get(group.projectId)!;
+      const { normalPercent, overtimePercent } = computeRatePercent(group.project);
+      const workOrderRefs = Array.from(group.workOrderNumbers).sort().join(', ');
+
+      const items: LineItem[] = [];
+      const normalHours = Math.round(group.normalHours * 100) / 100;
+      const overtimeHours = Math.round(group.overtimeHours * 100) / 100;
+      if (normalHours > 0) {
+        items.push(buildLineItem(normalHours, rate.rateCents!, normalPercent, taxRateId, `${workOrderRefs} — Werkuren`));
+      }
+      if (overtimeHours > 0) {
+        items.push(buildLineItem(overtimeHours, rate.rateCents!, overtimePercent, taxRateId, `${workOrderRefs} — Overuren`));
+      }
+      items.push(...group.kmItems);
+
+      return { section: buildSection(sectionTitle(group)), line_items: items };
+    });
+}
+
+/** "Week 32 - Peter Janssens" — klantvraag 10/9/2026: "een hoofding in het vet per week met daarin de week en de naam van de technieker." */
+function sectionTitle(group: WeekGroup): string {
+  const weekNumber = Number(group.weekKey.split('-W')[1]);
+  return `Week ${weekNumber} - ${group.displayName}`;
 }
 
 /**
- * Phase 12, deel D (sectie 5) — één aparte "Verplaatsingskosten"-regel per
- * werkbon met een bevroren `kmAmountCents` (WorkOrderSignatureService/
- * WeeklyApprovalService berekenden dit al op het moment van ondertekenen).
- * Bewust NIET meegeteld in de uren-buckets hierboven: km is een vast bedrag
- * per werkbon, geen toeslagpercentage op een uurtarief.
+ * Zie het uitgebreide commentaar bovenaan dit bestand over de (nog niet
+ * live-geverifieerde) vorm van Teamleader's `section`-veld. Bewust in één
+ * kleine functie geïsoleerd zodat dit later, indien nodig, op één plek
+ * aangepast kan worden (bv. naar een platte string) zonder de rest van de
+ * groeperingslogica te raken.
  */
-function buildKmLineItems(batch: DraftBatchRow, taxRateId: string) {
-  return batch.lines
-    .filter((line) => line.workOrder.kmAmountCents !== null && line.workOrder.kmAmountCents > 0)
-    .map((line) => ({
+function buildSection(title: string): { title: string } {
+  return { title };
+}
+
+/**
+ * Phase 12, deel D (sectie 5) — één "verplaatsingskosten"-regel per werkbon
+ * met een bevroren `kmAmountCents` (WorkOrderSignatureService/
+ * WeeklyApprovalService berekenden dit al op het moment van ondertekenen).
+ * Klantvraag 10/9/2026: deze regel hoort nu onder dezelfde weekhoofding als
+ * de uren van de technieker die de werkbon aanmaakte (`createdByEmployeeId`)
+ * — bij meerdere technici op één werkbon (sectie 8) is dat de persoon die de
+ * werkbon startte, een redelijke aanname voor "wie er reisde", zonder de
+ * verplaatsingskost te moeten opsplitsen over meerdere technici.
+ */
+function addKmItemsToGroups(
+  batch: DraftBatchRow,
+  weekGroupFor: (employeeId: string, displayName: string, project: DraftBatchLineRow['workOrder']['project'], weekKey: string) => WeekGroup,
+  taxRateId: string,
+): void {
+  for (const line of batch.lines) {
+    const workOrder = line.workOrder;
+    if (workOrder.kmAmountCents === null || workOrder.kmAmountCents <= 0) continue;
+
+    const ownEntries = workOrder.timeEntries.filter((entry) => entry.timeEntry.employee.id === workOrder.createdByEmployeeId);
+    const candidateEntries = ownEntries.length > 0 ? ownEntries : workOrder.timeEntries;
+    // Kan in de praktijk niet voorkomen (elke werkbon heeft minstens één
+    // tijdregistratie vóór ze factureerbaar wordt) — defensief overgeslagen
+    // i.p.v. een crash, business rule 9.
+    if (candidateEntries.length === 0) continue;
+
+    const earliest = candidateEntries.reduce((a, b) => (a.timeEntry.startedAt < b.timeEntry.startedAt ? a : b));
+    const weekKey = isoWeekKeyOf(earliest.timeEntry.startedAt);
+
+    const group = weekGroupFor(workOrder.createdByEmployeeId, workOrder.createdByEmployee.displayName, workOrder.project, weekKey);
+    group.workOrderNumbers.add(workOrder.workOrderNumber);
+    group.kmItems.push({
       quantity: 1,
-      description: `${line.workOrder.workOrderNumber} — ${line.workOrder.project.name}: verplaatsingskosten`,
-      unit_price: { amount: line.workOrder.kmAmountCents! / 100, tax: 'excluding' as const },
+      description: `${workOrder.workOrderNumber} — verplaatsingskosten`,
+      unit_price: { amount: workOrder.kmAmountCents / 100, tax: 'excluding' as const },
       tax_rate_id: taxRateId,
-    }));
+    });
+  }
 }
 
 /** Bouwt één Teamleader-factuurregel op basis van uren × basistarief × toeslagpercentage. */
-function buildLineItem(hours: number, baseRateCents: number, ratePercent: number, taxRateId: string, description: string) {
+function buildLineItem(hours: number, baseRateCents: number, ratePercent: number, taxRateId: string, description: string): LineItem {
   const amount = Math.round(baseRateCents * (ratePercent / 100)) / 100;
   return {
     quantity: hours,
