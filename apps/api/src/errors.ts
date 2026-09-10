@@ -422,3 +422,23 @@ export const HoursExportErrors = {
       `Deze export is enkel beschikbaar voor medewerkers van het type "${expectedLabel}".`,
     ),
 };
+
+/** Fase 13 (concept) — planningsmodule/dispatch (zie planning.service.ts). */
+export const PlanningErrors = {
+  employeeNotFound: () => new ApiError(404, 'PLANNING_EMPLOYEE_NOT_FOUND', 'Deze medewerker bestaat niet (meer).'),
+  projectNotFound: () =>
+    new ApiError(404, 'PLANNING_PROJECT_NOT_FOUND', 'Dit project bestaat niet (meer) of is gearchiveerd in Teamleader.'),
+  noWeekdaysSelected: () =>
+    new ApiError(400, 'PLANNING_NO_WEEKDAYS_SELECTED', 'Kies minstens één dag van de week voor deze herhaling.'),
+  invalidWeekday: () => new ApiError(400, 'PLANNING_INVALID_WEEKDAY', 'Ongeldige weekdag geselecteerd.'),
+  endBeforeStart: () =>
+    new ApiError(400, 'PLANNING_END_BEFORE_START', 'De einddatum van deze herhaling ligt vóór de startdatum.'),
+  /** MVP-veiligheidsgrens — zie MAX_SERIES_ROWS/MAX_SERIES_SPAN_DAYS in planning.service.ts. */
+  seriesTooLong: () =>
+    new ApiError(
+      400,
+      'PLANNING_SERIES_TOO_LONG',
+      'Deze periode is te lang om in één keer te plannen. Kies een kortere periode.',
+    ),
+  seriesNotFound: () => new ApiError(404, 'PLANNING_SERIES_NOT_FOUND', 'Deze planningsreeks bestaat niet (meer).'),
+};

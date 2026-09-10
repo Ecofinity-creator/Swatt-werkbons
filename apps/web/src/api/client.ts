@@ -64,6 +64,15 @@ import type {
   UpdateUserBody,
   UpdateUserResponseBody,
   WorkOrderResponseBody,
+  ListPlanningEmployeesResponseBody,
+  ListPlanningWeekResponseBody,
+  ListPlanningSeriesResponseBody,
+  ListMyPlanningResponseBody,
+  CreatePlanningAssignmentBody,
+  CreatePlanningAssignmentResponseBody,
+  ClearPlanningAssignmentBody,
+  CreatePlanningSeriesBody,
+  CreatePlanningSeriesResponseBody,
 } from '@swatt/shared-types';
 
 /**
@@ -576,4 +585,37 @@ export const projectsApi = {
         body: JSON.stringify(body),
       }),
   },
+};
+
+/**
+ * Fase 13 (concept) — planningsmodule/dispatch (klantvraag 10/9/2026, zie
+ * claude/phase13-planningsmodule-concept.md). `admin.*` is SUPERVISOR+ (het
+ * planningsbord), `mine()` is voor elke ingelogde gebruiker (zijn eigen
+ * aankomende planning).
+ */
+export const planningApi = {
+  admin: {
+    employees: () => request<ListPlanningEmployeesResponseBody>('/admin/planning/employees', { method: 'GET' }),
+    week: (weekStart: string) =>
+      request<ListPlanningWeekResponseBody>(`/admin/planning/week?weekStart=${encodeURIComponent(weekStart)}`, {
+        method: 'GET',
+      }),
+    series: () => request<ListPlanningSeriesResponseBody>('/admin/planning/series', { method: 'GET' }),
+    setAssignment: (body: CreatePlanningAssignmentBody) =>
+      request<CreatePlanningAssignmentResponseBody>('/admin/planning/assignments', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    clearAssignment: (body: ClearPlanningAssignmentBody) =>
+      request<void>('/admin/planning/assignments/clear', { method: 'POST', body: JSON.stringify(body) }),
+    createSeries: (body: CreatePlanningSeriesBody) =>
+      request<CreatePlanningSeriesResponseBody>('/admin/planning/series', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    stopSeries: (seriesId: string) =>
+      request<void>(`/admin/planning/series/${seriesId}/stop`, { method: 'POST' }),
+  },
+  mine: (days?: number) =>
+    request<ListMyPlanningResponseBody>(`/planning/mine${days ? `?days=${days}` : ''}`, { method: 'GET' }),
 };

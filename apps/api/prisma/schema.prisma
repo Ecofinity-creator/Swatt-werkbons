@@ -299,6 +299,11 @@ model User {
   /// Op vraag (3/9/2026) — zie AuditLog hieronder.
   auditLogs AuditLog[]
 
+  /// Fase 13 (concept) — supervisors/admins die ooit een planningsreeks of
+  /// -toewijzing hebben aangemaakt (zie PlanningSeries/PlanningAssignment).
+  createdPlanningSeries      PlanningSeries[]
+  createdPlanningAssignments PlanningAssignment[]
+
   @@index([role])
   @@map("user")
 }
@@ -380,6 +385,10 @@ model Employee {
 
   /// Phase 12, deel E — personeelsuitbetalingen van deze medewerker.
   payrollBatches PayrollBatch[]
+
+  /// Fase 13 (concept) — planningsmodule/dispatch (zie PlanningSeries/PlanningAssignment hieronder).
+  planningSeries      PlanningSeries[]
+  planningAssignments PlanningAssignment[]
 
   @@map("employee")
 }
@@ -645,10 +654,86 @@ model Project {
   /// Alle gesynchroniseerde milestones van dit project (Phase 9 — zie Milestone hieronder).
   milestones  Milestone[]
 
+  /// Fase 13 (concept) — planningsmodule/dispatch (zie PlanningSeries/PlanningAssignment hieronder).
+  planningSeries      PlanningSeries[]
+  planningAssignments PlanningAssignment[]
+
   @@index([customerId])
   @@index([isArchivedInTl])
   @@index([timeTrackingMilestoneId])
   @@map("project")
+}
+
+/// Fase 13 (concept) — planningsmodule/dispatch (klantvraag 10/9/2026, zie
+/// claude/phase13-planningsmodule-concept.md). Een supervisor/admin wijst
+/// hier per dag een project toe aan een medewerker/onderaannemer — een pure
+/// lokale planningshulp ("wie staat waar"), die geen enkele
+/// Teamleader-endpoint raakt (het project/de medewerker zelf komen al uit de
+/// bestaande sync). Een herhalende toewijzing genereert bij aanmaak meteen
+/// alle onderliggende dagrijen in `PlanningAssignment` (zie
+/// PlanningService.createSeries) — dat houdt "wat is het project van
+/// medewerker X vandaag" een simpele query i.p.v. het herhalingspatroon
+/// telkens te herinterpreteren, en laat toe dat één dag binnen een reeks
+/// achteraf apart gewijzigd/gewist wordt zonder de rest te raken (die dag
+/// verliest dan gewoon zijn `seriesId` — zie PlanningAssignment hieronder).
+model PlanningSeries {
+  id         String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId String @map("employee_id") @db.Uuid
+  projectId  String @map("project_id") @db.Uuid
+
+  /// 0=maandag .. 6=zondag, vrije selectie van 1 of meerdere dagen (klantvraag
+  /// 10/9/2026: niet enkel één vaste weekdag, maar bv. "hele week" of "elke dag").
+  weekdays  Int[]
+  startDate DateTime @map("start_date") @db.Date
+  endDate   DateTime @map("end_date") @db.Date
+  note      String?
+  /// `false` zodra de reeks gestopt is (zie PlanningService.stopSeries) — de
+  /// reeds gegenereerde, al-verstreken dagrijen blijven staan als historiek.
+  active Boolean @default(true)
+
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  employee    Employee             @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project     Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy   User                 @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  assignments PlanningAssignment[]
+
+  @@index([employeeId])
+  @@index([active, endDate])
+  @@map("planning_series")
+}
+
+/// Zie PlanningSeries hierboven. Business rule 11: een medewerker heeft per
+/// dag maximaal één planningstoewijzing (`@@unique([employeeId, date])`).
+/// `seriesId` is null voor een losse, eenmalige toewijzing; bij een
+/// reeks-gegenereerde dag wijst het naar de reeks, maar een latere
+/// individuele wijziging op die dag koppelt hem weer los (zie
+/// PlanningService.setAssignment) — een expliciete, individuele toewijzing
+/// wint altijd van reeks-lidmaatschap (business rule 16).
+model PlanningAssignment {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId String   @map("employee_id") @db.Uuid
+  projectId  String   @map("project_id") @db.Uuid
+  date       DateTime @db.Date
+  note       String?
+
+  seriesId String?         @map("series_id") @db.Uuid
+  series   PlanningSeries? @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  employee  Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@unique([employeeId, date])
+  @@index([projectId, date])
+  @@index([date])
+  @@index([seriesId])
+  @@map("planning_assignment")
 }
 
 // ============================================================

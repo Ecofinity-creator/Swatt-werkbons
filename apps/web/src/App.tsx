@@ -15,6 +15,7 @@ import { CompanySettingsPage } from './pages/admin/CompanySettingsPage';
 import { HoursExportPage } from './pages/admin/HoursExportPage';
 import { PayrollPage } from './pages/admin/PayrollPage';
 import { InvoicingPage } from './pages/admin/InvoicingPage';
+import { PlanningBoardPage } from './pages/admin/PlanningBoardPage';
 import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
 import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
 import { AuditLogPage } from './pages/admin/AuditLogPage';
@@ -138,6 +139,14 @@ export function App() {
         element={
           <RequireAuth minimumRole="SUPERVISOR">
             <SyncIssuesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/planning"
+        element={
+          <RequireAuth minimumRole="SUPERVISOR">
+            <PlanningBoardPage />
           </RequireAuth>
         }
       />

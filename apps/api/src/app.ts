@@ -14,6 +14,7 @@ import auditLogRoutes from './modules/audit-log/audit-log.routes';
 import hoursExportRoutes from './modules/hours-export/hours-export.routes';
 import invoiceBatchRoutes from './modules/invoice-batches/invoice-batch.routes';
 import payrollRoutes from './modules/payroll/payroll.routes';
+import planningRoutes from './modules/planning/planning.routes';
 import weeklyApprovalRoutes from './modules/work-orders/weekly-approval.routes';
 import projectRoutes from './modules/projects/project.routes';
 import teamleaderPlugin from './modules/teamleader/teamleader.plugin';
@@ -141,6 +142,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(weeklyApprovalRoutes);
   await app.register(hoursExportRoutes);
   await app.register(auditLogRoutes);
+  await app.register(planningRoutes);
 
   app.get('/health', async () => ({ status: 'ok' }));
 

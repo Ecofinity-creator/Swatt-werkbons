@@ -1177,3 +1177,95 @@ export interface MarkHoursExportedResponseBody {
   /** Aantal tijdregistraties dat effectief als geëxporteerd gemarkeerd werd. */
   markedCount: number;
 }
+
+/**
+ * Fase 13 (concept) — planningsmodule/dispatch (klantvraag 10/9/2026, zie
+ * claude/phase13-planningsmodule-concept.md). Een supervisor/admin wijst per
+ * dag een project toe aan een medewerker/onderaannemer — puur lokaal, raakt
+ * geen enkele Teamleader-endpoint. Zie PlanningService (backend) en
+ * PlanningBoardPage.tsx (backoffice-bord).
+ */
+export interface PlanningEmployeeSummary {
+  employeeId: string;
+  displayName: string;
+  employmentType: EmploymentType;
+}
+
+export interface PlanningAssignmentSummary {
+  id: string;
+  employeeId: string;
+  employeeDisplayName: string;
+  projectId: string;
+  projectName: string;
+  customerName: string;
+  /** JJJJ-MM-DD (date-only, geen tijdcomponent). */
+  date: string;
+  /** Null bij een losse, eenmalige toewijzing; anders het id van de PlanningSeries die deze dag genereerde. */
+  seriesId: string | null;
+}
+
+export interface PlanningSeriesSummary {
+  id: string;
+  employeeId: string;
+  employeeDisplayName: string;
+  projectId: string;
+  projectName: string;
+  customerName: string;
+  /** 0=maandag .. 6=zondag. */
+  weekdays: number[];
+  /** JJJJ-MM-DD. */
+  startDate: string;
+  /** JJJJ-MM-DD. */
+  endDate: string;
+  active: boolean;
+}
+
+export interface ListPlanningEmployeesResponseBody {
+  employees: PlanningEmployeeSummary[];
+}
+
+export interface ListPlanningWeekResponseBody {
+  assignments: PlanningAssignmentSummary[];
+}
+
+export interface ListPlanningSeriesResponseBody {
+  series: PlanningSeriesSummary[];
+}
+
+export interface ListMyPlanningResponseBody {
+  assignments: PlanningAssignmentSummary[];
+}
+
+export interface CreatePlanningAssignmentBody {
+  employeeId: string;
+  projectId: string;
+  /** JJJJ-MM-DD. */
+  date: string;
+}
+
+export interface CreatePlanningAssignmentResponseBody {
+  assignment: PlanningAssignmentSummary;
+}
+
+export interface ClearPlanningAssignmentBody {
+  employeeId: string;
+  /** JJJJ-MM-DD. */
+  date: string;
+}
+
+export interface CreatePlanningSeriesBody {
+  employeeId: string;
+  projectId: string;
+  /** 0=maandag .. 6=zondag, minstens 1 element. */
+  weekdays: number[];
+  /** JJJJ-MM-DD. */
+  startDate: string;
+  /** JJJJ-MM-DD. */
+  endDate: string;
+}
+
+export interface CreatePlanningSeriesResponseBody {
+  series: PlanningSeriesSummary;
+  /** Aantal dagrijen dat effectief gegenereerd werd (zie MAX_SERIES_ROWS in planning.service.ts). */
+  generatedCount: number;
+}
