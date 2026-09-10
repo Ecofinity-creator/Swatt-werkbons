@@ -1,14 +1,59 @@
+import type { ComponentType, SVGProps } from 'react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { roleAtLeast } from '@swatt/shared-types';
 import { publicBrandingApi } from '../api/client';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
 import { Logo } from '../components/Logo';
 import { ROLE_LABELS } from '../constants';
+import {
+  AlertTriangleIcon,
+  BuildingIcon,
+  CalendarIcon,
+  ChevronDownIcon,
+  ClipboardCheckIcon,
+  ClockIcon,
+  DocumentTextIcon,
+  DownloadIcon,
+  EuroIcon,
+  FolderIcon,
+  LinkIcon,
+  LogoutIcon,
+  MapPinIcon,
+  QrCodeIcon,
+  ShieldCheckIcon,
+  UsersIcon,
+  WalletIcon,
+} from '../components/icons';
+
+type IconComponent = ComponentType<SVGProps<SVGSVGElement>>;
+
+interface NavItem {
+  to: string;
+  label: string;
+  icon: IconComponent;
+}
 
 /**
- * Placeholder-Home voor Phase 1 — bewijst dat login/sessie/RBAC werken.
- * Vanaf Phase 3 (projects sync) komen hier de echte tabs
- * "Vandaag / Recent / Mijn projecten / Zoeken" (zie Stap 5.1 in het fundamentendocument).
+ * Klantvraag 10/9/2026 — "het menu wat ordenen ... logisch volgens workflow
+ * ingedeeld, met submenus, en logo's op de menuknoppen". De platte lijst van
+ * 13+ losse knoppen (één per rol simpelweg onderaan geplakt) is vervangen
+ * door groepen die de echte procesvolgorde uit de projectbrief volgen:
+ *
+ * 1) "Mijn werk" (sectie 1/6/7 — de dagelijkse technieker-flow: project
+ *    kiezen → tijd registreren → werkbon) — altijd zichtbaar, niet-inklapbaar
+ *    (het is letterlijk de primaire actie van de hele app, sectie 21).
+ * 2) "Planning & team" (sectie 4/5 — vóór de uitvoering: wie werkt waar).
+ * 3) "Werkbonnen beheren" (sectie 20/13/9 — controle/opvolging ná uitvoering).
+ * 4) "Facturatie & rapportage" (sectie 17/19/26 — de maandafsluiting).
+ * 5) "Instellingen" (sectie 3/7 — configuratie, geen dagelijkse workflow-stap).
+ *
+ * Elke groep ná "Mijn werk" is een inklapbaar "submenu" (`MenuSection`
+ * hieronder) — standaard open (niets extra verstopt vóór een eerste klik,
+ * zelfde "zo weinig mogelijk klikken"-principe als de rest van de app), maar
+ * wel samenklapbaar zodra een gebruiker het scherm wil opruimen. Een sectie
+ * met nul zichtbare items voor de huidige rol wordt niet gerenderd — een
+ * werknemer ziet dus enkel "Mijn werk" + "Instellingen".
  */
 export function HomePage() {
   const { user, logout } = useAuth();
@@ -28,6 +73,43 @@ export function HomePage() {
   }, []);
 
   if (!user) return null;
+
+  const isSupervisorPlus = roleAtLeast(user.role, 'SUPERVISOR');
+  const isAdmin = roleAtLeast(user.role, 'ADMIN');
+
+  const planningItems: NavItem[] = isSupervisorPlus
+    ? [
+        { to: '/backoffice/planning', label: 'Planningsbord', icon: CalendarIcon },
+        { to: '/backoffice/medewerkers', label: 'Medewerkers', icon: UsersIcon },
+        { to: '/backoffice/projecten', label: 'Projecten', icon: FolderIcon },
+      ]
+    : [];
+
+  const workOrderManagementItems: NavItem[] = isSupervisorPlus
+    ? [
+        { to: '/backoffice/werkbonnen', label: 'Werkbonnenoverzicht', icon: ClipboardCheckIcon },
+        { to: '/backoffice/sync-fouten', label: 'Synchronisatiefouten', icon: AlertTriangleIcon },
+      ]
+    : [];
+
+  const invoicingItems: NavItem[] = isAdmin
+    ? [
+        { to: '/backoffice/facturatie', label: 'Facturatie', icon: EuroIcon },
+        { to: '/backoffice/uren-export', label: 'Uren-export', icon: DownloadIcon },
+        { to: '/backoffice/personeelsuitbetaling', label: 'Personeelsuitbetaling', icon: WalletIcon },
+        { to: '/backoffice/auditlog', label: 'Auditlog', icon: ShieldCheckIcon },
+      ]
+    : [];
+
+  const settingsItems: NavItem[] = [
+    { to: '/app-toegang', label: 'App op smartphone (QR-code)', icon: QrCodeIcon },
+    ...(isAdmin
+      ? [
+          { to: '/instellingen/teamleader', label: 'Teamleader-integratie', icon: LinkIcon },
+          { to: '/instellingen/bedrijf', label: 'Bedrijfsgegevens', icon: BuildingIcon },
+        ]
+      : []),
+  ];
 
   const handleLogout = async () => {
     setIsLoggingOut(true);
@@ -61,138 +143,43 @@ export function HomePage() {
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <p className="text-sm text-neutral-400">Ingelogd als</p>
-        <p className="mt-1 text-lg font-semibold">
-          {user.employee?.displayName ?? user.email}
-        </p>
+        <p className="mt-1 text-lg font-semibold">{user.employee?.displayName ?? user.email}</p>
         <p className="text-sm text-swatt-gold">{ROLE_LABELS[user.role] ?? user.role}</p>
       </section>
 
-      <Link
-        to="/mijn-projecten"
-        className="mt-4 rounded-lg bg-swatt-gold px-4 py-4 text-center text-base font-semibold text-swatt-black active:opacity-80"
-      >
-        Mijn projecten
-      </Link>
-
-      <Link
-        to="/mijn-werkbonnen"
-        className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-      >
-        Mijn werkbonnen
-      </Link>
-
-      <Link
-        to="/algemene-tijdregistratie"
-        className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-      >
-        Algemene tijdregistratie
-      </Link>
-
-      <Link
-        to="/app-toegang"
-        className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-      >
-        App op smartphone (QR-code)
-      </Link>
-
-      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
+      {/* "Mijn werk" — de primaire, dagelijkse flow (sectie 21): altijd
+          zichtbaar en niet-inklapbaar, met "Mijn projecten" als grote
+          gouden hoofdknop (het startpunt van élke werkdag). */}
+      <nav aria-label="Mijn werk" className="mt-6 flex flex-col gap-3">
         <Link
-          to="/backoffice/medewerkers"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+          to="/mijn-projecten"
+          className="flex items-center gap-3 rounded-lg bg-swatt-gold px-4 py-4 text-base font-semibold text-swatt-black active:opacity-80"
         >
-          Medewerkers
+          <MapPinIcon className="h-5 w-5 shrink-0" />
+          Mijn projecten
         </Link>
-      )}
-
-      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
         <Link
-          to="/backoffice/projecten"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+          to="/mijn-werkbonnen"
+          className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-800"
         >
-          Projecten
+          <DocumentTextIcon className="h-5 w-5 shrink-0 text-swatt-gold" />
+          Mijn werkbonnen
         </Link>
-      )}
-
-      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
         <Link
-          to="/backoffice/planning"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
+          to="/algemene-tijdregistratie"
+          className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-800"
         >
-          Planningsbord
+          <ClockIcon className="h-5 w-5 shrink-0 text-swatt-gold" />
+          Algemene tijdregistratie
         </Link>
-      )}
+      </nav>
 
-      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
-        <Link
-          to="/backoffice/sync-fouten"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Synchronisatiefouten
-        </Link>
-      )}
-
-      {(user.role === 'SUPERVISOR' || user.role === 'ADMIN') && (
-        <Link
-          to="/backoffice/werkbonnen"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Werkbonnenoverzicht
-        </Link>
-      )}
-
-      {user.role === 'ADMIN' && (
-        <Link
-          to="/backoffice/facturatie"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Facturatie
-        </Link>
-      )}
-
-      {user.role === 'ADMIN' && (
-        <Link
-          to="/backoffice/uren-export"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Uren-export
-        </Link>
-      )}
-
-      {user.role === 'ADMIN' && (
-        <Link
-          to="/backoffice/personeelsuitbetaling"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Personeelsuitbetaling
-        </Link>
-      )}
-
-      {user.role === 'ADMIN' && (
-        <Link
-          to="/backoffice/auditlog"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Auditlog
-        </Link>
-      )}
-
-      {user.role === 'ADMIN' && (
-        <Link
-          to="/instellingen/teamleader"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Teamleader-integratie
-        </Link>
-      )}
-
-      {user.role === 'ADMIN' && (
-        <Link
-          to="/instellingen/bedrijf"
-          className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-center text-base font-semibold text-neutral-200 active:bg-neutral-800"
-        >
-          Bedrijfsgegevens
-        </Link>
-      )}
+      <div className="mt-6 flex flex-col gap-3">
+        <MenuSection title="Planning &amp; team" icon={CalendarIcon} items={planningItems} />
+        <MenuSection title="Werkbonnen beheren" icon={ClipboardCheckIcon} items={workOrderManagementItems} />
+        <MenuSection title="Facturatie &amp; rapportage" icon={EuroIcon} items={invoicingItems} />
+        <MenuSection title="Instellingen" icon={BuildingIcon} items={settingsItems} />
+      </div>
 
       {logoutError && (
         <p role="alert" className="mt-6 rounded-lg bg-red-950 px-4 py-3 text-sm text-red-300">
@@ -204,10 +191,54 @@ export function HomePage() {
         type="button"
         onClick={() => void handleLogout()}
         disabled={isLoggingOut}
-        className="mt-auto rounded-lg border border-neutral-700 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-900 disabled:opacity-50"
+        className="mt-6 flex items-center justify-center gap-2 rounded-lg border border-neutral-700 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-900 disabled:opacity-50"
       >
+        <LogoutIcon className="h-5 w-5 shrink-0" />
         {isLoggingOut ? 'Bezig met uitloggen...' : 'Uitloggen'}
       </button>
     </main>
+  );
+}
+
+/**
+ * Eén inklapbaar menu-"submenu" — een koptekst (icoon + titel + aantal
+ * items + pijltje) die de eronderliggende links toont/verbergt. Rendert
+ * niets wanneer `items` leeg is (de huidige rol heeft geen toegang tot deze
+ * groep) — zo blijft bv. een werknemer nooit een lege "Facturatie"-kop zien.
+ * Standaard open: geen enkele bestaande knop wordt achter een extra klik
+ * verstopt, dit is puur een opruim-optie voor wie het scherm compacter wil.
+ */
+function MenuSection({ title, icon: Icon, items }: { title: string; icon: IconComponent; items: NavItem[] }) {
+  const [isOpen, setIsOpen] = useState(true);
+  if (items.length === 0) return null;
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900">
+      <button
+        type="button"
+        onClick={() => setIsOpen((previous) => !previous)}
+        aria-expanded={isOpen}
+        className="flex w-full items-center gap-3 px-4 py-3.5 text-left active:bg-neutral-800"
+      >
+        <Icon className="h-5 w-5 shrink-0 text-swatt-gold" />
+        <span className="flex-1 text-sm font-semibold uppercase tracking-wide text-neutral-200">{title}</span>
+        <span className="text-xs text-neutral-500">{items.length}</span>
+        <ChevronDownIcon className={`h-4 w-4 shrink-0 text-neutral-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </button>
+      {isOpen && (
+        <div className="flex flex-col divide-y divide-neutral-800 border-t border-neutral-800">
+          {items.map((item) => (
+            <Link
+              key={item.to}
+              to={item.to}
+              className="flex items-center gap-3 px-4 py-3.5 text-sm font-medium text-neutral-200 active:bg-neutral-800"
+            >
+              <item.icon className="h-5 w-5 shrink-0 text-neutral-400" />
+              {item.label}
+            </Link>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
