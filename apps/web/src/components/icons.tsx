@@ -220,7 +220,23 @@ export function LogoutIcon(props: IconProps) {
   );
 }
 
-/** Uitklap-pijltje voor de submenu-koppen. */
+/** Uitklap-pijltje (bv. voor een select of accordeon elders in de app). */
 export function ChevronDownIcon(props: IconProps) {
   return base(props, <path d="M6 9l6 6 6-6" />);
+}
+
+/** Wijst naar een submenu — rechts op de grote menuknoppen op HomePage. */
+export function ChevronRightIcon(props: IconProps) {
+  return base(props, <path d="M9 6l6 6-6 6" />);
+}
+
+/** Terug-knop op SubmenuPage. */
+export function ArrowLeftIcon(props: IconProps) {
+  return base(
+    props,
+    <>
+      <path d="M19 12H5" />
+      <path d="M11 6l-6 6 6 6" />
+    </>,
+  );
 }

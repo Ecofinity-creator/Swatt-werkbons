@@ -1,59 +1,27 @@
-import type { ComponentType, SVGProps } from 'react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { roleAtLeast } from '@swatt/shared-types';
 import { publicBrandingApi } from '../api/client';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
+import { ChevronRightIcon, ClockIcon, DocumentTextIcon, LogoutIcon, MapPinIcon } from '../components/icons';
 import { Logo } from '../components/Logo';
 import { ROLE_LABELS } from '../constants';
-import {
-  AlertTriangleIcon,
-  BuildingIcon,
-  CalendarIcon,
-  ChevronDownIcon,
-  ClipboardCheckIcon,
-  ClockIcon,
-  DocumentTextIcon,
-  DownloadIcon,
-  EuroIcon,
-  FolderIcon,
-  LinkIcon,
-  LogoutIcon,
-  MapPinIcon,
-  QrCodeIcon,
-  ShieldCheckIcon,
-  UsersIcon,
-  WalletIcon,
-} from '../components/icons';
-
-type IconComponent = ComponentType<SVGProps<SVGSVGElement>>;
-
-interface NavItem {
-  to: string;
-  label: string;
-  icon: IconComponent;
-}
+import { getMenuSections } from '../navigation/menuSections';
 
 /**
- * Klantvraag 10/9/2026 — "het menu wat ordenen ... logisch volgens workflow
- * ingedeeld, met submenus, en logo's op de menuknoppen". De platte lijst van
- * 13+ losse knoppen (één per rol simpelweg onderaan geplakt) is vervangen
- * door groepen die de echte procesvolgorde uit de projectbrief volgen:
+ * Klantvraag 10/9/2026 (herzien): "grote knoppen met de tekst en icoon
+ * erop, als je erop klikt krijg je dan het submenu te zien" — de eerdere
+ * inklapbare accordeon-groepen zijn vervangen door een echt tweetrapsmenu.
  *
- * 1) "Mijn werk" (sectie 1/6/7 — de dagelijkse technieker-flow: project
- *    kiezen → tijd registreren → werkbon) — altijd zichtbaar, niet-inklapbaar
- *    (het is letterlijk de primaire actie van de hele app, sectie 21).
- * 2) "Planning & team" (sectie 4/5 — vóór de uitvoering: wie werkt waar).
- * 3) "Werkbonnen beheren" (sectie 20/13/9 — controle/opvolging ná uitvoering).
- * 4) "Facturatie & rapportage" (sectie 17/19/26 — de maandafsluiting).
- * 5) "Instellingen" (sectie 3/7 — configuratie, geen dagelijkse workflow-stap).
+ * "Mijn werk" (project kiezen -> tijd registreren -> werkbon, sectie 21 van
+ * de projectbrief) blijft de primaire, dagelijkse flow: drie grote knoppen
+ * rechtstreeks op dit scherm, niet achter een submenu-klik verstopt.
  *
- * Elke groep ná "Mijn werk" is een inklapbaar "submenu" (`MenuSection`
- * hieronder) — standaard open (niets extra verstopt vóór een eerste klik,
- * zelfde "zo weinig mogelijk klikken"-principe als de rest van de app), maar
- * wel samenklapbaar zodra een gebruiker het scherm wil opruimen. Een sectie
- * met nul zichtbare items voor de huidige rol wordt niet gerenderd — een
- * werknemer ziet dus enkel "Mijn werk" + "Instellingen".
+ * Alle andere groepen ("Planning & team", "Werkbonnen beheren", "Facturatie
+ * & rapportage", "Instellingen") staan hier zelf ook als één grote knop
+ * (icoon + titel + aantal items) — een klik navigeert naar
+ * `/menu/:sectionId` (SubmenuPage.tsx) waar de onderliggende items als
+ * grote knoppen staan. De indeling zelf staat in `navigation/menuSections.ts`,
+ * gedeeld tussen dit scherm en SubmenuPage.
  */
 export function HomePage() {
   const { user, logout } = useAuth();
@@ -74,42 +42,7 @@ export function HomePage() {
 
   if (!user) return null;
 
-  const isSupervisorPlus = roleAtLeast(user.role, 'SUPERVISOR');
-  const isAdmin = roleAtLeast(user.role, 'ADMIN');
-
-  const planningItems: NavItem[] = isSupervisorPlus
-    ? [
-        { to: '/backoffice/planning', label: 'Planningsbord', icon: CalendarIcon },
-        { to: '/backoffice/medewerkers', label: 'Medewerkers', icon: UsersIcon },
-        { to: '/backoffice/projecten', label: 'Projecten', icon: FolderIcon },
-      ]
-    : [];
-
-  const workOrderManagementItems: NavItem[] = isSupervisorPlus
-    ? [
-        { to: '/backoffice/werkbonnen', label: 'Werkbonnenoverzicht', icon: ClipboardCheckIcon },
-        { to: '/backoffice/sync-fouten', label: 'Synchronisatiefouten', icon: AlertTriangleIcon },
-      ]
-    : [];
-
-  const invoicingItems: NavItem[] = isAdmin
-    ? [
-        { to: '/backoffice/facturatie', label: 'Facturatie', icon: EuroIcon },
-        { to: '/backoffice/uren-export', label: 'Uren-export', icon: DownloadIcon },
-        { to: '/backoffice/personeelsuitbetaling', label: 'Personeelsuitbetaling', icon: WalletIcon },
-        { to: '/backoffice/auditlog', label: 'Auditlog', icon: ShieldCheckIcon },
-      ]
-    : [];
-
-  const settingsItems: NavItem[] = [
-    { to: '/app-toegang', label: 'App op smartphone (QR-code)', icon: QrCodeIcon },
-    ...(isAdmin
-      ? [
-          { to: '/instellingen/teamleader', label: 'Teamleader-integratie', icon: LinkIcon },
-          { to: '/instellingen/bedrijf', label: 'Bedrijfsgegevens', icon: BuildingIcon },
-        ]
-      : []),
-  ];
+  const menuSections = getMenuSections(user.role);
 
   const handleLogout = async () => {
     setIsLoggingOut(true);
@@ -147,9 +80,9 @@ export function HomePage() {
         <p className="text-sm text-swatt-gold">{ROLE_LABELS[user.role] ?? user.role}</p>
       </section>
 
-      {/* "Mijn werk" — de primaire, dagelijkse flow (sectie 21): altijd
-          zichtbaar en niet-inklapbaar, met "Mijn projecten" als grote
-          gouden hoofdknop (het startpunt van élke werkdag). */}
+      {/* "Mijn werk" — de primaire, dagelijkse flow (sectie 21): drie grote
+          knoppen, met "Mijn projecten" als gouden hoofdknop (het startpunt
+          van élke werkdag). */}
       <nav aria-label="Mijn werk" className="mt-6 flex flex-col gap-3">
         <Link
           to="/mijn-projecten"
@@ -174,12 +107,25 @@ export function HomePage() {
         </Link>
       </nav>
 
-      <div className="mt-6 flex flex-col gap-3">
-        <MenuSection title="Planning &amp; team" icon={CalendarIcon} items={planningItems} />
-        <MenuSection title="Werkbonnen beheren" icon={ClipboardCheckIcon} items={workOrderManagementItems} />
-        <MenuSection title="Facturatie &amp; rapportage" icon={EuroIcon} items={invoicingItems} />
-        <MenuSection title="Instellingen" icon={BuildingIcon} items={settingsItems} />
-      </div>
+      {/* Overige groepen — elk als één grote knop die naar het submenu
+          navigeert. Een groep zonder items voor deze rol zit hier al niet
+          meer in (gefilterd in getMenuSections). */}
+      {menuSections.length > 0 && (
+        <nav aria-label="Meer" className="mt-6 flex flex-col gap-3">
+          {menuSections.map((section) => (
+            <Link
+              key={section.id}
+              to={`/menu/${section.id}`}
+              className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-800"
+            >
+              <section.icon className="h-5 w-5 shrink-0 text-swatt-gold" />
+              <span className="flex-1 text-left">{section.title}</span>
+              <span className="text-xs font-normal text-neutral-500">{section.items.length}</span>
+              <ChevronRightIcon className="h-4 w-4 shrink-0 text-neutral-500" />
+            </Link>
+          ))}
+        </nav>
+      )}
 
       {logoutError && (
         <p role="alert" className="mt-6 rounded-lg bg-red-950 px-4 py-3 text-sm text-red-300">
@@ -197,48 +143,5 @@ export function HomePage() {
         {isLoggingOut ? 'Bezig met uitloggen...' : 'Uitloggen'}
       </button>
     </main>
-  );
-}
-
-/**
- * Eén inklapbaar menu-"submenu" — een koptekst (icoon + titel + aantal
- * items + pijltje) die de eronderliggende links toont/verbergt. Rendert
- * niets wanneer `items` leeg is (de huidige rol heeft geen toegang tot deze
- * groep) — zo blijft bv. een werknemer nooit een lege "Facturatie"-kop zien.
- * Standaard open: geen enkele bestaande knop wordt achter een extra klik
- * verstopt, dit is puur een opruim-optie voor wie het scherm compacter wil.
- */
-function MenuSection({ title, icon: Icon, items }: { title: string; icon: IconComponent; items: NavItem[] }) {
-  const [isOpen, setIsOpen] = useState(true);
-  if (items.length === 0) return null;
-
-  return (
-    <section className="overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900">
-      <button
-        type="button"
-        onClick={() => setIsOpen((previous) => !previous)}
-        aria-expanded={isOpen}
-        className="flex w-full items-center gap-3 px-4 py-3.5 text-left active:bg-neutral-800"
-      >
-        <Icon className="h-5 w-5 shrink-0 text-swatt-gold" />
-        <span className="flex-1 text-sm font-semibold uppercase tracking-wide text-neutral-200">{title}</span>
-        <span className="text-xs text-neutral-500">{items.length}</span>
-        <ChevronDownIcon className={`h-4 w-4 shrink-0 text-neutral-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-      </button>
-      {isOpen && (
-        <div className="flex flex-col divide-y divide-neutral-800 border-t border-neutral-800">
-          {items.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              className="flex items-center gap-3 px-4 py-3.5 text-sm font-medium text-neutral-200 active:bg-neutral-800"
-            >
-              <item.icon className="h-5 w-5 shrink-0 text-neutral-400" />
-              {item.label}
-            </Link>
-          ))}
-        </div>
-      )}
-    </section>
   );
 }

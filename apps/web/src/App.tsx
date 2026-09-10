@@ -9,6 +9,7 @@ import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { ProjectTimerPage } from './pages/ProjectTimerPage';
 import { SetPasswordPage } from './pages/SetPasswordPage';
+import { SubmenuPage } from './pages/SubmenuPage';
 import { TeamleaderSettingsPage } from './pages/TeamleaderSettingsPage';
 import { WorkOrderReviewPage } from './pages/WorkOrderReviewPage';
 import { CompanySettingsPage } from './pages/admin/CompanySettingsPage';
@@ -59,6 +60,14 @@ export function App() {
         element={
           <RequireAuth>
             <HomePage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/menu/:sectionId"
+        element={
+          <RequireAuth>
+            <SubmenuPage />
           </RequireAuth>
         }
       />
