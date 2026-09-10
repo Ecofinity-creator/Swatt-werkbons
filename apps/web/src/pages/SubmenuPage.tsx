@@ -23,33 +23,36 @@ export function SubmenuPage() {
   if (!section) return <Navigate to="/" replace />;
 
   return (
-    <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
-      <div className="mb-8 flex items-center gap-3">
-        <Link
-          to="/"
-          aria-label="Terug naar menu"
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-neutral-800 bg-neutral-900 active:bg-neutral-800"
-        >
-          <ArrowLeftIcon className="h-5 w-5 text-neutral-300" />
-        </Link>
-        <div className="flex items-center gap-2">
-          <section.icon className="h-5 w-5 shrink-0 text-swatt-gold" />
-          <h1 className="text-lg font-semibold">{section.title}</h1>
-        </div>
-      </div>
-
-      <nav aria-label={section.title} className="flex flex-col gap-3">
-        {section.items.map((item) => (
+    <main className="flex min-h-screen flex-col items-center bg-swatt-black px-6 py-10 text-white">
+      {/* Zelfde gecentreerde `max-w-sm`-kolom als HomePage.tsx/LoginPage.tsx. */}
+      <div className="w-full max-w-sm">
+        <div className="mb-8 flex items-center gap-3">
           <Link
-            key={item.to}
-            to={item.to}
-            className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-800"
+            to="/"
+            aria-label="Terug naar menu"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-neutral-800 bg-neutral-900 active:bg-neutral-800"
           >
-            <item.icon className="h-5 w-5 shrink-0 text-swatt-gold" />
-            {item.label}
+            <ArrowLeftIcon className="h-5 w-5 text-neutral-300" />
           </Link>
-        ))}
-      </nav>
+          <div className="flex items-center gap-2">
+            <section.icon className="h-5 w-5 shrink-0 text-swatt-gold" />
+            <h1 className="text-lg font-semibold">{section.title}</h1>
+          </div>
+        </div>
+
+        <nav aria-label={section.title} className="flex flex-col gap-3">
+          {section.items.map((item) => (
+            <Link
+              key={item.to}
+              to={item.to}
+              className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-800"
+            >
+              <item.icon className="h-5 w-5 shrink-0 text-swatt-gold" />
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+      </div>
     </main>
   );
 }
