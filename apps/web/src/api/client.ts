@@ -43,6 +43,8 @@ import type {
   UpdateProjectOvertimeSettingsBody,
   UpdateProjectOvertimeSettingsResponseBody,
   UpdateProjectSigningModeResponseBody,
+  UpdateProjectKmSettingsBody,
+  UpdateProjectKmSettingsResponseBody,
   SignWorkOrderBody,
   PendingWeekResponseBody,
   SignWeekBody,
@@ -553,6 +555,14 @@ export const projectsApi = {
       request<UpdateProjectSigningModeResponseBody>(`/admin/projects/${projectId}/signing-mode`, {
         method: 'POST',
         body: JSON.stringify({ signingMode }),
+      }),
+  },
+  /** Klantvraag 10/9/2026 — verplaatsingsvergoeding per project. ADMIN-only. */
+  kmSettings: {
+    update: (projectId: string, body: UpdateProjectKmSettingsBody) =>
+      request<UpdateProjectKmSettingsResponseBody>(`/admin/projects/${projectId}/km-settings`, {
+        method: 'POST',
+        body: JSON.stringify(body),
       }),
   },
 };

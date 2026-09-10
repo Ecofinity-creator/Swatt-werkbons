@@ -60,3 +60,17 @@ export const updateProjectOvertimeSettingsBodySchema = z
 export const updateProjectSigningModeBodySchema = z.object({
   signingMode: z.enum(['PER_WORK_ORDER', 'WEEKLY']),
 });
+
+/**
+ * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project: vaste prijs
+ * voor de eerste `kmFlatFeeThresholdKm` (heen-en-terug), daarboven
+ * `kmRateAboveCentsPerKm` per extra km. `kmFlatFeeCents: null` schakelt de
+ * km-vergoeding voor dit project uit (zelfde uit-stand-conventie als het
+ * vroegere CompanySettings.kmRateCents). Bovengrenzen zijn ruime typefout-
+ * bescherming, geen echte zakelijke limieten.
+ */
+export const updateProjectKmSettingsBodySchema = z.object({
+  kmFlatFeeThresholdKm: z.number().int().min(1).max(1000),
+  kmFlatFeeCents: z.number().int().min(0).max(1_000_000).nullable(),
+  kmRateAboveCentsPerKm: z.number().int().min(0).max(100_000),
+});

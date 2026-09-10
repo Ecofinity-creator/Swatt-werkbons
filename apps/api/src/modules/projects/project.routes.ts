@@ -8,6 +8,7 @@ import type {
   SelectProjectMilestoneResponseBody,
   UpdateProjectInvoicingEnabledBody,
   UpdateProjectInvoicingEnabledResponseBody,
+  UpdateProjectKmSettingsResponseBody,
   UpdateProjectOvertimeSettingsResponseBody,
   UpdateProjectSigningModeResponseBody,
 } from '@swatt/shared-types';
@@ -22,6 +23,7 @@ import {
   projectIdParamsSchema,
   selectProjectMilestoneBodySchema,
   updateProjectInvoicingEnabledBodySchema,
+  updateProjectKmSettingsBodySchema,
   updateProjectOvertimeSettingsBodySchema,
   updateProjectSigningModeBodySchema,
 } from './project.schemas';
@@ -298,6 +300,36 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
       return { signingMode: project.signingMode };
     },
   );
+
+  /**
+   * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project: "prijs voor
+   * de eerste x km is een vaste prijs, daarboven een tarief per km." Bewust
+   * ADMIN-only, zelfde reden als invoicing-enabled/overtime-settings
+   * hierboven: rechtstreekse financiële impact op de klantfactuur.
+   */
+  app.post(
+    '/admin/projects/:id/km-settings',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request): Promise<UpdateProjectKmSettingsResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const body = updateProjectKmSettingsBodySchema.parse(request.body);
+      await assertProjectExists(app, params.id);
+
+      const project = await app.prisma.project.update({
+        where: { id: params.id },
+        data: {
+          kmFlatFeeThresholdKm: body.kmFlatFeeThresholdKm,
+          kmFlatFeeCents: body.kmFlatFeeCents,
+          kmRateAboveCentsPerKm: body.kmRateAboveCentsPerKm,
+        },
+      });
+      return {
+        kmFlatFeeThresholdKm: project.kmFlatFeeThresholdKm,
+        kmFlatFeeCents: project.kmFlatFeeCents,
+        kmRateAboveCentsPerKm: project.kmRateAboveCentsPerKm,
+      };
+    },
+  );
 }
 
 function toMilestoneSummary(milestone: {
@@ -356,6 +388,10 @@ function toProjectSummary(project: {
   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter, `null` zolang nog niet berekend. */
   kmDistanceOneWayMeters: number | null;
+  /** Klantvraag 10/9/2026 — per-project prijsinstellingen, zie schema.prisma. */
+  kmFlatFeeThresholdKm: number;
+  kmFlatFeeCents: number | null;
+  kmRateAboveCentsPerKm: number;
   customer: { name: string };
 }): ProjectSummary {
   return {
@@ -381,5 +417,8 @@ function toProjectSummary(project: {
     nightWorkRatePercent: project.nightWorkRatePercent,
     signingMode: project.signingMode,
     kmDistanceOneWayMeters: project.kmDistanceOneWayMeters,
+    kmFlatFeeThresholdKm: project.kmFlatFeeThresholdKm,
+    kmFlatFeeCents: project.kmFlatFeeCents,
+    kmRateAboveCentsPerKm: project.kmRateAboveCentsPerKm,
   };
 }

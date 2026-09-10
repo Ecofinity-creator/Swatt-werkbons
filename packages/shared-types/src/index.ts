@@ -206,6 +206,16 @@ export interface ProjectSummary {
   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter tussen het Swatt-adres en dit project, `null` zolang nog niet berekend. */
   kmDistanceOneWayMeters: number | null;
+  /**
+   * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project: vaste prijs
+   * voor de eerste `kmFlatFeeThresholdKm` (heen-en-terug), daarboven
+   * `kmRateAboveCentsPerKm` per extra km. `kmFlatFeeCents` = `null` betekent
+   * km-vergoeding niet actief voor dit project (vervangt het vroegere,
+   * bedrijfsbrede CompanySettings.kmRateCents — @deprecated).
+   */
+  kmFlatFeeThresholdKm: number;
+  kmFlatFeeCents: number | null;
+  kmRateAboveCentsPerKm: number;
 }
 
 export interface ListProjectsResponseBody {
@@ -257,6 +267,23 @@ export interface UpdateProjectSigningModeResponseBody {
   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
 }
 
+/**
+ * Body/response van POST /admin/projects/:id/km-settings (klantvraag
+ * 10/9/2026 — ADMIN-only, financiële impact). `kmFlatFeeCents: null` schakelt
+ * de km-vergoeding voor dit project uit.
+ */
+export interface UpdateProjectKmSettingsBody {
+  kmFlatFeeThresholdKm: number;
+  kmFlatFeeCents: number | null;
+  kmRateAboveCentsPerKm: number;
+}
+
+export interface UpdateProjectKmSettingsResponseBody {
+  kmFlatFeeThresholdKm: number;
+  kmFlatFeeCents: number | null;
+  kmRateAboveCentsPerKm: number;
+}
+
 /** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */
 /** Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt" — één rij per tijdregistratie, over ALLE openstaande werkbonnen van de week heen (niet enkel die van de medewerker die de onderteken-actie start, zie WeeklyApprovalService.listPendingForEmployee()). */
 export interface PendingWeekEntrySummary {
@@ -294,6 +321,8 @@ export interface SignWeekBody {
   confirmed: true;
   signatureDataBase64: string;
   mimeType: 'image/png';
+  /** Klantvraag 10/9/2026 — zie de toelichting bij SignWorkOrderBody.kmDistanceOneWayMetersOverrideKm hieronder, hier toegepast op de hele week-batch. */
+  kmDistanceOneWayMetersOverrideKm?: number | null;
 }
 
 export interface WeeklyApprovalSummary {
@@ -517,6 +546,14 @@ export interface SignWorkOrderBody {
   confirmed: true;
   mimeType: 'image/png';
   signatureDataBase64: string;
+  /**
+   * Klantvraag 10/9/2026: "verplaatsing manueel kunnen ingeven, want sommige
+   * medewerkers vertrekken van thuis." Rijafstand ÉÉN richting, in km — de
+   * medewerker ziet standaard de automatisch berekende afstand vooringevuld
+   * (WorkOrderSummary.kmDistanceOneWayMeters), maar mag die overschrijven.
+   * `null`/afwezig = geen correctie, gebruik de projectberekening.
+   */
+  kmDistanceOneWayMetersOverrideKm?: number | null;
 }
 
 /**
@@ -586,22 +623,38 @@ export interface WorkOrderSummary {
   /**
    * Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
    * getoond aan de klant" — vóór ondertekening is dit een LEVENDE preview
-   * (herberekend op basis van Project.kmDistanceOneWayMeters +
-   * CompanySettings.kmRateCents), na ondertekening het effectief bevroren
-   * bedrag (WorkOrder.kmAmountCents) — beide via dezelfde formule
-   * (computeKmAmountCents()), dus geen waargenomen "sprong" voor de klant.
-   * `null` wanneer er geen km-vergoeding van toepassing is.
+   * (herberekend op basis van Project.kmDistanceOneWayMeters + de
+   * per-project prijsinstellingen, klantvraag 10/9/2026), na ondertekening
+   * het effectief bevroren bedrag (WorkOrder.kmAmountCents) — beide via
+   * dezelfde formule (computeKmAmountCents()), dus geen waargenomen "sprong"
+   * voor de klant. `null` wanneer er geen km-vergoeding van toepassing is.
    */
   kmAmountCents: number | null;
+  /**
+   * Klantvraag 10/9/2026 — de effectieve rijafstand (één richting, meter)
+   * achter kmAmountCents hierboven: vóór ondertekenen de levende, automatisch
+   * berekende projectafstand (vooringevuld en overschrijfbaar op het
+   * ondertekenscherm, zie SignWorkOrderBody.kmDistanceOneWayMetersOverrideKm),
+   * ná ondertekenen de bevroren effectieve afstand. `null` zolang nog niet
+   * gekend.
+   */
+  kmDistanceOneWayMeters: number | null;
   /**
    * Op vraag (7/9/2026, diagnose): de ruwe invoerwaarden voor de km-
    * berekening hierboven, apart blootgesteld zodat een Admin/Supervisor op
    * het scherm zelf kan zien WAAROM kmAmountCents eventueel `null` is
-   * (geen afstand gekend? geen tarief ingesteld?) zonder in de Render-logs
-   * te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
+   * (geen afstand gekend? geen vaste prijs ingesteld?) zonder in de Render-
+   * logs te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
    * kmAmountCents zelf leeg is — zie WorkOrderReviewPage.tsx.
    */
-  kmDebug: { projectTeamleaderId: string; customerName: string; projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
+  kmDebug: {
+    projectTeamleaderId: string;
+    customerName: string;
+    projectKmDistanceOneWayMeters: number | null;
+    projectKmFlatFeeThresholdKm: number;
+    projectKmFlatFeeCents: number | null;
+    projectKmRateAboveCentsPerKm: number;
+  };
   createdByEmployeeDisplayName: string;
   createdAt: string;
   timeEntries: WorkOrderTimeEntrySummary[];

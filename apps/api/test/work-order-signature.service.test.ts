@@ -1,6 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
-import type { CompanySettingsService } from '../src/modules/company-settings/company-settings.service';
 import type { StorageService } from '../src/modules/storage/storage.service';
 import { WorkOrderSignatureService } from '../src/modules/work-orders/work-order-signature.service';
 
@@ -25,8 +24,17 @@ interface FakeWorkOrder {
   description: string | null;
   timeEntries: Array<{ timeEntryId: string; timeEntry: { employeeId: string } }>;
   photos: Array<{ id: string }>;
-  /** Phase 12, deel D — nodig voor kmAmountCents; default null (geen km-vergoeding) in de meeste tests. */
-  project: { kmDistanceOneWayMeters: number | null };
+  /**
+   * Klantvraag 10/9/2026 — per-project prijsinstellingen i.p.v. het vroegere
+   * bedrijfsbrede CompanySettings.kmRateCents. Default: km-vergoeding niet
+   * actief (kmFlatFeeCents: null), drempel/tarief op de projectdefaults.
+   */
+  project: {
+    kmDistanceOneWayMeters: number | null;
+    kmFlatFeeThresholdKm: number;
+    kmFlatFeeCents: number | null;
+    kmRateAboveCentsPerKm: number;
+  };
 }
 
 function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
@@ -36,14 +44,22 @@ function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
 
   const workOrder = {
     findUnique: vi.fn(async ({ where }: { where: { id: string } }) => workOrders.get(where.id) ?? null),
-    update: vi.fn(async ({ where, data }: { where: { id: string }; data: { status: string; kmAmountCents?: number | null } }) => {
-      const existing = workOrders.get(where.id);
-      if (existing) {
-        existing.status = data.status;
-        Object.assign(existing, { kmAmountCents: data.kmAmountCents });
-      }
-      return existing ?? null;
-    }),
+    update: vi.fn(
+      async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: { status: string; kmAmountCents?: number | null; kmDistanceOneWayMeters?: number | null };
+      }) => {
+        const existing = workOrders.get(where.id);
+        if (existing) {
+          existing.status = data.status;
+          Object.assign(existing, { kmAmountCents: data.kmAmountCents, kmDistanceOneWayMeters: data.kmDistanceOneWayMeters });
+        }
+        return existing ?? null;
+      },
+    ),
   };
 
   const workOrderSignature = {
@@ -85,11 +101,6 @@ function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
   };
 }
 
-/** Phase 12, deel D — default: km-vergoeding niet actief (geen tarief ingesteld). Override het tarief per test waar nodig. */
-function createFakeCompanySettingsService(kmRateCents: number | null = null): CompanySettingsService {
-  return { get: vi.fn(async () => ({ kmRateCents })) } as unknown as CompanySettingsService;
-}
-
 function createFakeStorage(): StorageService {
   const saved = new Map<string, { data: Buffer; mimeType: string }>();
   let keyCounter = 0;
@@ -124,18 +135,19 @@ function draftWorkOrder(overrides: Partial<FakeWorkOrder> = {}): FakeWorkOrder {
     description: 'Onderhoud uitgevoerd.',
     timeEntries: [{ timeEntryId: 'entry-1', timeEntry: { employeeId: EMPLOYEE.id } }],
     photos: [{ id: 'photo-1' }],
-    project: { kmDistanceOneWayMeters: null },
+    project: { kmDistanceOneWayMeters: null, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: null, kmRateAboveCentsPerKm: 80 },
     ...overrides,
   };
 }
 
-function signInput() {
+function signInput(overrides: Partial<{ kmDistanceOneWayMetersOverride: number | null }> = {}) {
   return {
     signerName: 'Jan Janssens',
     signerFunction: 'Zaakvoerder',
     requestedByUserId: REQUESTED_BY_USER_ID,
     ipAddress: '203.0.113.5',
     image: { data: Buffer.from('signature-png-bytes'), mimeType: 'image/png' },
+    ...overrides,
   };
 }
 
@@ -143,7 +155,7 @@ describe('WorkOrderSignatureService', () => {
   it('sign() maakt de handtekening aan en zet de werkbon op SIGNED', async () => {
     const { prisma, workOrders } = createFakePrisma({ workOrders: [draftWorkOrder()] });
     const storage = createFakeStorage();
-    const service = new WorkOrderSignatureService(prisma, storage, createFakeCompanySettingsService());
+    const service = new WorkOrderSignatureService(prisma, storage);
 
     const signature = await service.sign(EMPLOYEE.id, 'wo-1', signInput());
 
@@ -157,8 +169,8 @@ describe('WorkOrderSignatureService', () => {
   it('sign() berekent dezelfde contentHash voor eenzelfde werkbon-inhoud, ongeacht tijdstip', async () => {
     const { prisma: prismaA } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-a' })] });
     const { prisma: prismaB } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-b' })] });
-    const serviceA = new WorkOrderSignatureService(prismaA, createFakeStorage(), createFakeCompanySettingsService());
-    const serviceB = new WorkOrderSignatureService(prismaB, createFakeStorage(), createFakeCompanySettingsService());
+    const serviceA = new WorkOrderSignatureService(prismaA, createFakeStorage());
+    const serviceB = new WorkOrderSignatureService(prismaB, createFakeStorage());
 
     const sigA = await serviceA.sign(EMPLOYEE.id, 'wo-a', signInput());
     const sigB = await serviceB.sign(EMPLOYEE.id, 'wo-b', signInput());
@@ -168,7 +180,7 @@ describe('WorkOrderSignatureService', () => {
 
   it('sign() weigert met WORK_ORDER_NOT_FOUND voor een onbestaande werkbon', async () => {
     const { prisma } = createFakePrisma();
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
 
     await expect(service.sign(EMPLOYEE.id, 'onbestaand', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_NOT_FOUND',
@@ -177,7 +189,7 @@ describe('WorkOrderSignatureService', () => {
 
   it('sign() weigert met WORK_ORDER_NOT_FOUND voor een werknemer die geen deelnemer is (anti-enumeratie)', async () => {
     const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder()] });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
 
     await expect(service.sign(OTHER_EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_NOT_FOUND',
@@ -186,7 +198,7 @@ describe('WorkOrderSignatureService', () => {
 
   it('sign() weigert met WORK_ORDER_ALREADY_SIGNED zodra de werkbon al niet meer DRAFT is', async () => {
     const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder({ status: 'SIGNED' })] });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
 
     await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_ALREADY_SIGNED',
@@ -206,10 +218,64 @@ describe('WorkOrderSignatureService', () => {
         clientVersion: Prisma.prismaVersion.client,
       });
     });
-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
 
     await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
       code: 'WORK_ORDER_ALREADY_SIGNED',
     });
+  });
+
+  // Klantvraag 10/9/2026 — getrapte km-prijs per project + manuele correctie
+  // door de werknemer. De formule zelf (computeKmAmountCents) heeft haar
+  // eigen, uitgebreidere tests in distance.service.test.ts — hier enkel de
+  // integratie: bevriest sign() effectief het juiste bedrag én de juiste
+  // afstand op de werkbon, met de override die voorrang krijgt op de
+  // automatische projectafstand?
+  it('sign() bevriest kmAmountCents en kmDistanceOneWayMeters op basis van de automatische projectafstand wanneer er geen correctie is', async () => {
+    const { prisma, workOrders } = createFakePrisma({
+      workOrders: [
+        draftWorkOrder({
+          project: { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
+        }),
+      ],
+    });
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+
+    await service.sign(EMPLOYEE.id, 'wo-1', signInput());
+
+    // 40km enkel = 80km heen-terug > drempel 65km → 3500 + 15 * 80 = 4700 cent.
+    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 4700, kmDistanceOneWayMeters: 40_000 });
+  });
+
+  it('sign() gebruikt de manuele correctie i.p.v. de automatische projectafstand wanneer opgegeven', async () => {
+    const { prisma, workOrders } = createFakePrisma({
+      workOrders: [
+        draftWorkOrder({
+          project: { kmDistanceOneWayMeters: 5_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
+        }),
+      ],
+    });
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+
+    // Medewerker vertrok deze keer van thuis: 50km enkel i.p.v. de automatisch berekende 5km.
+    await service.sign(EMPLOYEE.id, 'wo-1', signInput({ kmDistanceOneWayMetersOverride: 50_000 }));
+
+    // 50km enkel = 100km heen-terug > drempel 65km → 3500 + 35 * 80 = 6300 cent.
+    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 6300, kmDistanceOneWayMeters: 50_000 });
+  });
+
+  it('sign() laat kmAmountCents leeg wanneer de km-vergoeding niet actief is voor dit project (kmFlatFeeCents null), ondanks een gekende afstand', async () => {
+    const { prisma, workOrders } = createFakePrisma({
+      workOrders: [
+        draftWorkOrder({
+          project: { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: null, kmRateAboveCentsPerKm: 80 },
+        }),
+      ],
+    });
+    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+
+    await service.sign(EMPLOYEE.id, 'wo-1', signInput());
+
+    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: null, kmDistanceOneWayMeters: 40_000 });
   });
 });

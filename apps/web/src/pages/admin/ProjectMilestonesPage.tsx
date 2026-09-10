@@ -103,6 +103,7 @@ export function ProjectMilestonesPage() {
               <InvoicingPanel key={`invoicing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <OvertimeSettingsPanel key={`overtime-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <SigningModePanel key={`signing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+              <KmPricingPanel key={`km-pricing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <KmDistancePanel key={`km-${selectedProject.id}`} project={selectedProject} />
               <MilestonePanel key={selectedProject.id} project={selectedProject} />
             </>
@@ -564,6 +565,147 @@ function MilestonePanel({ project }: { project: ProjectSummary }) {
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+/**
+ * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project i.p.v. één vlak
+ * tarief voor het hele bedrijf (zie CompanySettingsPage.tsx, veld nu
+ * verwijderd): vaste prijs voor de eerste `kmFlatFeeThresholdKm` km
+ * heen-en-terug, daarboven `kmRateAboveCentsPerKm` per extra km. Lege vaste
+ * prijs = km-vergoeding uitgeschakeld voor dit project (zelfde uit-stand-
+ * conventie als vroeger bij CompanySettings.kmRateCents). Bewust ADMIN-only,
+ * zelfde reden als InvoicingPanel/OvertimeSettingsPanel hierboven: rechtstreekse
+ * financiële impact op de klantfactuur.
+ */
+function KmPricingPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
+  const { user: currentUser } = useAuth();
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const [thresholdInput, setThresholdInput] = useState(String(project.kmFlatFeeThresholdKm));
+  const [flatFeeInput, setFlatFeeInput] = useState(
+    project.kmFlatFeeCents !== null ? (project.kmFlatFeeCents / 100).toFixed(2) : '',
+  );
+  const [rateAboveInput, setRateAboveInput] = useState((project.kmRateAboveCentsPerKm / 100).toFixed(2));
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setThresholdInput(String(project.kmFlatFeeThresholdKm));
+    setFlatFeeInput(project.kmFlatFeeCents !== null ? (project.kmFlatFeeCents / 100).toFixed(2) : '');
+    setRateAboveInput((project.kmRateAboveCentsPerKm / 100).toFixed(2));
+  }, [project]);
+
+  async function save() {
+    const threshold = Number(thresholdInput.trim());
+    if (!Number.isInteger(threshold) || threshold < 1) {
+      setError('Vul voor "Eerste x km" een geheel getal in van minstens 1.');
+      return;
+    }
+
+    const trimmedFlatFee = flatFeeInput.trim().replace(',', '.');
+    let kmFlatFeeCents: number | null = null;
+    if (trimmedFlatFee !== '') {
+      const parsedFlatFee = Number(trimmedFlatFee);
+      if (Number.isNaN(parsedFlatFee) || parsedFlatFee < 0) {
+        setError('Vul voor "Vaste prijs" een geldig bedrag in (bv. 35,00), of laat leeg om de km-vergoeding voor dit project uit te schakelen.');
+        return;
+      }
+      kmFlatFeeCents = Math.round(parsedFlatFee * 100);
+    }
+
+    const trimmedRateAbove = rateAboveInput.trim().replace(',', '.');
+    const parsedRateAbove = Number(trimmedRateAbove);
+    if (Number.isNaN(parsedRateAbove) || parsedRateAbove < 0) {
+      setError('Vul voor "Tarief per km daarboven" een geldig bedrag in (bv. 0,80).');
+      return;
+    }
+    const kmRateAboveCentsPerKm = Math.round(parsedRateAbove * 100);
+
+    setIsSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await projectsApi.kmSettings.update(project.id, {
+        kmFlatFeeThresholdKm: threshold,
+        kmFlatFeeCents,
+        kmRateAboveCentsPerKm,
+      });
+      setSaved(true);
+      onUpdated();
+    } catch (err) {
+      setError(err instanceof ApiRequestError ? err.message : 'Opslaan van de kilometervergoeding is mislukt.');
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  if (!isAdmin) return null;
+
+  return (
+    <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Kilometervergoeding</h2>
+      <p className="mb-4 text-sm text-neutral-500">
+        {project.customerName} — {project.name}
+      </p>
+
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+      {saved && <p className="mb-3 text-sm text-emerald-700">Kilometervergoeding opgeslagen.</p>}
+
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="text-sm text-neutral-600">
+          Eerste
+          <div className="mt-1 flex items-center gap-1">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={thresholdInput}
+              onChange={(e) => setThresholdInput(e.target.value)}
+              onBlur={() => void save()}
+              disabled={isSaving}
+              className="w-16 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+            />
+            <span>km h/t</span>
+          </div>
+        </label>
+        <label className="text-sm text-neutral-600">
+          Vaste prijs
+          <div className="mt-1 flex items-center gap-1">
+            <span>€</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={flatFeeInput}
+              onChange={(e) => setFlatFeeInput(e.target.value)}
+              onBlur={() => void save()}
+              placeholder="Uitgeschakeld"
+              disabled={isSaving}
+              className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+            />
+          </div>
+        </label>
+        <label className="text-sm text-neutral-600">
+          Tarief per km daarboven
+          <div className="mt-1 flex items-center gap-1">
+            <span>€</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={rateAboveInput}
+              onChange={(e) => setRateAboveInput(e.target.value)}
+              onBlur={() => void save()}
+              disabled={isSaving}
+              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+            />
+            <span>/km</span>
+          </div>
+        </label>
+      </div>
+      <p className="mt-3 text-xs text-neutral-500">
+        Leeg bij "Vaste prijs" = km-vergoeding uitgeschakeld voor dit project. Drempel geldt op de heen-en-
+        terug-afstand (zie Kilometerafstand hieronder).
+      </p>
     </section>
   );
 }

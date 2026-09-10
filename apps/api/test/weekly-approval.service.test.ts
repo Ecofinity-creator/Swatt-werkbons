@@ -1,6 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CompanySettingsService } from '../src/modules/company-settings/company-settings.service';
 import { WeeklyApprovalService } from '../src/modules/work-orders/weekly-approval.service';
 import type { StorageService } from '../src/modules/storage/storage.service';
 
@@ -22,11 +21,6 @@ interface FakeWorkOrder {
   teamleaderUploadStatus: string;
 }
 
-/** Phase 12, deel D — default: km-vergoeding niet actief (geen tarief ingesteld). */
-function createFakeCompanySettingsService(kmRateCents: number | null = null): CompanySettingsService {
-  return { get: async () => ({ kmRateCents }) } as unknown as CompanySettingsService;
-}
-
 function createFakeStorage(): StorageService {
   let counter = 0;
   return {
@@ -37,7 +31,26 @@ function createFakeStorage(): StorageService {
   } as unknown as StorageService;
 }
 
-function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmDistanceOneWayMeters: number | null = null) {
+/**
+ * Klantvraag 10/9/2026 — per-project prijsinstellingen i.p.v. het vroegere
+ * bedrijfsbrede CompanySettings.kmRateCents. Default: km-vergoeding niet
+ * actief (kmFlatFeeCents: null), drempel/tarief op de projectdefaults.
+ */
+interface FakeProjectKmSettings {
+  kmDistanceOneWayMeters: number | null;
+  kmFlatFeeThresholdKm: number;
+  kmFlatFeeCents: number | null;
+  kmRateAboveCentsPerKm: number;
+}
+
+const DEFAULT_PROJECT_KM_SETTINGS: FakeProjectKmSettings = {
+  kmDistanceOneWayMeters: null,
+  kmFlatFeeThresholdKm: 65,
+  kmFlatFeeCents: null,
+  kmRateAboveCentsPerKm: 80,
+};
+
+function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmSettings: FakeProjectKmSettings = DEFAULT_PROJECT_KM_SETTINGS) {
   const workOrders = new Map(initialWorkOrders.map((wo) => [wo.id, { ...wo }]));
   const weeklyApprovals = new Map<string, { id: string; projectId: string; weekStartDate: Date; weekEndDate: Date; status: string; signerName: string | null; signerFunction: string | null; confirmedAt: Date | null; ipAddress: string | null; requestedByUserId: string | null }>();
   const signatures = new Map<string, { id: string; workOrderId: string }>();
@@ -46,7 +59,7 @@ function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmDistanceO
 
   const prisma = {
     project: {
-      findUnique: async () => ({ kmDistanceOneWayMeters: projectKmDistanceOneWayMeters }),
+      findUnique: async () => ({ ...projectKmSettings }),
     },
     workOrder: {
       findMany: async ({ where }: { where: { projectId: string; status: string; createdAt: { gte: Date; lte: Date } } }) =>
@@ -195,7 +208,7 @@ describe('WeeklyApprovalService.signCurrentWeek()', () => {
       workOrder({ id: 'wo-3', createdByEmployeeId: PETER, createdAt: NEXT_MONDAY }), // volgende week — mag niet meegenomen worden
       workOrder({ id: 'wo-4', createdByEmployeeId: PETER, createdAt: MONDAY, status: 'SIGNED' }), // al ondertekend — mag niet nogmaals
     ]);
-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
 
     // Fixeer "vandaag" op de referentieweek via een lichte monkeypatch: signCurrentWeek() gebruikt Date.now() intern via weekBoundsOf(new Date()).
     vi.setSystemTime(MONDAY);
@@ -213,10 +226,45 @@ describe('WeeklyApprovalService.signCurrentWeek()', () => {
 
   it('weigert wanneer er geen enkele openstaande werkbon is die week', async () => {
     const { prisma } = createFakePrisma([workOrder({ id: 'wo-1', status: 'SIGNED' })]);
-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
 
     vi.setSystemTime(MONDAY);
     await expect(service.signCurrentWeek(PROJECT_ID, SIGN_INPUT)).rejects.toMatchObject({ code: 'WEEKLY_APPROVAL_NO_PENDING_WORK_ORDERS' });
+  });
+
+  // Klantvraag 10/9/2026 — getrapte km-prijs per project + manuele correctie,
+  // hier toegepast op de hele weekbatch (elke werkbon in de batch deelt
+  // dezelfde projectafstand/correctie, zie signCurrentWeek()).
+  it('bevriest kmAmountCents en kmDistanceOneWayMeters op elke werkbon in de batch, op basis van de automatische projectafstand', async () => {
+    const { prisma, workOrders } = createFakePrisma(
+      [
+        workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
+        workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
+      ],
+      { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
+    );
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+
+    vi.setSystemTime(MONDAY);
+    await service.signCurrentWeek(PROJECT_ID, SIGN_INPUT);
+
+    // 40km enkel = 80km heen-terug > drempel 65km → 3500 + 15 * 80 = 4700 cent, voor élke werkbon in de batch.
+    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 4700, kmDistanceOneWayMeters: 40_000 });
+    expect(workOrders.get('wo-2')).toMatchObject({ kmAmountCents: 4700, kmDistanceOneWayMeters: 40_000 });
+  });
+
+  it('gebruikt de manuele correctie i.p.v. de automatische projectafstand wanneer opgegeven', async () => {
+    const { prisma, workOrders } = createFakePrisma(
+      [workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY })],
+      { kmDistanceOneWayMeters: 5_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
+    );
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+
+    vi.setSystemTime(MONDAY);
+    await service.signCurrentWeek(PROJECT_ID, { ...SIGN_INPUT, kmDistanceOneWayMetersOverride: 50_000 });
+
+    // 50km enkel = 100km heen-terug > drempel 65km → 3500 + 35 * 80 = 6300 cent.
+    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 6300, kmDistanceOneWayMeters: 50_000 });
   });
 });
 
@@ -226,7 +274,7 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
       workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
       workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
     ]);
-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
 
     vi.setSystemTime(MONDAY);
     const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
@@ -238,7 +286,7 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
       workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
       workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
     ]);
-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
 
     vi.setSystemTime(MONDAY);
     const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
@@ -250,12 +298,39 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
     expect(result.entries.every((e) => e.endedAt > e.startedAt)).toBe(true);
     expect(result.entries.map((e) => e.workOrderNumber)).toEqual(expect.arrayContaining(['WB-wo-1', 'WB-wo-2']));
   });
+
+  // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
+  // getoond aan de klant" — km-vergoeding PER werkbon (niet het totaal), nu op
+  // basis van de getrapte per-project-prijs (klantvraag 10/9/2026).
+  it('kmAmountCentsPerWorkOrder gebruikt de getrapte per-project-prijs op de automatische projectafstand', async () => {
+    const { prisma } = createFakePrisma(
+      [workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY })],
+      { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
+    );
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+
+    vi.setSystemTime(MONDAY);
+    const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
+
+    expect(result.kmAmountCentsPerWorkOrder).toBe(4700);
+    expect(result.pendingWorkOrderCount).toBe(1);
+  });
+
+  it('kmAmountCentsPerWorkOrder is null wanneer de km-vergoeding niet actief is voor dit project', async () => {
+    const { prisma } = createFakePrisma([workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY })]);
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+
+    vi.setSystemTime(MONDAY);
+    const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
+
+    expect(result.kmAmountCentsPerWorkOrder).toBeNull();
+  });
 });
 
 describe('WeeklyApprovalService.reopen()', () => {
   it('zet ondertekende werkbonnen terug naar DRAFT en wist de handtekening + PDF/sync-status', async () => {
     const { prisma, workOrders } = createFakePrisma([workOrder({ id: 'wo-1', createdAt: MONDAY })]);
-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
 
     vi.setSystemTime(MONDAY);
     const result = await service.signCurrentWeek(PROJECT_ID, SIGN_INPUT);
@@ -272,7 +347,7 @@ describe('WeeklyApprovalService.reopen()', () => {
 
   it('weigert een week te heropenen die nog niet ondertekend is', async () => {
     const { prisma } = createFakePrisma([workOrder({ id: 'wo-1' })]);
-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
+    const service = new WeeklyApprovalService(prisma, createFakeStorage());
     await expect(service.reopen('onbestaand-id')).rejects.toMatchObject({ code: 'WEEKLY_APPROVAL_NOT_FOUND' });
   });
 });

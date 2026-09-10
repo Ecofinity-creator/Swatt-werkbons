@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { WeeklyApprovalErrors } from '../../errors';
-import type { CompanySettingsService } from '../company-settings/company-settings.service';
 import { computeKmAmountCents } from '../distance/distance.service';
 import type { StorageService } from '../storage/storage.service';
 
@@ -24,6 +23,14 @@ export interface SignWeekInput {
   requestedByUserId: string;
   ipAddress: string | null;
   image: { data: Buffer; mimeType: string };
+  /**
+   * Klantvraag 10/9/2026 — zelfde manuele km-correctie als bij een
+   * individuele `/work-orders/:id/sign` (zie SignWorkOrderInput), hier
+   * toegepast op de hele week-batch: alle openstaande werkbonnen van deze
+   * week op dit project delen toch al dezelfde projectafstand (zie
+   * signCurrentWeek() hieronder), dus één correctie volstaat.
+   */
+  kmDistanceOneWayMetersOverride?: number | null;
 }
 
 /** Eén tijdregistratie-rij ter review vóór de klant tekent — zie listPendingForEmployee(). */
@@ -72,7 +79,6 @@ export class WeeklyApprovalService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly storage: StorageService,
-    private readonly companySettingsService: CompanySettingsService,
   ) {}
 
   /** Maandag 00:00 t.e.m. zondag 23:59:59 van de week waarin `reference` valt (default: vandaag). */
@@ -136,9 +142,15 @@ export class WeeklyApprovalService {
     // ook 2 keer aangerekend (2 aparte interventies/verplaatsingen). Hier
     // tonen we daarom het bedrag PER werkbon, plus het aantal — de
     // frontend kan zelf vermenigvuldigen voor een totaal.
-    const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { kmDistanceOneWayMeters: true } });
-    const settings = await this.companySettingsService.get();
-    const kmAmountCentsPerWorkOrder = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, settings.kmRateCents);
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { kmDistanceOneWayMeters: true, kmFlatFeeThresholdKm: true, kmFlatFeeCents: true, kmRateAboveCentsPerKm: true },
+    });
+    const kmAmountCentsPerWorkOrder = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, {
+      flatFeeThresholdKm: project?.kmFlatFeeThresholdKm ?? 65,
+      flatFeeCents: project?.kmFlatFeeCents ?? null,
+      rateAboveCentsPerKm: project?.kmRateAboveCentsPerKm ?? 80,
+    });
 
     return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries, kmAmountCentsPerWorkOrder, pendingWorkOrderCount: rows.length };
   }
@@ -156,16 +168,22 @@ export class WeeklyApprovalService {
       throw WeeklyApprovalErrors.noPendingWorkOrders();
     }
 
-    // Phase 12, deel D (sectie 5) — alle werkbonnen in deze batch horen bij
-    // hetzelfde project, dus delen ze dezelfde km-afstand; één berekening
-    // volstaat i.p.v. per werkbon. Bevroren op het moment van ondertekenen,
-    // net als bij de individuele `/work-orders/:id/sign` (zie
-    // work-order-signature.service.ts).
-    const [project, companySettings] = await Promise.all([
-      this.prisma.project.findUnique({ where: { id: projectId }, select: { kmDistanceOneWayMeters: true } }),
-      this.companySettingsService.get(),
-    ]);
-    const kmAmountCents = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, companySettings.kmRateCents);
+    // Phase 12, deel D (sectie 5), uitgebreid op klantvraag 10/9/2026 — alle
+    // werkbonnen in deze batch horen bij hetzelfde project, dus delen ze
+    // dezelfde km-afstand (eventueel manueel gecorrigeerd via
+    // input.kmDistanceOneWayMetersOverride); één berekening volstaat i.p.v.
+    // per werkbon. Bevroren op het moment van ondertekenen, net als bij de
+    // individuele `/work-orders/:id/sign` (zie work-order-signature.service.ts).
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { kmDistanceOneWayMeters: true, kmFlatFeeThresholdKm: true, kmFlatFeeCents: true, kmRateAboveCentsPerKm: true },
+    });
+    const effectiveKmDistanceOneWayMeters = input.kmDistanceOneWayMetersOverride ?? project?.kmDistanceOneWayMeters ?? null;
+    const kmAmountCents = computeKmAmountCents(effectiveKmDistanceOneWayMeters, {
+      flatFeeThresholdKm: project?.kmFlatFeeThresholdKm ?? 65,
+      flatFeeCents: project?.kmFlatFeeCents ?? null,
+      rateAboveCentsPerKm: project?.kmRateAboveCentsPerKm ?? 80,
+    });
 
     const signatureFileKey = await this.storage.save(input.image.data, input.image.mimeType);
     const confirmedAt = new Date();
@@ -210,7 +228,7 @@ export class WeeklyApprovalService {
         ),
         this.prisma.workOrder.updateMany({
           where: { id: { in: pending.map((row) => row.id) } },
-          data: { status: 'SIGNED', kmAmountCents },
+          data: { status: 'SIGNED', kmAmountCents, kmDistanceOneWayMeters: effectiveKmDistanceOneWayMeters },
         }),
       ]);
 
@@ -277,10 +295,11 @@ export class WeeklyApprovalService {
           teamleaderUploadedAt: null,
           teamleaderUploadError: null,
           // Phase 12, deel D — een heropende werkbon bevriest een nieuw
-          // kmAmountCents pas bij de volgende ondertekening (zelfde reden als
-          // de PDF/sync-velden hierboven: het oude bevroren bedrag hoort niet
-          // meer bij een geldige handtekening).
+          // kmAmountCents/kmDistanceOneWayMeters pas bij de volgende
+          // ondertekening (zelfde reden als de PDF/sync-velden hierboven: de
+          // oude bevroren waarden horen niet meer bij een geldige handtekening).
           kmAmountCents: null,
+          kmDistanceOneWayMeters: null,
           // Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.reminderSentAt
           // in schema.prisma: een hernieuwde DRAFT-periode verdient een nieuwe
           // herinnering als ze opnieuw te lang blijft liggen.

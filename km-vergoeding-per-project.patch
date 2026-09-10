@@ -1,0 +1,1570 @@
+diff --git a/apps/api/prisma/migrations/20260910130000_km_flat_fee_pricing/migration.sql b/apps/api/prisma/migrations/20260910130000_km_flat_fee_pricing/migration.sql
+new file mode 100644
+index 0000000..4741842
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260910130000_km_flat_fee_pricing/migration.sql
+@@ -0,0 +1,15 @@
++-- Klantvraag 10/9/2026: verplaatsingsvergoeding per project i.p.v. één vlak
++-- bedrijfstarief (CompanySettings.kmRateCents, vanaf nu @deprecated, kolom
++-- blijft bestaan) — "prijs voor de eerste x km is een vaste prijs, daarboven
++-- een tarief per km." Defaults (65 km / € 35,00 / € 0,80 per km) gelden voor
++-- zowel bestaande als nieuwe projecten; per project aanpasbaar via de nieuwe
++-- "Kilometervergoeding"-instelling (ADMIN-only).
++ALTER TABLE "project" ADD COLUMN "km_flat_fee_threshold_km" INTEGER NOT NULL DEFAULT 65;
++ALTER TABLE "project" ADD COLUMN "km_flat_fee_cents" INTEGER DEFAULT 3500;
++ALTER TABLE "project" ADD COLUMN "km_rate_above_cents_per_km" INTEGER NOT NULL DEFAULT 80;
++
++-- "Verplaatsing manueel kunnen ingeven, want sommige medewerkers vertrekken
++-- van thuis" — bevroren effectieve rijafstand (één richting, meter) bij
++-- ondertekenen, zelfde bevriesmoment als km_amount_cents hierboven. Nullable,
++-- geen default: `null` tot een werkbon effectief ondertekend wordt.
++ALTER TABLE "work_order" ADD COLUMN "km_distance_one_way_meters" INTEGER;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 0422dd0..fab7668 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -590,6 +590,25 @@ model Project {
+   /// externe API-calls).
+   kmDistanceOneWayMeters Int? @map("km_distance_one_way_meters")
+ 
++  /// Klantvraag 10/9/2026 — verplaatsingsvergoeding per project, i.p.v. één
++  /// vlak tarief voor het hele bedrijf (CompanySettings.kmRateCents, sinds
++  /// deze wijziging @deprecated): "prijs voor de eerste x km is een vaste
++  /// prijs, daarboven een tarief per km." Drempel geldt op de HEEN-EN-TERUG-
++  /// afstand (dus het totaal van kmDistanceOneWayMeters × 2, of de manuele
++  /// correctie op WorkOrder — zie computeKmAmountCents() in
++  /// distance.service.ts). Default 65 km, aanpasbaar per project (Projecten
++  /// → Kilometervergoeding, ADMIN-only).
++  kmFlatFeeThresholdKm Int @default(65) @map("km_flat_fee_threshold_km")
++
++  /// Vaste prijs (eurocent) voor de eerste kmFlatFeeThresholdKm heen-en-terug.
++  /// `null` = km-vergoeding niet actief voor dit project (zelfde uit-stand-
++  /// conventie als het vroegere CompanySettings.kmRateCents). Default € 35,00
++  /// bij een nieuw project, per project aanpasbaar of leeg te maken.
++  kmFlatFeeCents Int? @default(3500) @map("km_flat_fee_cents")
++
++  /// Tarief (eurocent) per km BOVEN de drempel. Default € 0,80/km.
++  kmRateAboveCentsPerKm Int @default(80) @map("km_rate_above_cents_per_km")
++
+   weeklyApprovals WeeklyApproval[]
+ 
+   lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
+@@ -884,6 +903,20 @@ model WorkOrder {
+   /// (geen tarief ingesteld, of afstand nog onbekend).
+   kmAmountCents Int? @map("km_amount_cents")
+ 
++  /// Klantvraag 10/9/2026 — "verplaatsing manueel kunnen ingeven, want
++  /// sommige medewerkers vertrekken van thuis i.p.v. het bedrijfsadres."
++  /// Effectieve rijafstand ÉÉN richting (meter) waarmee kmAmountCents
++  /// hierboven berekend is: ofwel automatisch overgenomen van
++  /// Project.kmDistanceOneWayMeters, ofwel een manuele correctie door de
++  /// medewerker vóór ondertekenen (WorkOrderSignatureService.sign()/
++  /// WeeklyApprovalService.signCurrentWeek()). Bevroren bij ondertekenen,
++  /// net als kmAmountCents — hierdoor toont de PDF nooit meer een andere
++  /// afstand dan waarmee effectief gerekend is, ook niet als het
++  /// projectadres nadien wijzigt (vóór deze wijziging las de PDF steeds de
++  /// actuele projectafstand, een latente inconsistentie). `null` zolang
++  /// niet ondertekend, of geen km-vergoeding van toepassing was.
++  kmDistanceOneWayMeters Int? @map("km_distance_one_way_meters")
++
+   /// Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — bewust
+   /// een expliciete actie (geen automatische verzending, zie
+   /// EmailErrors/de toelichting bij WorkOrderService.sendPdfToCustomer()).
+@@ -1143,6 +1176,11 @@ model CompanySettings {
+ 
+   /// Phase 12, deel D (sectie 5) — tarief per km (eurocent), admin-only
+   /// zichtbaar (business rule 11). `null` = km-vergoeding niet actief.
++  /// @deprecated sinds klantvraag 10/9/2026: vervangen door per-project
++  /// instellingen (Project.kmFlatFeeThresholdKm/kmFlatFeeCents/
++  /// kmRateAboveCentsPerKm) — niet meer gebruikt in de berekening
++  /// (computeKmAmountCents()), kolom bewust niet verwijderd (geen
++  /// destructieve migratie nodig).
+   kmRateCents Int? @map("km_rate_cents")
+ 
+   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+diff --git a/apps/api/src/modules/distance/distance.service.ts b/apps/api/src/modules/distance/distance.service.ts
+index eea02bc..b8e7a0e 100644
+--- a/apps/api/src/modules/distance/distance.service.ts
++++ b/apps/api/src/modules/distance/distance.service.ts
+@@ -208,17 +208,33 @@ interface HereRoutesResponse {
+   routes: Array<{ sections: Array<{ summary: { length: number } }> }>;
+ }
+ 
++/** Per-project prijsinstellingen voor computeKmAmountCents() — zie Project.kmFlatFeeThresholdKm/kmFlatFeeCents/kmRateAboveCentsPerKm in schema.prisma. */
++export interface KmPricingSettings {
++  /** Drempel (heen-en-terug, in km) die binnen de vaste prijs valt. */
++  flatFeeThresholdKm: number;
++  /** Vaste prijs (eurocent) voor de eerste `flatFeeThresholdKm`. `null` = km-vergoeding niet actief. */
++  flatFeeCents: number | null;
++  /** Tarief (eurocent) per km BOVEN de drempel. */
++  rateAboveCentsPerKm: number;
++}
++
+ /**
+- * Phase 12, deel D — km-vergoeding heen-en-terug: `kmDistanceOneWayMeters`
+- * is de rijafstand in één richting (zie DistanceService hierboven);
+- * vermenigvuldigd met 2 voor heen-terug, omgezet naar kilometer, en
+- * vermenigvuldigd met het tarief (eurocent/km). `null` zodra één van beide
+- * nog niet gekend is (adres nog niet berekend, of geen km-tarief ingesteld)
+- * — een werkbon zonder km-bedrag is dus het normale, niet-foutieve geval
+- * zolang de km-vergoeding niet actief is.
++ * Klantvraag 10/9/2026 — vervangt de vroegere vlakke formule (afstand ×
++ * bedrijfstarief, Phase 12 deel D) door een getrapte prijs per project: een
++ * vaste prijs voor de eerste `flatFeeThresholdKm` (heen-en-terug), en
++ * daarboven een tarief per extra km. `kmDistanceOneWayMeters` is de rijafstand
++ * in één richting (zie DistanceService hierboven); vermenigvuldigd met 2 voor
++ * heen-terug, omgezet naar kilometer, tegen de drempel afgezet. `null` zodra
++ * de afstand nog niet gekend is, of `pricing.flatFeeCents` leeg is (km-
++ * vergoeding niet actief voor dit project) — een werkbon zonder km-bedrag is
++ * dus het normale, niet-foutieve geval zolang de km-vergoeding niet actief is.
+  */
+-export function computeKmAmountCents(kmDistanceOneWayMeters: number | null, kmRateCents: number | null): number | null {
+-  if (kmDistanceOneWayMeters === null || kmRateCents === null) return null;
++export function computeKmAmountCents(kmDistanceOneWayMeters: number | null, pricing: KmPricingSettings): number | null {
++  if (kmDistanceOneWayMeters === null || pricing.flatFeeCents === null) return null;
+   const roundTripKm = (kmDistanceOneWayMeters * 2) / 1000;
+-  return Math.round(roundTripKm * kmRateCents);
++  if (roundTripKm <= pricing.flatFeeThresholdKm) {
++    return pricing.flatFeeCents;
++  }
++  const extraKm = roundTripKm - pricing.flatFeeThresholdKm;
++  return Math.round(pricing.flatFeeCents + extraKm * pricing.rateAboveCentsPerKm);
+ }
+diff --git a/apps/api/src/modules/projects/project.routes.ts b/apps/api/src/modules/projects/project.routes.ts
+index 40f23c8..cb2ad8f 100644
+--- a/apps/api/src/modules/projects/project.routes.ts
++++ b/apps/api/src/modules/projects/project.routes.ts
+@@ -8,6 +8,7 @@ import type {
+   SelectProjectMilestoneResponseBody,
+   UpdateProjectInvoicingEnabledBody,
+   UpdateProjectInvoicingEnabledResponseBody,
++  UpdateProjectKmSettingsResponseBody,
+   UpdateProjectOvertimeSettingsResponseBody,
+   UpdateProjectSigningModeResponseBody,
+ } from '@swatt/shared-types';
+@@ -22,6 +23,7 @@ import {
+   projectIdParamsSchema,
+   selectProjectMilestoneBodySchema,
+   updateProjectInvoicingEnabledBodySchema,
++  updateProjectKmSettingsBodySchema,
+   updateProjectOvertimeSettingsBodySchema,
+   updateProjectSigningModeBodySchema,
+ } from './project.schemas';
+@@ -298,6 +300,36 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
+       return { signingMode: project.signingMode };
+     },
+   );
++
++  /**
++   * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project: "prijs voor
++   * de eerste x km is een vaste prijs, daarboven een tarief per km." Bewust
++   * ADMIN-only, zelfde reden als invoicing-enabled/overtime-settings
++   * hierboven: rechtstreekse financiële impact op de klantfactuur.
++   */
++  app.post(
++    '/admin/projects/:id/km-settings',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request): Promise<UpdateProjectKmSettingsResponseBody> => {
++      const params = projectIdParamsSchema.parse(request.params);
++      const body = updateProjectKmSettingsBodySchema.parse(request.body);
++      await assertProjectExists(app, params.id);
++
++      const project = await app.prisma.project.update({
++        where: { id: params.id },
++        data: {
++          kmFlatFeeThresholdKm: body.kmFlatFeeThresholdKm,
++          kmFlatFeeCents: body.kmFlatFeeCents,
++          kmRateAboveCentsPerKm: body.kmRateAboveCentsPerKm,
++        },
++      });
++      return {
++        kmFlatFeeThresholdKm: project.kmFlatFeeThresholdKm,
++        kmFlatFeeCents: project.kmFlatFeeCents,
++        kmRateAboveCentsPerKm: project.kmRateAboveCentsPerKm,
++      };
++    },
++  );
+ }
+ 
+ function toMilestoneSummary(milestone: {
+@@ -356,6 +388,10 @@ function toProjectSummary(project: {
+   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter, `null` zolang nog niet berekend. */
+   kmDistanceOneWayMeters: number | null;
++  /** Klantvraag 10/9/2026 — per-project prijsinstellingen, zie schema.prisma. */
++  kmFlatFeeThresholdKm: number;
++  kmFlatFeeCents: number | null;
++  kmRateAboveCentsPerKm: number;
+   customer: { name: string };
+ }): ProjectSummary {
+   return {
+@@ -381,5 +417,8 @@ function toProjectSummary(project: {
+     nightWorkRatePercent: project.nightWorkRatePercent,
+     signingMode: project.signingMode,
+     kmDistanceOneWayMeters: project.kmDistanceOneWayMeters,
++    kmFlatFeeThresholdKm: project.kmFlatFeeThresholdKm,
++    kmFlatFeeCents: project.kmFlatFeeCents,
++    kmRateAboveCentsPerKm: project.kmRateAboveCentsPerKm,
+   };
+ }
+diff --git a/apps/api/src/modules/projects/project.schemas.ts b/apps/api/src/modules/projects/project.schemas.ts
+index 81b6f89..f63ab6f 100644
+--- a/apps/api/src/modules/projects/project.schemas.ts
++++ b/apps/api/src/modules/projects/project.schemas.ts
+@@ -60,3 +60,17 @@ export const updateProjectOvertimeSettingsBodySchema = z
+ export const updateProjectSigningModeBodySchema = z.object({
+   signingMode: z.enum(['PER_WORK_ORDER', 'WEEKLY']),
+ });
++
++/**
++ * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project: vaste prijs
++ * voor de eerste `kmFlatFeeThresholdKm` (heen-en-terug), daarboven
++ * `kmRateAboveCentsPerKm` per extra km. `kmFlatFeeCents: null` schakelt de
++ * km-vergoeding voor dit project uit (zelfde uit-stand-conventie als het
++ * vroegere CompanySettings.kmRateCents). Bovengrenzen zijn ruime typefout-
++ * bescherming, geen echte zakelijke limieten.
++ */
++export const updateProjectKmSettingsBodySchema = z.object({
++  kmFlatFeeThresholdKm: z.number().int().min(1).max(1000),
++  kmFlatFeeCents: z.number().int().min(0).max(1_000_000).nullable(),
++  kmRateAboveCentsPerKm: z.number().int().min(0).max(100_000),
++});
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.routes.ts b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+index 70e838b..aa1270a 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.routes.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.routes.ts
+@@ -26,7 +26,7 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+   const companySettingsService = new CompanySettingsService(app.prisma);
+   const auditLogService = new AuditLogService(app.prisma);
+   const pdfService = new WorkOrderPdfService(app.prisma, storage, workOrderService, companySettingsService);
+-  const service = new WeeklyApprovalService(app.prisma, storage, companySettingsService);
++  const service = new WeeklyApprovalService(app.prisma, storage);
+ 
+   app.get(
+     '/work-orders/pending-week',
+@@ -75,6 +75,8 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
+         requestedByUserId: userId,
+         ipAddress: request.ip ?? null,
+         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
++        kmDistanceOneWayMetersOverride:
++          body.kmDistanceOneWayMetersOverrideKm != null ? Math.round(body.kmDistanceOneWayMetersOverrideKm * 1000) : null,
+       });
+       await auditLogService.record({
+         actorUserId: userId,
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.schemas.ts b/apps/api/src/modules/work-orders/weekly-approval.schemas.ts
+index 916dd78..a871b8f 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.schemas.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.schemas.ts
+@@ -30,4 +30,6 @@ export const signWeekBodySchema = z.object({
+   confirmed: z.literal(true),
+   mimeType: z.literal('image/png'),
+   signatureDataBase64: base64ImageSchema(2.8 * 1024 * 1024),
++  /** Klantvraag 10/9/2026 — zie de toelichting bij signWorkOrderBodySchema in work-order.schemas.ts, hier toegepast op de hele week-batch. */
++  kmDistanceOneWayMetersOverrideKm: z.number().min(0).max(500).nullable().optional(),
+ });
+diff --git a/apps/api/src/modules/work-orders/weekly-approval.service.ts b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+index e775309..3416665 100644
+--- a/apps/api/src/modules/work-orders/weekly-approval.service.ts
++++ b/apps/api/src/modules/work-orders/weekly-approval.service.ts
+@@ -1,7 +1,6 @@
+ import { createHash } from 'node:crypto';
+ import { Prisma, type PrismaClient } from '@prisma/client';
+ import { WeeklyApprovalErrors } from '../../errors';
+-import type { CompanySettingsService } from '../company-settings/company-settings.service';
+ import { computeKmAmountCents } from '../distance/distance.service';
+ import type { StorageService } from '../storage/storage.service';
+ 
+@@ -24,6 +23,14 @@ export interface SignWeekInput {
+   requestedByUserId: string;
+   ipAddress: string | null;
+   image: { data: Buffer; mimeType: string };
++  /**
++   * Klantvraag 10/9/2026 — zelfde manuele km-correctie als bij een
++   * individuele `/work-orders/:id/sign` (zie SignWorkOrderInput), hier
++   * toegepast op de hele week-batch: alle openstaande werkbonnen van deze
++   * week op dit project delen toch al dezelfde projectafstand (zie
++   * signCurrentWeek() hieronder), dus één correctie volstaat.
++   */
++  kmDistanceOneWayMetersOverride?: number | null;
+ }
+ 
+ /** Eén tijdregistratie-rij ter review vóór de klant tekent — zie listPendingForEmployee(). */
+@@ -72,7 +79,6 @@ export class WeeklyApprovalService {
+   constructor(
+     private readonly prisma: PrismaClient,
+     private readonly storage: StorageService,
+-    private readonly companySettingsService: CompanySettingsService,
+   ) {}
+ 
+   /** Maandag 00:00 t.e.m. zondag 23:59:59 van de week waarin `reference` valt (default: vandaag). */
+@@ -136,9 +142,15 @@ export class WeeklyApprovalService {
+     // ook 2 keer aangerekend (2 aparte interventies/verplaatsingen). Hier
+     // tonen we daarom het bedrag PER werkbon, plus het aantal — de
+     // frontend kan zelf vermenigvuldigen voor een totaal.
+-    const project = await this.prisma.project.findUnique({ where: { id: projectId }, select: { kmDistanceOneWayMeters: true } });
+-    const settings = await this.companySettingsService.get();
+-    const kmAmountCentsPerWorkOrder = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, settings.kmRateCents);
++    const project = await this.prisma.project.findUnique({
++      where: { id: projectId },
++      select: { kmDistanceOneWayMeters: true, kmFlatFeeThresholdKm: true, kmFlatFeeCents: true, kmRateAboveCentsPerKm: true },
++    });
++    const kmAmountCentsPerWorkOrder = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, {
++      flatFeeThresholdKm: project?.kmFlatFeeThresholdKm ?? 65,
++      flatFeeCents: project?.kmFlatFeeCents ?? null,
++      rateAboveCentsPerKm: project?.kmRateAboveCentsPerKm ?? 80,
++    });
+ 
+     return { weekStartDate, weekEndDate, workOrderIds: mine.map((row) => row.id), entries, kmAmountCentsPerWorkOrder, pendingWorkOrderCount: rows.length };
+   }
+@@ -156,16 +168,22 @@ export class WeeklyApprovalService {
+       throw WeeklyApprovalErrors.noPendingWorkOrders();
+     }
+ 
+-    // Phase 12, deel D (sectie 5) — alle werkbonnen in deze batch horen bij
+-    // hetzelfde project, dus delen ze dezelfde km-afstand; één berekening
+-    // volstaat i.p.v. per werkbon. Bevroren op het moment van ondertekenen,
+-    // net als bij de individuele `/work-orders/:id/sign` (zie
+-    // work-order-signature.service.ts).
+-    const [project, companySettings] = await Promise.all([
+-      this.prisma.project.findUnique({ where: { id: projectId }, select: { kmDistanceOneWayMeters: true } }),
+-      this.companySettingsService.get(),
+-    ]);
+-    const kmAmountCents = computeKmAmountCents(project?.kmDistanceOneWayMeters ?? null, companySettings.kmRateCents);
++    // Phase 12, deel D (sectie 5), uitgebreid op klantvraag 10/9/2026 — alle
++    // werkbonnen in deze batch horen bij hetzelfde project, dus delen ze
++    // dezelfde km-afstand (eventueel manueel gecorrigeerd via
++    // input.kmDistanceOneWayMetersOverride); één berekening volstaat i.p.v.
++    // per werkbon. Bevroren op het moment van ondertekenen, net als bij de
++    // individuele `/work-orders/:id/sign` (zie work-order-signature.service.ts).
++    const project = await this.prisma.project.findUnique({
++      where: { id: projectId },
++      select: { kmDistanceOneWayMeters: true, kmFlatFeeThresholdKm: true, kmFlatFeeCents: true, kmRateAboveCentsPerKm: true },
++    });
++    const effectiveKmDistanceOneWayMeters = input.kmDistanceOneWayMetersOverride ?? project?.kmDistanceOneWayMeters ?? null;
++    const kmAmountCents = computeKmAmountCents(effectiveKmDistanceOneWayMeters, {
++      flatFeeThresholdKm: project?.kmFlatFeeThresholdKm ?? 65,
++      flatFeeCents: project?.kmFlatFeeCents ?? null,
++      rateAboveCentsPerKm: project?.kmRateAboveCentsPerKm ?? 80,
++    });
+ 
+     const signatureFileKey = await this.storage.save(input.image.data, input.image.mimeType);
+     const confirmedAt = new Date();
+@@ -210,7 +228,7 @@ export class WeeklyApprovalService {
+         ),
+         this.prisma.workOrder.updateMany({
+           where: { id: { in: pending.map((row) => row.id) } },
+-          data: { status: 'SIGNED', kmAmountCents },
++          data: { status: 'SIGNED', kmAmountCents, kmDistanceOneWayMeters: effectiveKmDistanceOneWayMeters },
+         }),
+       ]);
+ 
+@@ -277,10 +295,11 @@ export class WeeklyApprovalService {
+           teamleaderUploadedAt: null,
+           teamleaderUploadError: null,
+           // Phase 12, deel D — een heropende werkbon bevriest een nieuw
+-          // kmAmountCents pas bij de volgende ondertekening (zelfde reden als
+-          // de PDF/sync-velden hierboven: het oude bevroren bedrag hoort niet
+-          // meer bij een geldige handtekening).
++          // kmAmountCents/kmDistanceOneWayMeters pas bij de volgende
++          // ondertekening (zelfde reden als de PDF/sync-velden hierboven: de
++          // oude bevroren waarden horen niet meer bij een geldige handtekening).
+           kmAmountCents: null,
++          kmDistanceOneWayMeters: null,
+           // Op vraag (3/9/2026) — zie de toelichting bij WorkOrder.reminderSentAt
+           // in schema.prisma: een hernieuwde DRAFT-periode verdient een nieuwe
+           // herinnering als ze opnieuw te lang blijft liggen.
+diff --git a/apps/api/src/modules/work-orders/work-order-pdf.service.ts b/apps/api/src/modules/work-orders/work-order-pdf.service.ts
+index ab5a393..b6964fc 100644
+--- a/apps/api/src/modules/work-orders/work-order-pdf.service.ts
++++ b/apps/api/src/modules/work-orders/work-order-pdf.service.ts
+@@ -116,11 +116,17 @@ export class WorkOrderPdfService {
+       // Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet
+       // enkel op de factuur" — zie de toelichting bij
+       // computeKmAmountCents()/kmAmountCents in distance.service.ts en
+-      // schema.prisma. Beide `null` zolang er geen km-tarief ingesteld is
+-      // (CompanySettings.kmRateCents) — de PDF-sectie zelf toont dan
+-      // gewoon niets, geen foutieve "€ 0,00"-regel.
++      // schema.prisma. Beide `null` zolang er geen km-vergoeding ingesteld is
++      // voor dit project — de PDF-sectie zelf toont dan gewoon niets, geen
++      // foutieve "€ 0,00"-regel. `workOrder.kmDistanceOneWayMeters` (klantvraag
++      // 10/9/2026) is de BEVROREN effectieve afstand — automatisch of manueel
++      // gecorrigeerd — op het moment van ondertekenen; de PDF wordt enkel voor
++      // een reeds ondertekende (dus bevroren) werkbon gegenereerd, met
++      // `workOrder.project.kmDistanceOneWayMeters` als defensieve terugval
++      // voor het zeldzame geval dat een oudere, vóór deze wijziging
++      // ondertekende werkbon nog geen bevroren waarde heeft.
+       kmAmountCents: workOrder.kmAmountCents,
+-      kmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
++      kmDistanceOneWayMeters: workOrder.kmDistanceOneWayMeters ?? workOrder.project.kmDistanceOneWayMeters,
+       timeEntries: workOrder.timeEntries.map((link) => ({
+         employeeDisplayName: link.timeEntry.employee.displayName,
+         startedAt: link.timeEntry.startedAt,
+diff --git a/apps/api/src/modules/work-orders/work-order-signature.service.ts b/apps/api/src/modules/work-orders/work-order-signature.service.ts
+index 0549b3e..82143fd 100644
+--- a/apps/api/src/modules/work-orders/work-order-signature.service.ts
++++ b/apps/api/src/modules/work-orders/work-order-signature.service.ts
+@@ -1,7 +1,6 @@
+ import { createHash } from 'node:crypto';
+ import { Prisma, type PrismaClient } from '@prisma/client';
+ import { WorkOrderErrors } from '../../errors';
+-import type { CompanySettingsService } from '../company-settings/company-settings.service';
+ import { computeKmAmountCents } from '../distance/distance.service';
+ import type { StorageService } from '../storage/storage.service';
+ import type { WorkOrderSignatureRecord } from './work-order.service';
+@@ -14,6 +13,15 @@ export interface SignWorkOrderInput {
+   /** Sectie 10: "eventueel IP-adres indien juridisch/GDPR-technisch wenselijk". */
+   ipAddress: string | null;
+   image: { data: Buffer; mimeType: string };
++  /**
++   * Klantvraag 10/9/2026: "verplaatsing manueel kunnen ingeven, want sommige
++   * medewerkers vertrekken van thuis i.p.v. het bedrijfsadres." Rijafstand
++   * ÉÉN richting, in meter — de medewerker ziet standaard de automatisch
++   * berekende projectafstand vooringevuld, maar mag dat vóór ondertekenen
++   * overschrijven. `undefined`/`null` = geen correctie, gebruik de
++   * projectberekening (zelfde gedrag als vóór deze wijziging).
++   */
++  kmDistanceOneWayMetersOverride?: number | null;
+ }
+ 
+ interface WorkOrderSnapshot {
+@@ -24,6 +32,10 @@ interface WorkOrderSnapshot {
+   photoIds: string[];
+   /** Phase 12, deel D — nodig om kmAmountCents te bevriezen op het moment van ondertekenen. */
+   projectKmDistanceOneWayMeters: number | null;
++  /** Klantvraag 10/9/2026 — per-project prijsinstellingen, zie Project.kmFlatFeeThresholdKm/kmFlatFeeCents/kmRateAboveCentsPerKm in schema.prisma. */
++  projectKmFlatFeeThresholdKm: number;
++  projectKmFlatFeeCents: number | null;
++  projectKmRateAboveCentsPerKm: number;
+ }
+ 
+ /**
+@@ -48,7 +60,6 @@ export class WorkOrderSignatureService {
+   constructor(
+     private readonly prisma: PrismaClient,
+     private readonly storage: StorageService,
+-    private readonly companySettingsService: CompanySettingsService,
+   ) {}
+ 
+   async sign(employeeId: string, workOrderId: string, input: SignWorkOrderInput): Promise<WorkOrderSignatureRecord> {
+@@ -58,11 +69,18 @@ export class WorkOrderSignatureService {
+     const signedAt = new Date();
+     const contentHash = computeContentHash(snapshot);
+ 
+-    // Phase 12, deel D (sectie 5) — bevriezen op het moment van ondertekenen,
+-    // net als de andere bedragen: wijzigt het projectadres of het km-tarief
+-    // later, dan blijft dit bedrag op deze al ondertekende werkbon ongewijzigd.
+-    const companySettings = await this.companySettingsService.get();
+-    const kmAmountCents = computeKmAmountCents(snapshot.projectKmDistanceOneWayMeters, companySettings.kmRateCents);
++    // Phase 12, deel D (sectie 5), uitgebreid op klantvraag 10/9/2026 —
++    // bevriezen op het moment van ondertekenen: wijzigt het projectadres of
++    // de prijsinstellingen later, dan blijft dit bedrag op deze al
++    // ondertekende werkbon ongewijzigd. De effectieve afstand is de manuele
++    // correctie indien opgegeven, anders de automatisch berekende
++    // projectafstand (ongewijzigd gedrag t.o.v. vóór deze wijziging).
++    const effectiveKmDistanceOneWayMeters = input.kmDistanceOneWayMetersOverride ?? snapshot.projectKmDistanceOneWayMeters;
++    const kmAmountCents = computeKmAmountCents(effectiveKmDistanceOneWayMeters, {
++      flatFeeThresholdKm: snapshot.projectKmFlatFeeThresholdKm,
++      flatFeeCents: snapshot.projectKmFlatFeeCents,
++      rateAboveCentsPerKm: snapshot.projectKmRateAboveCentsPerKm,
++    });
+ 
+     try {
+       const [signature] = await this.prisma.$transaction([
+@@ -80,7 +98,7 @@ export class WorkOrderSignatureService {
+         }),
+         this.prisma.workOrder.update({
+           where: { id: workOrderId },
+-          data: { status: 'SIGNED', kmAmountCents },
++          data: { status: 'SIGNED', kmAmountCents, kmDistanceOneWayMeters: effectiveKmDistanceOneWayMeters },
+         }),
+       ]);
+       return signature;
+@@ -109,7 +127,14 @@ export class WorkOrderSignatureService {
+         description: true,
+         timeEntries: { select: { timeEntryId: true, timeEntry: { select: { employeeId: true } } } },
+         photos: { select: { id: true } },
+-        project: { select: { kmDistanceOneWayMeters: true } },
++        project: {
++          select: {
++            kmDistanceOneWayMeters: true,
++            kmFlatFeeThresholdKm: true,
++            kmFlatFeeCents: true,
++            kmRateAboveCentsPerKm: true,
++          },
++        },
+       },
+     });
+     if (!workOrder) {
+@@ -131,6 +156,9 @@ export class WorkOrderSignatureService {
+       timeEntryIds: workOrder.timeEntries.map((link: { timeEntryId: string }) => link.timeEntryId),
+       photoIds: workOrder.photos.map((photo: { id: string }) => photo.id),
+       projectKmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
++      projectKmFlatFeeThresholdKm: workOrder.project.kmFlatFeeThresholdKm,
++      projectKmFlatFeeCents: workOrder.project.kmFlatFeeCents,
++      projectKmRateAboveCentsPerKm: workOrder.project.kmRateAboveCentsPerKm,
+     };
+   }
+ }
+diff --git a/apps/api/src/modules/work-orders/work-order.routes.ts b/apps/api/src/modules/work-orders/work-order.routes.ts
+index 9212a37..440c1f5 100644
+--- a/apps/api/src/modules/work-orders/work-order.routes.ts
++++ b/apps/api/src/modules/work-orders/work-order.routes.ts
+@@ -46,7 +46,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+   const storage: StorageService = new DatabaseStorageService(app.prisma);
+   const photoService = new WorkOrderPhotoService(app.prisma, storage);
+   const companySettingsService = new CompanySettingsService(app.prisma);
+-  const signatureService = new WorkOrderSignatureService(app.prisma, storage, companySettingsService);
++  const signatureService = new WorkOrderSignatureService(app.prisma, storage);
+   const pdfService = new WorkOrderPdfService(app.prisma, storage, service, companySettingsService);
+   const auditLogService = new AuditLogService(app.prisma);
+ 
+@@ -182,6 +182,11 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
+         requestedByUserId: userId,
+         ipAddress: request.ip ?? null,
+         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
++        // Klantvraag 10/9/2026 — manuele km-correctie, ingevuld in km op het
++        // scherm, hier omgezet naar meter (zelfde eenheid als de rest van de
++        // km-berekening, zie distance.service.ts).
++        kmDistanceOneWayMetersOverride:
++          body.kmDistanceOneWayMetersOverrideKm != null ? Math.round(body.kmDistanceOneWayMetersOverrideKm * 1000) : null,
+       });
+       await auditLogService.record({
+         actorUserId: userId,
+@@ -477,7 +482,19 @@ async function toSummary(
+     }
+   }
+ 
+-  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(projectKmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
++  // Klantvraag 10/9/2026 — "verplaatsing manueel kunnen ingeven": vóór
++  // ondertekenen is er nog geen bevroren afstand (WorkOrder.kmDistanceOneWayMeters
++  // staat dan nog op `null`), dus de effectieve afstand is de levende
++  // projectberekening hierboven — precies wat de medewerker als vooringevulde,
++  // overschrijfbare waarde te zien krijgt. Ná ondertekenen wint de bevroren
++  // waarde altijd (blijft ongewijzigd, ook als het projectadres nadien wijzigt).
++  const effectiveKmDistanceOneWayMeters = workOrder.kmDistanceOneWayMeters ?? projectKmDistanceOneWayMeters;
++  const kmPricing = {
++    flatFeeThresholdKm: workOrder.project.kmFlatFeeThresholdKm,
++    flatFeeCents: workOrder.project.kmFlatFeeCents,
++    rateAboveCentsPerKm: workOrder.project.kmRateAboveCentsPerKm,
++  };
++  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(effectiveKmDistanceOneWayMeters, kmPricing);
+ 
+   return {
+     id: workOrder.id,
+@@ -489,12 +506,18 @@ async function toSummary(
+     status: workOrder.status,
+     description: workOrder.description,
+     kmAmountCents,
++    // Klantvraag 10/9/2026 — de effectieve afstand (vóór tekenen: levende
++    // preview/vooringevulde waarde; ná tekenen: bevroren), in meter, zodat de
++    // frontend dit kan tonen/laten overschrijven op het onderteken-scherm.
++    kmDistanceOneWayMeters: effectiveKmDistanceOneWayMeters,
+     // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
+     kmDebug: {
+       projectTeamleaderId: workOrder.project.teamleaderId,
+       customerName: workOrder.project.customer.name,
+       projectKmDistanceOneWayMeters,
+-      companyKmRateCents: companySettingsForKm.kmRateCents,
++      projectKmFlatFeeThresholdKm: kmPricing.flatFeeThresholdKm,
++      projectKmFlatFeeCents: kmPricing.flatFeeCents,
++      projectKmRateAboveCentsPerKm: kmPricing.rateAboveCentsPerKm,
+     },
+     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
+     createdAt: workOrder.createdAt.toISOString(),
+diff --git a/apps/api/src/modules/work-orders/work-order.schemas.ts b/apps/api/src/modules/work-orders/work-order.schemas.ts
+index b78bbbd..6dc0dc9 100644
+--- a/apps/api/src/modules/work-orders/work-order.schemas.ts
++++ b/apps/api/src/modules/work-orders/work-order.schemas.ts
+@@ -87,6 +87,14 @@ export const signWorkOrderBodySchema = z.object({
+   confirmed: z.literal(true),
+   mimeType: z.literal('image/png'),
+   signatureDataBase64: base64ImageSchema(2.8 * 1024 * 1024),
++  /**
++   * Klantvraag 10/9/2026: "verplaatsing manueel kunnen ingeven, want sommige
++   * medewerkers vertrekken van thuis." Rijafstand ÉÉN richting, in km (niet
++   * meter — vriendelijker invoerveld) — `null`/afwezig = geen correctie,
++   * gebruik de automatisch berekende projectafstand. 500 km is een ruime
++   * bovengrens (typefout-bescherming, geen echte zakelijke limiet).
++   */
++  kmDistanceOneWayMetersOverrideKm: z.number().min(0).max(500).nullable().optional(),
+ });
+ 
+ export type SignWorkOrderBody = z.infer<typeof signWorkOrderBodySchema>;
+diff --git a/apps/api/src/modules/work-orders/work-order.service.ts b/apps/api/src/modules/work-orders/work-order.service.ts
+index 7a5b0e4..23c1505 100644
+--- a/apps/api/src/modules/work-orders/work-order.service.ts
++++ b/apps/api/src/modules/work-orders/work-order.service.ts
+@@ -113,6 +113,8 @@ export interface WorkOrderRecord {
+   reminderSentAt: Date | null;
+   /** Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet enkel op de factuur" — Phase 12, deel D. Bevroren bij ondertekenen (WorkOrderSignatureService/WeeklyApprovalService), `null` zolang niet ondertekend of geen km-tarief ingesteld. */
+   kmAmountCents: number | null;
++  /** Klantvraag 10/9/2026 — de effectieve rijafstand (één richting, meter) waarmee kmAmountCents berekend is, bevroren bij ondertekenen. Zie de uitgebreide toelichting bij dit veld in schema.prisma. */
++  kmDistanceOneWayMeters: number | null;
+   project: {
+     name: string;
+     projectNumber: string | null;
+@@ -121,6 +123,10 @@ export interface WorkOrderRecord {
+     teamleaderId: string;
+     /** Zie de toelichting bij WorkOrder.kmAmountCents hierboven — de rijafstand zelf (één richting), om op de PDF te kunnen tonen hoeveel km er precies verrekend is. */
+     kmDistanceOneWayMeters: number | null;
++    /** Klantvraag 10/9/2026 — per-project prijsinstellingen, zie Project.kmFlatFeeThresholdKm/kmFlatFeeCents/kmRateAboveCentsPerKm in schema.prisma. */
++    kmFlatFeeThresholdKm: number;
++    kmFlatFeeCents: number | null;
++    kmRateAboveCentsPerKm: number;
+     /** Phase 12, deel B (sectie 2) — bepaalt of de werknemersflow "Werkbon tekenen" of "Week aftekenen" toont. */
+     signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+     customer: { name: string; email: string | null; address: string | null; vatNumber: string | null };
+diff --git a/apps/api/test/distance.service.test.ts b/apps/api/test/distance.service.test.ts
+index bc3bba7..07c6599 100644
+--- a/apps/api/test/distance.service.test.ts
++++ b/apps/api/test/distance.service.test.ts
+@@ -138,21 +138,36 @@ describe('HereDistanceProvider (op vraag 7/9/2026, na een langdurige OpenRouteSe
+   });
+ });
+ 
+-describe('computeKmAmountCents()', () => {
+-  it('berekent heen-en-terug: 12,4 km enkel × €0,35/km → 868 eurocent', () => {
+-    expect(computeKmAmountCents(12400, 35)).toBe(868); // (12400*2/1000)*35 = 24.8*35 = 868
++describe('computeKmAmountCents() (klantvraag 10/9/2026 — getrapte prijs per project)', () => {
++  const DEFAULT_PRICING = { flatFeeThresholdKm: 65, flatFeeCents: 3500, rateAboveCentsPerKm: 80 };
++
++  it('binnen de drempel: enkel de vaste prijs, ongeacht de exacte afstand', () => {
++    // 12,4 km enkel = 24,8 km heen-terug, ruim onder de drempel van 65 km.
++    expect(computeKmAmountCents(12400, DEFAULT_PRICING)).toBe(3500);
++  });
++
++  it('exact op de drempel: nog steeds enkel de vaste prijs', () => {
++    // 32,5 km enkel = 65 km heen-terug, exact de drempel.
++    expect(computeKmAmountCents(32500, DEFAULT_PRICING)).toBe(3500);
++  });
++
++  it('boven de drempel: vaste prijs + tarief per extra km', () => {
++    // 40 km enkel = 80 km heen-terug = 15 km boven de drempel van 65.
++    // 3500 + 15*80 = 3500 + 1200 = 4700.
++    expect(computeKmAmountCents(40000, DEFAULT_PRICING)).toBe(4700);
+   });
+ 
+   it('geeft null zonder gekende afstand', () => {
+-    expect(computeKmAmountCents(null, 35)).toBeNull();
++    expect(computeKmAmountCents(null, DEFAULT_PRICING)).toBeNull();
+   });
+ 
+-  it('geeft null zonder ingesteld km-tarief', () => {
+-    expect(computeKmAmountCents(12400, null)).toBeNull();
++  it('geeft null wanneer de vaste prijs niet ingesteld is (km-vergoeding niet actief voor dit project)', () => {
++    expect(computeKmAmountCents(40000, { ...DEFAULT_PRICING, flatFeeCents: null })).toBeNull();
+   });
+ 
+-  it('rondt af naar de dichtstbijzijnde eurocent', () => {
+-    expect(computeKmAmountCents(1000, 33)).toBe(66); // (1000*2/1000)*33 = 2*33 = 66, exact
+-    expect(computeKmAmountCents(1001, 33)).toBe(66); // 2.002*33 = 66.066 -> 66
++  it('rondt het extra-km-bedrag af naar de dichtstbijzijnde eurocent', () => {
++    // 50,05 km enkel = 100,1 km heen-terug = 35,1 km boven de drempel van 65.
++    // 3500 + 35,1*80 = 3500 + 2808 = 6308 (exact), en licht verschoven om afronding te forceren:
++    expect(computeKmAmountCents(50051, DEFAULT_PRICING)).toBe(6308); // 35,102*80 = 2808,16 -> 6308,16 -> 6308
+   });
+ });
+diff --git a/apps/api/test/weekly-approval.service.test.ts b/apps/api/test/weekly-approval.service.test.ts
+index 12c76d2..51f0bd7 100644
+--- a/apps/api/test/weekly-approval.service.test.ts
++++ b/apps/api/test/weekly-approval.service.test.ts
+@@ -1,6 +1,5 @@
+ import type { PrismaClient } from '@prisma/client';
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+-import type { CompanySettingsService } from '../src/modules/company-settings/company-settings.service';
+ import { WeeklyApprovalService } from '../src/modules/work-orders/weekly-approval.service';
+ import type { StorageService } from '../src/modules/storage/storage.service';
+ 
+@@ -22,11 +21,6 @@ interface FakeWorkOrder {
+   teamleaderUploadStatus: string;
+ }
+ 
+-/** Phase 12, deel D — default: km-vergoeding niet actief (geen tarief ingesteld). */
+-function createFakeCompanySettingsService(kmRateCents: number | null = null): CompanySettingsService {
+-  return { get: async () => ({ kmRateCents }) } as unknown as CompanySettingsService;
+-}
+-
+ function createFakeStorage(): StorageService {
+   let counter = 0;
+   return {
+@@ -37,7 +31,26 @@ function createFakeStorage(): StorageService {
+   } as unknown as StorageService;
+ }
+ 
+-function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmDistanceOneWayMeters: number | null = null) {
++/**
++ * Klantvraag 10/9/2026 — per-project prijsinstellingen i.p.v. het vroegere
++ * bedrijfsbrede CompanySettings.kmRateCents. Default: km-vergoeding niet
++ * actief (kmFlatFeeCents: null), drempel/tarief op de projectdefaults.
++ */
++interface FakeProjectKmSettings {
++  kmDistanceOneWayMeters: number | null;
++  kmFlatFeeThresholdKm: number;
++  kmFlatFeeCents: number | null;
++  kmRateAboveCentsPerKm: number;
++}
++
++const DEFAULT_PROJECT_KM_SETTINGS: FakeProjectKmSettings = {
++  kmDistanceOneWayMeters: null,
++  kmFlatFeeThresholdKm: 65,
++  kmFlatFeeCents: null,
++  kmRateAboveCentsPerKm: 80,
++};
++
++function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmSettings: FakeProjectKmSettings = DEFAULT_PROJECT_KM_SETTINGS) {
+   const workOrders = new Map(initialWorkOrders.map((wo) => [wo.id, { ...wo }]));
+   const weeklyApprovals = new Map<string, { id: string; projectId: string; weekStartDate: Date; weekEndDate: Date; status: string; signerName: string | null; signerFunction: string | null; confirmedAt: Date | null; ipAddress: string | null; requestedByUserId: string | null }>();
+   const signatures = new Map<string, { id: string; workOrderId: string }>();
+@@ -46,7 +59,7 @@ function createFakePrisma(initialWorkOrders: FakeWorkOrder[], projectKmDistanceO
+ 
+   const prisma = {
+     project: {
+-      findUnique: async () => ({ kmDistanceOneWayMeters: projectKmDistanceOneWayMeters }),
++      findUnique: async () => ({ ...projectKmSettings }),
+     },
+     workOrder: {
+       findMany: async ({ where }: { where: { projectId: string; status: string; createdAt: { gte: Date; lte: Date } } }) =>
+@@ -195,7 +208,7 @@ describe('WeeklyApprovalService.signCurrentWeek()', () => {
+       workOrder({ id: 'wo-3', createdByEmployeeId: PETER, createdAt: NEXT_MONDAY }), // volgende week — mag niet meegenomen worden
+       workOrder({ id: 'wo-4', createdByEmployeeId: PETER, createdAt: MONDAY, status: 'SIGNED' }), // al ondertekend — mag niet nogmaals
+     ]);
+-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+ 
+     // Fixeer "vandaag" op de referentieweek via een lichte monkeypatch: signCurrentWeek() gebruikt Date.now() intern via weekBoundsOf(new Date()).
+     vi.setSystemTime(MONDAY);
+@@ -213,11 +226,46 @@ describe('WeeklyApprovalService.signCurrentWeek()', () => {
+ 
+   it('weigert wanneer er geen enkele openstaande werkbon is die week', async () => {
+     const { prisma } = createFakePrisma([workOrder({ id: 'wo-1', status: 'SIGNED' })]);
+-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+ 
+     vi.setSystemTime(MONDAY);
+     await expect(service.signCurrentWeek(PROJECT_ID, SIGN_INPUT)).rejects.toMatchObject({ code: 'WEEKLY_APPROVAL_NO_PENDING_WORK_ORDERS' });
+   });
++
++  // Klantvraag 10/9/2026 — getrapte km-prijs per project + manuele correctie,
++  // hier toegepast op de hele weekbatch (elke werkbon in de batch deelt
++  // dezelfde projectafstand/correctie, zie signCurrentWeek()).
++  it('bevriest kmAmountCents en kmDistanceOneWayMeters op elke werkbon in de batch, op basis van de automatische projectafstand', async () => {
++    const { prisma, workOrders } = createFakePrisma(
++      [
++        workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
++        workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
++      ],
++      { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
++    );
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
++
++    vi.setSystemTime(MONDAY);
++    await service.signCurrentWeek(PROJECT_ID, SIGN_INPUT);
++
++    // 40km enkel = 80km heen-terug > drempel 65km → 3500 + 15 * 80 = 4700 cent, voor élke werkbon in de batch.
++    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 4700, kmDistanceOneWayMeters: 40_000 });
++    expect(workOrders.get('wo-2')).toMatchObject({ kmAmountCents: 4700, kmDistanceOneWayMeters: 40_000 });
++  });
++
++  it('gebruikt de manuele correctie i.p.v. de automatische projectafstand wanneer opgegeven', async () => {
++    const { prisma, workOrders } = createFakePrisma(
++      [workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY })],
++      { kmDistanceOneWayMeters: 5_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
++    );
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
++
++    vi.setSystemTime(MONDAY);
++    await service.signCurrentWeek(PROJECT_ID, { ...SIGN_INPUT, kmDistanceOneWayMetersOverride: 50_000 });
++
++    // 50km enkel = 100km heen-terug > drempel 65km → 3500 + 35 * 80 = 6300 cent.
++    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 6300, kmDistanceOneWayMeters: 50_000 });
++  });
+ });
+ 
+ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
+@@ -226,7 +274,7 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
+       workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
+       workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
+     ]);
+-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+ 
+     vi.setSystemTime(MONDAY);
+     const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
+@@ -238,7 +286,7 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
+       workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY }),
+       workOrder({ id: 'wo-2', createdByEmployeeId: WANNES, createdAt: WEDNESDAY }),
+     ]);
+-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+ 
+     vi.setSystemTime(MONDAY);
+     const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
+@@ -250,12 +298,39 @@ describe('WeeklyApprovalService.listPendingForEmployee()', () => {
+     expect(result.entries.every((e) => e.endedAt > e.startedAt)).toBe(true);
+     expect(result.entries.map((e) => e.workOrderNumber)).toEqual(expect.arrayContaining(['WB-wo-1', 'WB-wo-2']));
+   });
++
++  // Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
++  // getoond aan de klant" — km-vergoeding PER werkbon (niet het totaal), nu op
++  // basis van de getrapte per-project-prijs (klantvraag 10/9/2026).
++  it('kmAmountCentsPerWorkOrder gebruikt de getrapte per-project-prijs op de automatische projectafstand', async () => {
++    const { prisma } = createFakePrisma(
++      [workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY })],
++      { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
++    );
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
++
++    vi.setSystemTime(MONDAY);
++    const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
++
++    expect(result.kmAmountCentsPerWorkOrder).toBe(4700);
++    expect(result.pendingWorkOrderCount).toBe(1);
++  });
++
++  it('kmAmountCentsPerWorkOrder is null wanneer de km-vergoeding niet actief is voor dit project', async () => {
++    const { prisma } = createFakePrisma([workOrder({ id: 'wo-1', createdByEmployeeId: PETER, createdAt: MONDAY })]);
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
++
++    vi.setSystemTime(MONDAY);
++    const result = await service.listPendingForEmployee(PETER, PROJECT_ID);
++
++    expect(result.kmAmountCentsPerWorkOrder).toBeNull();
++  });
+ });
+ 
+ describe('WeeklyApprovalService.reopen()', () => {
+   it('zet ondertekende werkbonnen terug naar DRAFT en wist de handtekening + PDF/sync-status', async () => {
+     const { prisma, workOrders } = createFakePrisma([workOrder({ id: 'wo-1', createdAt: MONDAY })]);
+-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+ 
+     vi.setSystemTime(MONDAY);
+     const result = await service.signCurrentWeek(PROJECT_ID, SIGN_INPUT);
+@@ -272,7 +347,7 @@ describe('WeeklyApprovalService.reopen()', () => {
+ 
+   it('weigert een week te heropenen die nog niet ondertekend is', async () => {
+     const { prisma } = createFakePrisma([workOrder({ id: 'wo-1' })]);
+-    const service = new WeeklyApprovalService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WeeklyApprovalService(prisma, createFakeStorage());
+     await expect(service.reopen('onbestaand-id')).rejects.toMatchObject({ code: 'WEEKLY_APPROVAL_NOT_FOUND' });
+   });
+ });
+diff --git a/apps/api/test/work-order-signature.service.test.ts b/apps/api/test/work-order-signature.service.test.ts
+index d99adbc..7475be9 100644
+--- a/apps/api/test/work-order-signature.service.test.ts
++++ b/apps/api/test/work-order-signature.service.test.ts
+@@ -1,6 +1,5 @@
+ import { Prisma, type PrismaClient } from '@prisma/client';
+ import { describe, expect, it, vi } from 'vitest';
+-import type { CompanySettingsService } from '../src/modules/company-settings/company-settings.service';
+ import type { StorageService } from '../src/modules/storage/storage.service';
+ import { WorkOrderSignatureService } from '../src/modules/work-orders/work-order-signature.service';
+ 
+@@ -25,8 +24,17 @@ interface FakeWorkOrder {
+   description: string | null;
+   timeEntries: Array<{ timeEntryId: string; timeEntry: { employeeId: string } }>;
+   photos: Array<{ id: string }>;
+-  /** Phase 12, deel D — nodig voor kmAmountCents; default null (geen km-vergoeding) in de meeste tests. */
+-  project: { kmDistanceOneWayMeters: number | null };
++  /**
++   * Klantvraag 10/9/2026 — per-project prijsinstellingen i.p.v. het vroegere
++   * bedrijfsbrede CompanySettings.kmRateCents. Default: km-vergoeding niet
++   * actief (kmFlatFeeCents: null), drempel/tarief op de projectdefaults.
++   */
++  project: {
++    kmDistanceOneWayMeters: number | null;
++    kmFlatFeeThresholdKm: number;
++    kmFlatFeeCents: number | null;
++    kmRateAboveCentsPerKm: number;
++  };
+ }
+ 
+ function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
+@@ -36,14 +44,22 @@ function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
+ 
+   const workOrder = {
+     findUnique: vi.fn(async ({ where }: { where: { id: string } }) => workOrders.get(where.id) ?? null),
+-    update: vi.fn(async ({ where, data }: { where: { id: string }; data: { status: string; kmAmountCents?: number | null } }) => {
+-      const existing = workOrders.get(where.id);
+-      if (existing) {
+-        existing.status = data.status;
+-        Object.assign(existing, { kmAmountCents: data.kmAmountCents });
+-      }
+-      return existing ?? null;
+-    }),
++    update: vi.fn(
++      async ({
++        where,
++        data,
++      }: {
++        where: { id: string };
++        data: { status: string; kmAmountCents?: number | null; kmDistanceOneWayMeters?: number | null };
++      }) => {
++        const existing = workOrders.get(where.id);
++        if (existing) {
++          existing.status = data.status;
++          Object.assign(existing, { kmAmountCents: data.kmAmountCents, kmDistanceOneWayMeters: data.kmDistanceOneWayMeters });
++        }
++        return existing ?? null;
++      },
++    ),
+   };
+ 
+   const workOrderSignature = {
+@@ -85,11 +101,6 @@ function createFakePrisma(options: { workOrders?: FakeWorkOrder[] } = {}) {
+   };
+ }
+ 
+-/** Phase 12, deel D — default: km-vergoeding niet actief (geen tarief ingesteld). Override het tarief per test waar nodig. */
+-function createFakeCompanySettingsService(kmRateCents: number | null = null): CompanySettingsService {
+-  return { get: vi.fn(async () => ({ kmRateCents })) } as unknown as CompanySettingsService;
+-}
+-
+ function createFakeStorage(): StorageService {
+   const saved = new Map<string, { data: Buffer; mimeType: string }>();
+   let keyCounter = 0;
+@@ -124,18 +135,19 @@ function draftWorkOrder(overrides: Partial<FakeWorkOrder> = {}): FakeWorkOrder {
+     description: 'Onderhoud uitgevoerd.',
+     timeEntries: [{ timeEntryId: 'entry-1', timeEntry: { employeeId: EMPLOYEE.id } }],
+     photos: [{ id: 'photo-1' }],
+-    project: { kmDistanceOneWayMeters: null },
++    project: { kmDistanceOneWayMeters: null, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: null, kmRateAboveCentsPerKm: 80 },
+     ...overrides,
+   };
+ }
+ 
+-function signInput() {
++function signInput(overrides: Partial<{ kmDistanceOneWayMetersOverride: number | null }> = {}) {
+   return {
+     signerName: 'Jan Janssens',
+     signerFunction: 'Zaakvoerder',
+     requestedByUserId: REQUESTED_BY_USER_ID,
+     ipAddress: '203.0.113.5',
+     image: { data: Buffer.from('signature-png-bytes'), mimeType: 'image/png' },
++    ...overrides,
+   };
+ }
+ 
+@@ -143,7 +155,7 @@ describe('WorkOrderSignatureService', () => {
+   it('sign() maakt de handtekening aan en zet de werkbon op SIGNED', async () => {
+     const { prisma, workOrders } = createFakePrisma({ workOrders: [draftWorkOrder()] });
+     const storage = createFakeStorage();
+-    const service = new WorkOrderSignatureService(prisma, storage, createFakeCompanySettingsService());
++    const service = new WorkOrderSignatureService(prisma, storage);
+ 
+     const signature = await service.sign(EMPLOYEE.id, 'wo-1', signInput());
+ 
+@@ -157,8 +169,8 @@ describe('WorkOrderSignatureService', () => {
+   it('sign() berekent dezelfde contentHash voor eenzelfde werkbon-inhoud, ongeacht tijdstip', async () => {
+     const { prisma: prismaA } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-a' })] });
+     const { prisma: prismaB } = createFakePrisma({ workOrders: [draftWorkOrder({ id: 'wo-b' })] });
+-    const serviceA = new WorkOrderSignatureService(prismaA, createFakeStorage(), createFakeCompanySettingsService());
+-    const serviceB = new WorkOrderSignatureService(prismaB, createFakeStorage(), createFakeCompanySettingsService());
++    const serviceA = new WorkOrderSignatureService(prismaA, createFakeStorage());
++    const serviceB = new WorkOrderSignatureService(prismaB, createFakeStorage());
+ 
+     const sigA = await serviceA.sign(EMPLOYEE.id, 'wo-a', signInput());
+     const sigB = await serviceB.sign(EMPLOYEE.id, 'wo-b', signInput());
+@@ -168,7 +180,7 @@ describe('WorkOrderSignatureService', () => {
+ 
+   it('sign() weigert met WORK_ORDER_NOT_FOUND voor een onbestaande werkbon', async () => {
+     const { prisma } = createFakePrisma();
+-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+ 
+     await expect(service.sign(EMPLOYEE.id, 'onbestaand', signInput())).rejects.toMatchObject({
+       code: 'WORK_ORDER_NOT_FOUND',
+@@ -177,7 +189,7 @@ describe('WorkOrderSignatureService', () => {
+ 
+   it('sign() weigert met WORK_ORDER_NOT_FOUND voor een werknemer die geen deelnemer is (anti-enumeratie)', async () => {
+     const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder()] });
+-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+ 
+     await expect(service.sign(OTHER_EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
+       code: 'WORK_ORDER_NOT_FOUND',
+@@ -186,7 +198,7 @@ describe('WorkOrderSignatureService', () => {
+ 
+   it('sign() weigert met WORK_ORDER_ALREADY_SIGNED zodra de werkbon al niet meer DRAFT is', async () => {
+     const { prisma } = createFakePrisma({ workOrders: [draftWorkOrder({ status: 'SIGNED' })] });
+-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+ 
+     await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
+       code: 'WORK_ORDER_ALREADY_SIGNED',
+@@ -206,10 +218,64 @@ describe('WorkOrderSignatureService', () => {
+         clientVersion: Prisma.prismaVersion.client,
+       });
+     });
+-    const service = new WorkOrderSignatureService(prisma, createFakeStorage(), createFakeCompanySettingsService());
++    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
+ 
+     await expect(service.sign(EMPLOYEE.id, 'wo-1', signInput())).rejects.toMatchObject({
+       code: 'WORK_ORDER_ALREADY_SIGNED',
+     });
+   });
++
++  // Klantvraag 10/9/2026 — getrapte km-prijs per project + manuele correctie
++  // door de werknemer. De formule zelf (computeKmAmountCents) heeft haar
++  // eigen, uitgebreidere tests in distance.service.test.ts — hier enkel de
++  // integratie: bevriest sign() effectief het juiste bedrag én de juiste
++  // afstand op de werkbon, met de override die voorrang krijgt op de
++  // automatische projectafstand?
++  it('sign() bevriest kmAmountCents en kmDistanceOneWayMeters op basis van de automatische projectafstand wanneer er geen correctie is', async () => {
++    const { prisma, workOrders } = createFakePrisma({
++      workOrders: [
++        draftWorkOrder({
++          project: { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
++        }),
++      ],
++    });
++    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
++
++    await service.sign(EMPLOYEE.id, 'wo-1', signInput());
++
++    // 40km enkel = 80km heen-terug > drempel 65km → 3500 + 15 * 80 = 4700 cent.
++    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 4700, kmDistanceOneWayMeters: 40_000 });
++  });
++
++  it('sign() gebruikt de manuele correctie i.p.v. de automatische projectafstand wanneer opgegeven', async () => {
++    const { prisma, workOrders } = createFakePrisma({
++      workOrders: [
++        draftWorkOrder({
++          project: { kmDistanceOneWayMeters: 5_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: 3500, kmRateAboveCentsPerKm: 80 },
++        }),
++      ],
++    });
++    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
++
++    // Medewerker vertrok deze keer van thuis: 50km enkel i.p.v. de automatisch berekende 5km.
++    await service.sign(EMPLOYEE.id, 'wo-1', signInput({ kmDistanceOneWayMetersOverride: 50_000 }));
++
++    // 50km enkel = 100km heen-terug > drempel 65km → 3500 + 35 * 80 = 6300 cent.
++    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: 6300, kmDistanceOneWayMeters: 50_000 });
++  });
++
++  it('sign() laat kmAmountCents leeg wanneer de km-vergoeding niet actief is voor dit project (kmFlatFeeCents null), ondanks een gekende afstand', async () => {
++    const { prisma, workOrders } = createFakePrisma({
++      workOrders: [
++        draftWorkOrder({
++          project: { kmDistanceOneWayMeters: 40_000, kmFlatFeeThresholdKm: 65, kmFlatFeeCents: null, kmRateAboveCentsPerKm: 80 },
++        }),
++      ],
++    });
++    const service = new WorkOrderSignatureService(prisma, createFakeStorage());
++
++    await service.sign(EMPLOYEE.id, 'wo-1', signInput());
++
++    expect(workOrders.get('wo-1')).toMatchObject({ kmAmountCents: null, kmDistanceOneWayMeters: 40_000 });
++  });
+ });
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index f8cf69f..1b72335 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -43,6 +43,8 @@ import type {
+   UpdateProjectOvertimeSettingsBody,
+   UpdateProjectOvertimeSettingsResponseBody,
+   UpdateProjectSigningModeResponseBody,
++  UpdateProjectKmSettingsBody,
++  UpdateProjectKmSettingsResponseBody,
+   SignWorkOrderBody,
+   PendingWeekResponseBody,
+   SignWeekBody,
+@@ -555,4 +557,12 @@ export const projectsApi = {
+         body: JSON.stringify({ signingMode }),
+       }),
+   },
++  /** Klantvraag 10/9/2026 — verplaatsingsvergoeding per project. ADMIN-only. */
++  kmSettings: {
++    update: (projectId: string, body: UpdateProjectKmSettingsBody) =>
++      request<UpdateProjectKmSettingsResponseBody>(`/admin/projects/${projectId}/km-settings`, {
++        method: 'POST',
++        body: JSON.stringify(body),
++      }),
++  },
+ };
+diff --git a/apps/web/src/pages/WorkOrderReviewPage.tsx b/apps/web/src/pages/WorkOrderReviewPage.tsx
+index a614a65..207dd0e 100644
+--- a/apps/web/src/pages/WorkOrderReviewPage.tsx
++++ b/apps/web/src/pages/WorkOrderReviewPage.tsx
+@@ -40,6 +40,13 @@ export function WorkOrderReviewPage() {
+ 
+   const [signerName, setSignerName] = useState('');
+   const [signerFunction, setSignerFunction] = useState('');
++  // Klantvraag 10/9/2026 — "verplaatsing manueel kunnen ingeven, want sommige
++  // medewerkers vertrekken van thuis." Standaard vooringevuld met de
++  // automatisch berekende afstand (workOrder.kmDistanceOneWayMeters), maar
++  // overschrijfbaar vóór het tekenen. Enkel voor de PER_WORK_ORDER-flow (zie
++  // SignStep hieronder) — de WEEKLY-bulkondertekening krijgt deze correctie-UI
++  // bewust nog niet in deze fase.
++  const [kmOverrideInput, setKmOverrideInput] = useState('');
+   const [confirmed, setConfirmed] = useState(false);
+   const [signError, setSignError] = useState<string | null>(null);
+   const [isSigning, setIsSigning] = useState(false);
+@@ -80,6 +87,19 @@ export function WorkOrderReviewPage() {
+     void load();
+   }, [load]);
+ 
++  // Vooringevuld met de automatisch berekende afstand zodra de werkbon
++  // (opnieuw) geladen wordt — enkel bij het eerst inladen van déze werkbon
++  // (key op workOrder.id, niet op elke re-render bv. na een foto-upload),
++  // anders overschrijft dit stilzwijgend een al ingetypte correctie.
++  useEffect(() => {
++    if (workOrder && workOrder.status === 'DRAFT') {
++      setKmOverrideInput(
++        workOrder.kmDistanceOneWayMeters !== null ? (workOrder.kmDistanceOneWayMeters / 1000).toFixed(1) : '',
++      );
++    }
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [workOrder?.id]);
++
+   // Phase 12, deel B — zodra de werknemer de ondertekenstap bereikt op een
+   // WEEKLY-project, tonen we hoeveel werkbonnen deze week in totaal mee
+   // getekend zullen worden (niet enkel deze ene) — dit voorkomt de verrassing
+@@ -161,6 +181,22 @@ export function WorkOrderReviewPage() {
+       setSignError('Teken eerst hieronder voor je bevestigt.');
+       return;
+     }
++    // Klantvraag 10/9/2026 — manuele km-correctie, enkel voor de
++    // PER_WORK_ORDER-flow (zie kmOverrideInput hierboven). Lege invoer = geen
++    // correctie (backend valt terug op de automatische projectberekening).
++    let kmDistanceOneWayMetersOverrideKm: number | null = null;
++    if (workOrder.projectSigningMode === 'PER_WORK_ORDER') {
++      const trimmedKm = kmOverrideInput.trim().replace(',', '.');
++      if (trimmedKm !== '') {
++        const parsedKm = Number(trimmedKm);
++        if (Number.isNaN(parsedKm) || parsedKm < 0) {
++          setSignError('Vul voor "Verplaatsing" een geldig aantal km in, of laat leeg voor de automatische berekening.');
++          return;
++        }
++        kmDistanceOneWayMetersOverrideKm = parsedKm;
++      }
++    }
++
+     setSignError(null);
+     setIsSigning(true);
+     try {
+@@ -171,6 +207,7 @@ export function WorkOrderReviewPage() {
+         confirmed: true as const,
+         mimeType: 'image/png' as const,
+         signatureDataBase64: stripDataUrlPrefix(dataUrl),
++        ...(workOrder.projectSigningMode === 'PER_WORK_ORDER' ? { kmDistanceOneWayMetersOverrideKm } : {}),
+       };
+ 
+       if (workOrder.projectSigningMode === 'WEEKLY') {
+@@ -325,6 +362,8 @@ export function WorkOrderReviewPage() {
+           onSignerNameChange={setSignerName}
+           signerFunction={signerFunction}
+           onSignerFunctionChange={setSignerFunction}
++          kmOverrideInput={kmOverrideInput}
++          onKmOverrideInputChange={setKmOverrideInput}
+           confirmed={confirmed}
+           onConfirmedChange={setConfirmed}
+           signError={signError}
+@@ -491,6 +530,8 @@ function SignStep({
+   onSignerNameChange,
+   signerFunction,
+   onSignerFunctionChange,
++  kmOverrideInput,
++  onKmOverrideInputChange,
+   confirmed,
+   onConfirmedChange,
+   signError,
+@@ -513,6 +554,9 @@ function SignStep({
+   onSignerNameChange: (value: string) => void;
+   signerFunction: string;
+   onSignerFunctionChange: (value: string) => void;
++  /** Klantvraag 10/9/2026 — manuele km-correctie (enkel PER_WORK_ORDER, zie WorkOrderReviewPage). */
++  kmOverrideInput: string;
++  onKmOverrideInputChange: (value: string) => void;
+   confirmed: boolean;
+   onConfirmedChange: (value: boolean) => void;
+   signError: string | null;
+@@ -612,6 +656,27 @@ function SignStep({
+           className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
+         />
+ 
++        {workOrder.projectSigningMode === 'PER_WORK_ORDER' &&
++          (workOrder.kmDistanceOneWayMeters !== null || workOrder.kmDebug.projectKmFlatFeeCents !== null) && (
++            <>
++              <label htmlFor="km-override" className="text-sm text-neutral-300">
++                Verplaatsing (km, enkele rit)
++              </label>
++              <input
++                id="km-override"
++                type="text"
++                inputMode="decimal"
++                value={kmOverrideInput}
++                onChange={(event) => onKmOverrideInputChange(event.target.value)}
++                placeholder="Automatisch berekend"
++                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
++              />
++              <p className="-mt-2 text-xs text-neutral-500">
++                Automatisch vooringevuld — pas aan indien deze medewerker bv. van thuis vertrok.
++              </p>
++            </>
++          )}
++
+         <label className="flex items-start gap-3 text-sm text-neutral-300">
+           <input
+             type="checkbox"
+@@ -894,7 +959,8 @@ function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrder
+       {showKmDebug && (workOrder.kmAmountCents === null || workOrder.kmAmountCents === 0) && (
+         <p className="mt-1 text-right text-[11px] text-neutral-500">
+           (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, afstand ={' '}
+-          {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief = {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'}{' '}
++          {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, drempel = {workOrder.kmDebug.projectKmFlatFeeThresholdKm}km h/t,
++          vaste prijs = {workOrder.kmDebug.projectKmFlatFeeCents ?? 'niet ingesteld'} cent, tarief boven = {workOrder.kmDebug.projectKmRateAboveCentsPerKm}{' '}
+           cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'})
+         </p>
+       )}
+diff --git a/apps/web/src/pages/admin/CompanySettingsPage.tsx b/apps/web/src/pages/admin/CompanySettingsPage.tsx
+index 2797404..98f891a 100644
+--- a/apps/web/src/pages/admin/CompanySettingsPage.tsx
++++ b/apps/web/src/pages/admin/CompanySettingsPage.tsx
+@@ -13,7 +13,6 @@ type FormState = {
+   contactPhone: string;
+   workOrderLegalText: string;
+   maxEmployees: string;
+-  kmRateCents: string;
+ };
+ 
+ function toFormState(settings: CompanySettingsResponseBody): FormState {
+@@ -25,7 +24,6 @@ function toFormState(settings: CompanySettingsResponseBody): FormState {
+     contactPhone: settings.contactPhone ?? '',
+     workOrderLegalText: settings.workOrderLegalText,
+     maxEmployees: settings.maxEmployees !== null ? String(settings.maxEmployees) : '',
+-    kmRateCents: settings.kmRateCents !== null ? (settings.kmRateCents / 100).toFixed(2) : '',
+   };
+ }
+ 
+@@ -108,18 +106,6 @@ export function CompanySettingsPage() {
+       maxEmployees = parsed;
+     }
+ 
+-    const trimmedKmRate = form.kmRateCents.trim().replace(',', '.');
+-    let kmRateCents: number | null = null;
+-    if (trimmedKmRate !== '') {
+-      const parsedRate = Number(trimmedKmRate);
+-      if (Number.isNaN(parsedRate) || parsedRate <= 0) {
+-        setSaveError('Vul voor "Kilometertarief" een geldig bedrag in (bv. 0,35), of laat leeg om de km-vergoeding uit te schakelen.');
+-        setIsSaving(false);
+-        return;
+-      }
+-      kmRateCents = Math.round(parsedRate * 100);
+-    }
+-
+     try {
+       const response = await companySettingsApi.update({
+         companyName: form.companyName.trim(),
+@@ -129,7 +115,6 @@ export function CompanySettingsPage() {
+         contactPhone: form.contactPhone.trim() || null,
+         workOrderLegalText: form.workOrderLegalText.trim() || undefined,
+         maxEmployees,
+-        kmRateCents,
+         ...(pendingLogo ? { logoMimeType: pendingLogo.mimeType, logoDataBase64: pendingLogo.dataBase64 } : {}),
+         ...(removeLogo ? { removeLogo: true } : {}),
+       });
+@@ -269,21 +254,12 @@ export function CompanySettingsPage() {
+             </Field>
+           </section>
+ 
+-          <section className="space-y-4 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
++          <section className="space-y-2 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+             <p className="text-sm text-neutral-400">Kilometervergoeding</p>
+-            <Field label="Kilometertarief (€/km)">
+-              <input
+-                type="text"
+-                inputMode="decimal"
+-                value={form.kmRateCents}
+-                onChange={(event) => setForm({ ...form, kmRateCents: event.target.value })}
+-                placeholder="Uitgeschakeld"
+-                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-sm text-white outline-none focus:border-swatt-gold"
+-              />
+-            </Field>
+             <p className="text-xs text-neutral-500">
+-              Leeg = km-vergoeding uitgeschakeld. Afstand wordt berekend tussen het adres hierboven en het
+-              klantadres (heen-terug) — zie de projectpagina voor de berekende afstand per project.
++              De km-vergoeding wordt sinds 10/9/2026 per project ingesteld (vaste prijs voor de eerste x km,
++              daarboven een tarief per km) in plaats van één tarief voor het hele bedrijf. Ga naar de projectpagina
++              van het betreffende project om dit in te stellen.
+             </p>
+           </section>
+ 
+diff --git a/apps/web/src/pages/admin/ProjectMilestonesPage.tsx b/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
+index 46ca66b..d406463 100644
+--- a/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
++++ b/apps/web/src/pages/admin/ProjectMilestonesPage.tsx
+@@ -103,6 +103,7 @@ export function ProjectMilestonesPage() {
+               <InvoicingPanel key={`invoicing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+               <OvertimeSettingsPanel key={`overtime-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+               <SigningModePanel key={`signing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
++              <KmPricingPanel key={`km-pricing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+               <KmDistancePanel key={`km-${selectedProject.id}`} project={selectedProject} />
+               <MilestonePanel key={selectedProject.id} project={selectedProject} />
+             </>
+@@ -568,6 +569,147 @@ function MilestonePanel({ project }: { project: ProjectSummary }) {
+   );
+ }
+ 
++/**
++ * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project i.p.v. één vlak
++ * tarief voor het hele bedrijf (zie CompanySettingsPage.tsx, veld nu
++ * verwijderd): vaste prijs voor de eerste `kmFlatFeeThresholdKm` km
++ * heen-en-terug, daarboven `kmRateAboveCentsPerKm` per extra km. Lege vaste
++ * prijs = km-vergoeding uitgeschakeld voor dit project (zelfde uit-stand-
++ * conventie als vroeger bij CompanySettings.kmRateCents). Bewust ADMIN-only,
++ * zelfde reden als InvoicingPanel/OvertimeSettingsPanel hierboven: rechtstreekse
++ * financiële impact op de klantfactuur.
++ */
++function KmPricingPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
++  const { user: currentUser } = useAuth();
++  const isAdmin = currentUser?.role === 'ADMIN';
++  const [thresholdInput, setThresholdInput] = useState(String(project.kmFlatFeeThresholdKm));
++  const [flatFeeInput, setFlatFeeInput] = useState(
++    project.kmFlatFeeCents !== null ? (project.kmFlatFeeCents / 100).toFixed(2) : '',
++  );
++  const [rateAboveInput, setRateAboveInput] = useState((project.kmRateAboveCentsPerKm / 100).toFixed(2));
++  const [isSaving, setIsSaving] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [saved, setSaved] = useState(false);
++
++  useEffect(() => {
++    setThresholdInput(String(project.kmFlatFeeThresholdKm));
++    setFlatFeeInput(project.kmFlatFeeCents !== null ? (project.kmFlatFeeCents / 100).toFixed(2) : '');
++    setRateAboveInput((project.kmRateAboveCentsPerKm / 100).toFixed(2));
++  }, [project]);
++
++  async function save() {
++    const threshold = Number(thresholdInput.trim());
++    if (!Number.isInteger(threshold) || threshold < 1) {
++      setError('Vul voor "Eerste x km" een geheel getal in van minstens 1.');
++      return;
++    }
++
++    const trimmedFlatFee = flatFeeInput.trim().replace(',', '.');
++    let kmFlatFeeCents: number | null = null;
++    if (trimmedFlatFee !== '') {
++      const parsedFlatFee = Number(trimmedFlatFee);
++      if (Number.isNaN(parsedFlatFee) || parsedFlatFee < 0) {
++        setError('Vul voor "Vaste prijs" een geldig bedrag in (bv. 35,00), of laat leeg om de km-vergoeding voor dit project uit te schakelen.');
++        return;
++      }
++      kmFlatFeeCents = Math.round(parsedFlatFee * 100);
++    }
++
++    const trimmedRateAbove = rateAboveInput.trim().replace(',', '.');
++    const parsedRateAbove = Number(trimmedRateAbove);
++    if (Number.isNaN(parsedRateAbove) || parsedRateAbove < 0) {
++      setError('Vul voor "Tarief per km daarboven" een geldig bedrag in (bv. 0,80).');
++      return;
++    }
++    const kmRateAboveCentsPerKm = Math.round(parsedRateAbove * 100);
++
++    setIsSaving(true);
++    setError(null);
++    setSaved(false);
++    try {
++      await projectsApi.kmSettings.update(project.id, {
++        kmFlatFeeThresholdKm: threshold,
++        kmFlatFeeCents,
++        kmRateAboveCentsPerKm,
++      });
++      setSaved(true);
++      onUpdated();
++    } catch (err) {
++      setError(err instanceof ApiRequestError ? err.message : 'Opslaan van de kilometervergoeding is mislukt.');
++    } finally {
++      setIsSaving(false);
++    }
++  }
++
++  if (!isAdmin) return null;
++
++  return (
++    <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
++      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Kilometervergoeding</h2>
++      <p className="mb-4 text-sm text-neutral-500">
++        {project.customerName} — {project.name}
++      </p>
++
++      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
++      {saved && <p className="mb-3 text-sm text-emerald-700">Kilometervergoeding opgeslagen.</p>}
++
++      <div className="flex flex-wrap items-end gap-4">
++        <label className="text-sm text-neutral-600">
++          Eerste
++          <div className="mt-1 flex items-center gap-1">
++            <input
++              type="text"
++              inputMode="numeric"
++              value={thresholdInput}
++              onChange={(e) => setThresholdInput(e.target.value)}
++              onBlur={() => void save()}
++              disabled={isSaving}
++              className="w-16 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++            />
++            <span>km h/t</span>
++          </div>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Vaste prijs
++          <div className="mt-1 flex items-center gap-1">
++            <span>€</span>
++            <input
++              type="text"
++              inputMode="decimal"
++              value={flatFeeInput}
++              onChange={(e) => setFlatFeeInput(e.target.value)}
++              onBlur={() => void save()}
++              placeholder="Uitgeschakeld"
++              disabled={isSaving}
++              className="w-24 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++            />
++          </div>
++        </label>
++        <label className="text-sm text-neutral-600">
++          Tarief per km daarboven
++          <div className="mt-1 flex items-center gap-1">
++            <span>€</span>
++            <input
++              type="text"
++              inputMode="decimal"
++              value={rateAboveInput}
++              onChange={(e) => setRateAboveInput(e.target.value)}
++              onBlur={() => void save()}
++              disabled={isSaving}
++              className="w-20 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
++            />
++            <span>/km</span>
++          </div>
++        </label>
++      </div>
++      <p className="mt-3 text-xs text-neutral-500">
++        Leeg bij "Vaste prijs" = km-vergoeding uitgeschakeld voor dit project. Drempel geldt op de heen-en-
++        terug-afstand (zie Kilometerafstand hieronder).
++      </p>
++    </section>
++  );
++}
++
+ /**
+  * Phase 12, deel D (sectie 5): read-only weergave van de berekende km-afstand
+  * — géén bedrag getoond, enkel het aantal kilometer (business rule 11: het
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index a8adf87..07166f9 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -206,6 +206,16 @@ export interface ProjectSummary {
+   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+   /** Phase 12, deel D (sectie 5) — rijafstand ÉÉN richting in meter tussen het Swatt-adres en dit project, `null` zolang nog niet berekend. */
+   kmDistanceOneWayMeters: number | null;
++  /**
++   * Klantvraag 10/9/2026 — verplaatsingsvergoeding per project: vaste prijs
++   * voor de eerste `kmFlatFeeThresholdKm` (heen-en-terug), daarboven
++   * `kmRateAboveCentsPerKm` per extra km. `kmFlatFeeCents` = `null` betekent
++   * km-vergoeding niet actief voor dit project (vervangt het vroegere,
++   * bedrijfsbrede CompanySettings.kmRateCents — @deprecated).
++   */
++  kmFlatFeeThresholdKm: number;
++  kmFlatFeeCents: number | null;
++  kmRateAboveCentsPerKm: number;
+ }
+ 
+ export interface ListProjectsResponseBody {
+@@ -257,6 +267,23 @@ export interface UpdateProjectSigningModeResponseBody {
+   signingMode: 'PER_WORK_ORDER' | 'WEEKLY';
+ }
+ 
++/**
++ * Body/response van POST /admin/projects/:id/km-settings (klantvraag
++ * 10/9/2026 — ADMIN-only, financiële impact). `kmFlatFeeCents: null` schakelt
++ * de km-vergoeding voor dit project uit.
++ */
++export interface UpdateProjectKmSettingsBody {
++  kmFlatFeeThresholdKm: number;
++  kmFlatFeeCents: number | null;
++  kmRateAboveCentsPerKm: number;
++}
++
++export interface UpdateProjectKmSettingsResponseBody {
++  kmFlatFeeThresholdKm: number;
++  kmFlatFeeCents: number | null;
++  kmRateAboveCentsPerKm: number;
++}
++
+ /** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */
+ /** Op vraag (2/9/2026): "alle tijden tonen zodat de ondertekenaar ziet wat hij goedkeurt" — één rij per tijdregistratie, over ALLE openstaande werkbonnen van de week heen (niet enkel die van de medewerker die de onderteken-actie start, zie WeeklyApprovalService.listPendingForEmployee()). */
+ export interface PendingWeekEntrySummary {
+@@ -294,6 +321,8 @@ export interface SignWeekBody {
+   confirmed: true;
+   signatureDataBase64: string;
+   mimeType: 'image/png';
++  /** Klantvraag 10/9/2026 — zie de toelichting bij SignWorkOrderBody.kmDistanceOneWayMetersOverrideKm hieronder, hier toegepast op de hele week-batch. */
++  kmDistanceOneWayMetersOverrideKm?: number | null;
+ }
+ 
+ export interface WeeklyApprovalSummary {
+@@ -517,6 +546,14 @@ export interface SignWorkOrderBody {
+   confirmed: true;
+   mimeType: 'image/png';
+   signatureDataBase64: string;
++  /**
++   * Klantvraag 10/9/2026: "verplaatsing manueel kunnen ingeven, want sommige
++   * medewerkers vertrekken van thuis." Rijafstand ÉÉN richting, in km — de
++   * medewerker ziet standaard de automatisch berekende afstand vooringevuld
++   * (WorkOrderSummary.kmDistanceOneWayMeters), maar mag die overschrijven.
++   * `null`/afwezig = geen correctie, gebruik de projectberekening.
++   */
++  kmDistanceOneWayMetersOverrideKm?: number | null;
+ }
+ 
+ /**
+@@ -586,22 +623,38 @@ export interface WorkOrderSummary {
+   /**
+    * Op vraag (4/9/2026): "bij het ondertekenen wordt de verplaatsing niet
+    * getoond aan de klant" — vóór ondertekening is dit een LEVENDE preview
+-   * (herberekend op basis van Project.kmDistanceOneWayMeters +
+-   * CompanySettings.kmRateCents), na ondertekening het effectief bevroren
+-   * bedrag (WorkOrder.kmAmountCents) — beide via dezelfde formule
+-   * (computeKmAmountCents()), dus geen waargenomen "sprong" voor de klant.
+-   * `null` wanneer er geen km-vergoeding van toepassing is.
++   * (herberekend op basis van Project.kmDistanceOneWayMeters + de
++   * per-project prijsinstellingen, klantvraag 10/9/2026), na ondertekening
++   * het effectief bevroren bedrag (WorkOrder.kmAmountCents) — beide via
++   * dezelfde formule (computeKmAmountCents()), dus geen waargenomen "sprong"
++   * voor de klant. `null` wanneer er geen km-vergoeding van toepassing is.
+    */
+   kmAmountCents: number | null;
++  /**
++   * Klantvraag 10/9/2026 — de effectieve rijafstand (één richting, meter)
++   * achter kmAmountCents hierboven: vóór ondertekenen de levende, automatisch
++   * berekende projectafstand (vooringevuld en overschrijfbaar op het
++   * ondertekenscherm, zie SignWorkOrderBody.kmDistanceOneWayMetersOverrideKm),
++   * ná ondertekenen de bevroren effectieve afstand. `null` zolang nog niet
++   * gekend.
++   */
++  kmDistanceOneWayMeters: number | null;
+   /**
+    * Op vraag (7/9/2026, diagnose): de ruwe invoerwaarden voor de km-
+    * berekening hierboven, apart blootgesteld zodat een Admin/Supervisor op
+    * het scherm zelf kan zien WAAROM kmAmountCents eventueel `null` is
+-   * (geen afstand gekend? geen tarief ingesteld?) zonder in de Render-logs
+-   * te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
++   * (geen afstand gekend? geen vaste prijs ingesteld?) zonder in de Render-
++   * logs te moeten zoeken. Enkel getoond op het ondertekenscherm wanneer
+    * kmAmountCents zelf leeg is — zie WorkOrderReviewPage.tsx.
+    */
+-  kmDebug: { projectTeamleaderId: string; customerName: string; projectKmDistanceOneWayMeters: number | null; companyKmRateCents: number | null };
++  kmDebug: {
++    projectTeamleaderId: string;
++    customerName: string;
++    projectKmDistanceOneWayMeters: number | null;
++    projectKmFlatFeeThresholdKm: number;
++    projectKmFlatFeeCents: number | null;
++    projectKmRateAboveCentsPerKm: number;
++  };
+   createdByEmployeeDisplayName: string;
+   createdAt: string;
+   timeEntries: WorkOrderTimeEntrySummary[];

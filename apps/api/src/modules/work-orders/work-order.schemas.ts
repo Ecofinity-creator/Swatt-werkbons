@@ -87,6 +87,14 @@ export const signWorkOrderBodySchema = z.object({
   confirmed: z.literal(true),
   mimeType: z.literal('image/png'),
   signatureDataBase64: base64ImageSchema(2.8 * 1024 * 1024),
+  /**
+   * Klantvraag 10/9/2026: "verplaatsing manueel kunnen ingeven, want sommige
+   * medewerkers vertrekken van thuis." Rijafstand ÉÉN richting, in km (niet
+   * meter — vriendelijker invoerveld) — `null`/afwezig = geen correctie,
+   * gebruik de automatisch berekende projectafstand. 500 km is een ruime
+   * bovengrens (typefout-bescherming, geen echte zakelijke limiet).
+   */
+  kmDistanceOneWayMetersOverrideKm: z.number().min(0).max(500).nullable().optional(),
 });
 
 export type SignWorkOrderBody = z.infer<typeof signWorkOrderBodySchema>;

@@ -590,6 +590,25 @@ model Project {
   /// externe API-calls).
   kmDistanceOneWayMeters Int? @map("km_distance_one_way_meters")
 
+  /// Klantvraag 10/9/2026 — verplaatsingsvergoeding per project, i.p.v. één
+  /// vlak tarief voor het hele bedrijf (CompanySettings.kmRateCents, sinds
+  /// deze wijziging @deprecated): "prijs voor de eerste x km is een vaste
+  /// prijs, daarboven een tarief per km." Drempel geldt op de HEEN-EN-TERUG-
+  /// afstand (dus het totaal van kmDistanceOneWayMeters × 2, of de manuele
+  /// correctie op WorkOrder — zie computeKmAmountCents() in
+  /// distance.service.ts). Default 65 km, aanpasbaar per project (Projecten
+  /// → Kilometervergoeding, ADMIN-only).
+  kmFlatFeeThresholdKm Int @default(65) @map("km_flat_fee_threshold_km")
+
+  /// Vaste prijs (eurocent) voor de eerste kmFlatFeeThresholdKm heen-en-terug.
+  /// `null` = km-vergoeding niet actief voor dit project (zelfde uit-stand-
+  /// conventie als het vroegere CompanySettings.kmRateCents). Default € 35,00
+  /// bij een nieuw project, per project aanpasbaar of leeg te maken.
+  kmFlatFeeCents Int? @default(3500) @map("km_flat_fee_cents")
+
+  /// Tarief (eurocent) per km BOVEN de drempel. Default € 0,80/km.
+  kmRateAboveCentsPerKm Int @default(80) @map("km_rate_above_cents_per_km")
+
   weeklyApprovals WeeklyApproval[]
 
   lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz
@@ -884,6 +903,20 @@ model WorkOrder {
   /// (geen tarief ingesteld, of afstand nog onbekend).
   kmAmountCents Int? @map("km_amount_cents")
 
+  /// Klantvraag 10/9/2026 — "verplaatsing manueel kunnen ingeven, want
+  /// sommige medewerkers vertrekken van thuis i.p.v. het bedrijfsadres."
+  /// Effectieve rijafstand ÉÉN richting (meter) waarmee kmAmountCents
+  /// hierboven berekend is: ofwel automatisch overgenomen van
+  /// Project.kmDistanceOneWayMeters, ofwel een manuele correctie door de
+  /// medewerker vóór ondertekenen (WorkOrderSignatureService.sign()/
+  /// WeeklyApprovalService.signCurrentWeek()). Bevroren bij ondertekenen,
+  /// net als kmAmountCents — hierdoor toont de PDF nooit meer een andere
+  /// afstand dan waarmee effectief gerekend is, ook niet als het
+  /// projectadres nadien wijzigt (vóór deze wijziging las de PDF steeds de
+  /// actuele projectafstand, een latente inconsistentie). `null` zolang
+  /// niet ondertekend, of geen km-vergoeding van toepassing was.
+  kmDistanceOneWayMeters Int? @map("km_distance_one_way_meters")
+
   /// Op vraag (3/9/2026): "PDF via een knop naar de klant sturen" — bewust
   /// een expliciete actie (geen automatische verzending, zie
   /// EmailErrors/de toelichting bij WorkOrderService.sendPdfToCustomer()).
@@ -1143,6 +1176,11 @@ model CompanySettings {
 
   /// Phase 12, deel D (sectie 5) — tarief per km (eurocent), admin-only
   /// zichtbaar (business rule 11). `null` = km-vergoeding niet actief.
+  /// @deprecated sinds klantvraag 10/9/2026: vervangen door per-project
+  /// instellingen (Project.kmFlatFeeThresholdKm/kmFlatFeeCents/
+  /// kmRateAboveCentsPerKm) — niet meer gebruikt in de berekening
+  /// (computeKmAmountCents()), kolom bewust niet verwijderd (geen
+  /// destructieve migratie nodig).
   kmRateCents Int? @map("km_rate_cents")
 
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz

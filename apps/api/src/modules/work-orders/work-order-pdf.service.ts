@@ -116,11 +116,17 @@ export class WorkOrderPdfService {
       // Op vraag (4/9/2026): "km-vergoeding op de werkbon zelf tonen, niet
       // enkel op de factuur" — zie de toelichting bij
       // computeKmAmountCents()/kmAmountCents in distance.service.ts en
-      // schema.prisma. Beide `null` zolang er geen km-tarief ingesteld is
-      // (CompanySettings.kmRateCents) — de PDF-sectie zelf toont dan
-      // gewoon niets, geen foutieve "€ 0,00"-regel.
+      // schema.prisma. Beide `null` zolang er geen km-vergoeding ingesteld is
+      // voor dit project — de PDF-sectie zelf toont dan gewoon niets, geen
+      // foutieve "€ 0,00"-regel. `workOrder.kmDistanceOneWayMeters` (klantvraag
+      // 10/9/2026) is de BEVROREN effectieve afstand — automatisch of manueel
+      // gecorrigeerd — op het moment van ondertekenen; de PDF wordt enkel voor
+      // een reeds ondertekende (dus bevroren) werkbon gegenereerd, met
+      // `workOrder.project.kmDistanceOneWayMeters` als defensieve terugval
+      // voor het zeldzame geval dat een oudere, vóór deze wijziging
+      // ondertekende werkbon nog geen bevroren waarde heeft.
       kmAmountCents: workOrder.kmAmountCents,
-      kmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
+      kmDistanceOneWayMeters: workOrder.kmDistanceOneWayMeters ?? workOrder.project.kmDistanceOneWayMeters,
       timeEntries: workOrder.timeEntries.map((link) => ({
         employeeDisplayName: link.timeEntry.employee.displayName,
         startedAt: link.timeEntry.startedAt,

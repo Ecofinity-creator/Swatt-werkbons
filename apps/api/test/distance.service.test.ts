@@ -138,21 +138,36 @@ describe('HereDistanceProvider (op vraag 7/9/2026, na een langdurige OpenRouteSe
   });
 });
 
-describe('computeKmAmountCents()', () => {
-  it('berekent heen-en-terug: 12,4 km enkel × €0,35/km → 868 eurocent', () => {
-    expect(computeKmAmountCents(12400, 35)).toBe(868); // (12400*2/1000)*35 = 24.8*35 = 868
+describe('computeKmAmountCents() (klantvraag 10/9/2026 — getrapte prijs per project)', () => {
+  const DEFAULT_PRICING = { flatFeeThresholdKm: 65, flatFeeCents: 3500, rateAboveCentsPerKm: 80 };
+
+  it('binnen de drempel: enkel de vaste prijs, ongeacht de exacte afstand', () => {
+    // 12,4 km enkel = 24,8 km heen-terug, ruim onder de drempel van 65 km.
+    expect(computeKmAmountCents(12400, DEFAULT_PRICING)).toBe(3500);
+  });
+
+  it('exact op de drempel: nog steeds enkel de vaste prijs', () => {
+    // 32,5 km enkel = 65 km heen-terug, exact de drempel.
+    expect(computeKmAmountCents(32500, DEFAULT_PRICING)).toBe(3500);
+  });
+
+  it('boven de drempel: vaste prijs + tarief per extra km', () => {
+    // 40 km enkel = 80 km heen-terug = 15 km boven de drempel van 65.
+    // 3500 + 15*80 = 3500 + 1200 = 4700.
+    expect(computeKmAmountCents(40000, DEFAULT_PRICING)).toBe(4700);
   });
 
   it('geeft null zonder gekende afstand', () => {
-    expect(computeKmAmountCents(null, 35)).toBeNull();
+    expect(computeKmAmountCents(null, DEFAULT_PRICING)).toBeNull();
   });
 
-  it('geeft null zonder ingesteld km-tarief', () => {
-    expect(computeKmAmountCents(12400, null)).toBeNull();
+  it('geeft null wanneer de vaste prijs niet ingesteld is (km-vergoeding niet actief voor dit project)', () => {
+    expect(computeKmAmountCents(40000, { ...DEFAULT_PRICING, flatFeeCents: null })).toBeNull();
   });
 
-  it('rondt af naar de dichtstbijzijnde eurocent', () => {
-    expect(computeKmAmountCents(1000, 33)).toBe(66); // (1000*2/1000)*33 = 2*33 = 66, exact
-    expect(computeKmAmountCents(1001, 33)).toBe(66); // 2.002*33 = 66.066 -> 66
+  it('rondt het extra-km-bedrag af naar de dichtstbijzijnde eurocent', () => {
+    // 50,05 km enkel = 100,1 km heen-terug = 35,1 km boven de drempel van 65.
+    // 3500 + 35,1*80 = 3500 + 2808 = 6308 (exact), en licht verschoven om afronding te forceren:
+    expect(computeKmAmountCents(50051, DEFAULT_PRICING)).toBe(6308); // 35,102*80 = 2808,16 -> 6308,16 -> 6308
   });
 });

@@ -30,4 +30,6 @@ export const signWeekBodySchema = z.object({
   confirmed: z.literal(true),
   mimeType: z.literal('image/png'),
   signatureDataBase64: base64ImageSchema(2.8 * 1024 * 1024),
+  /** Klantvraag 10/9/2026 — zie de toelichting bij signWorkOrderBodySchema in work-order.schemas.ts, hier toegepast op de hele week-batch. */
+  kmDistanceOneWayMetersOverrideKm: z.number().min(0).max(500).nullable().optional(),
 });

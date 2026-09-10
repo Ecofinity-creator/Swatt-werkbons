@@ -26,7 +26,7 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
   const companySettingsService = new CompanySettingsService(app.prisma);
   const auditLogService = new AuditLogService(app.prisma);
   const pdfService = new WorkOrderPdfService(app.prisma, storage, workOrderService, companySettingsService);
-  const service = new WeeklyApprovalService(app.prisma, storage, companySettingsService);
+  const service = new WeeklyApprovalService(app.prisma, storage);
 
   app.get(
     '/work-orders/pending-week',
@@ -75,6 +75,8 @@ export default async function weeklyApprovalRoutes(app: FastifyInstance): Promis
         requestedByUserId: userId,
         ipAddress: request.ip ?? null,
         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
+        kmDistanceOneWayMetersOverride:
+          body.kmDistanceOneWayMetersOverrideKm != null ? Math.round(body.kmDistanceOneWayMetersOverrideKm * 1000) : null,
       });
       await auditLogService.record({
         actorUserId: userId,

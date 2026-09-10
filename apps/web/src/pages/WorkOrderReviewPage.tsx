@@ -40,6 +40,13 @@ export function WorkOrderReviewPage() {
 
   const [signerName, setSignerName] = useState('');
   const [signerFunction, setSignerFunction] = useState('');
+  // Klantvraag 10/9/2026 — "verplaatsing manueel kunnen ingeven, want sommige
+  // medewerkers vertrekken van thuis." Standaard vooringevuld met de
+  // automatisch berekende afstand (workOrder.kmDistanceOneWayMeters), maar
+  // overschrijfbaar vóór het tekenen. Enkel voor de PER_WORK_ORDER-flow (zie
+  // SignStep hieronder) — de WEEKLY-bulkondertekening krijgt deze correctie-UI
+  // bewust nog niet in deze fase.
+  const [kmOverrideInput, setKmOverrideInput] = useState('');
   const [confirmed, setConfirmed] = useState(false);
   const [signError, setSignError] = useState<string | null>(null);
   const [isSigning, setIsSigning] = useState(false);
@@ -79,6 +86,19 @@ export function WorkOrderReviewPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Vooringevuld met de automatisch berekende afstand zodra de werkbon
+  // (opnieuw) geladen wordt — enkel bij het eerst inladen van déze werkbon
+  // (key op workOrder.id, niet op elke re-render bv. na een foto-upload),
+  // anders overschrijft dit stilzwijgend een al ingetypte correctie.
+  useEffect(() => {
+    if (workOrder && workOrder.status === 'DRAFT') {
+      setKmOverrideInput(
+        workOrder.kmDistanceOneWayMeters !== null ? (workOrder.kmDistanceOneWayMeters / 1000).toFixed(1) : '',
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workOrder?.id]);
 
   // Phase 12, deel B — zodra de werknemer de ondertekenstap bereikt op een
   // WEEKLY-project, tonen we hoeveel werkbonnen deze week in totaal mee
@@ -161,6 +181,22 @@ export function WorkOrderReviewPage() {
       setSignError('Teken eerst hieronder voor je bevestigt.');
       return;
     }
+    // Klantvraag 10/9/2026 — manuele km-correctie, enkel voor de
+    // PER_WORK_ORDER-flow (zie kmOverrideInput hierboven). Lege invoer = geen
+    // correctie (backend valt terug op de automatische projectberekening).
+    let kmDistanceOneWayMetersOverrideKm: number | null = null;
+    if (workOrder.projectSigningMode === 'PER_WORK_ORDER') {
+      const trimmedKm = kmOverrideInput.trim().replace(',', '.');
+      if (trimmedKm !== '') {
+        const parsedKm = Number(trimmedKm);
+        if (Number.isNaN(parsedKm) || parsedKm < 0) {
+          setSignError('Vul voor "Verplaatsing" een geldig aantal km in, of laat leeg voor de automatische berekening.');
+          return;
+        }
+        kmDistanceOneWayMetersOverrideKm = parsedKm;
+      }
+    }
+
     setSignError(null);
     setIsSigning(true);
     try {
@@ -171,6 +207,7 @@ export function WorkOrderReviewPage() {
         confirmed: true as const,
         mimeType: 'image/png' as const,
         signatureDataBase64: stripDataUrlPrefix(dataUrl),
+        ...(workOrder.projectSigningMode === 'PER_WORK_ORDER' ? { kmDistanceOneWayMetersOverrideKm } : {}),
       };
 
       if (workOrder.projectSigningMode === 'WEEKLY') {
@@ -325,6 +362,8 @@ export function WorkOrderReviewPage() {
           onSignerNameChange={setSignerName}
           signerFunction={signerFunction}
           onSignerFunctionChange={setSignerFunction}
+          kmOverrideInput={kmOverrideInput}
+          onKmOverrideInputChange={setKmOverrideInput}
           confirmed={confirmed}
           onConfirmedChange={setConfirmed}
           signError={signError}
@@ -491,6 +530,8 @@ function SignStep({
   onSignerNameChange,
   signerFunction,
   onSignerFunctionChange,
+  kmOverrideInput,
+  onKmOverrideInputChange,
   confirmed,
   onConfirmedChange,
   signError,
@@ -513,6 +554,9 @@ function SignStep({
   onSignerNameChange: (value: string) => void;
   signerFunction: string;
   onSignerFunctionChange: (value: string) => void;
+  /** Klantvraag 10/9/2026 — manuele km-correctie (enkel PER_WORK_ORDER, zie WorkOrderReviewPage). */
+  kmOverrideInput: string;
+  onKmOverrideInputChange: (value: string) => void;
   confirmed: boolean;
   onConfirmedChange: (value: boolean) => void;
   signError: string | null;
@@ -611,6 +655,27 @@ function SignStep({
           onChange={(event) => onSignerFunctionChange(event.target.value)}
           className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
         />
+
+        {workOrder.projectSigningMode === 'PER_WORK_ORDER' &&
+          (workOrder.kmDistanceOneWayMeters !== null || workOrder.kmDebug.projectKmFlatFeeCents !== null) && (
+            <>
+              <label htmlFor="km-override" className="text-sm text-neutral-300">
+                Verplaatsing (km, enkele rit)
+              </label>
+              <input
+                id="km-override"
+                type="text"
+                inputMode="decimal"
+                value={kmOverrideInput}
+                onChange={(event) => onKmOverrideInputChange(event.target.value)}
+                placeholder="Automatisch berekend"
+                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
+              />
+              <p className="-mt-2 text-xs text-neutral-500">
+                Automatisch vooringevuld — pas aan indien deze medewerker bv. van thuis vertrok.
+              </p>
+            </>
+          )}
 
         <label className="flex items-start gap-3 text-sm text-neutral-300">
           <input
@@ -894,7 +959,8 @@ function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrder
       {showKmDebug && (workOrder.kmAmountCents === null || workOrder.kmAmountCents === 0) && (
         <p className="mt-1 text-right text-[11px] text-neutral-500">
           (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, afstand ={' '}
-          {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, tarief = {workOrder.kmDebug.companyKmRateCents ?? 'niet ingesteld'}{' '}
+          {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, drempel = {workOrder.kmDebug.projectKmFlatFeeThresholdKm}km h/t,
+          vaste prijs = {workOrder.kmDebug.projectKmFlatFeeCents ?? 'niet ingesteld'} cent, tarief boven = {workOrder.kmDebug.projectKmRateAboveCentsPerKm}{' '}
           cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'})
         </p>
       )}

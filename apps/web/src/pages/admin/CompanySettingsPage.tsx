@@ -13,7 +13,6 @@ type FormState = {
   contactPhone: string;
   workOrderLegalText: string;
   maxEmployees: string;
-  kmRateCents: string;
 };
 
 function toFormState(settings: CompanySettingsResponseBody): FormState {
@@ -25,7 +24,6 @@ function toFormState(settings: CompanySettingsResponseBody): FormState {
     contactPhone: settings.contactPhone ?? '',
     workOrderLegalText: settings.workOrderLegalText,
     maxEmployees: settings.maxEmployees !== null ? String(settings.maxEmployees) : '',
-    kmRateCents: settings.kmRateCents !== null ? (settings.kmRateCents / 100).toFixed(2) : '',
   };
 }
 
@@ -108,18 +106,6 @@ export function CompanySettingsPage() {
       maxEmployees = parsed;
     }
 
-    const trimmedKmRate = form.kmRateCents.trim().replace(',', '.');
-    let kmRateCents: number | null = null;
-    if (trimmedKmRate !== '') {
-      const parsedRate = Number(trimmedKmRate);
-      if (Number.isNaN(parsedRate) || parsedRate <= 0) {
-        setSaveError('Vul voor "Kilometertarief" een geldig bedrag in (bv. 0,35), of laat leeg om de km-vergoeding uit te schakelen.');
-        setIsSaving(false);
-        return;
-      }
-      kmRateCents = Math.round(parsedRate * 100);
-    }
-
     try {
       const response = await companySettingsApi.update({
         companyName: form.companyName.trim(),
@@ -129,7 +115,6 @@ export function CompanySettingsPage() {
         contactPhone: form.contactPhone.trim() || null,
         workOrderLegalText: form.workOrderLegalText.trim() || undefined,
         maxEmployees,
-        kmRateCents,
         ...(pendingLogo ? { logoMimeType: pendingLogo.mimeType, logoDataBase64: pendingLogo.dataBase64 } : {}),
         ...(removeLogo ? { removeLogo: true } : {}),
       });
@@ -269,21 +254,12 @@ export function CompanySettingsPage() {
             </Field>
           </section>
 
-          <section className="space-y-4 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
+          <section className="space-y-2 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
             <p className="text-sm text-neutral-400">Kilometervergoeding</p>
-            <Field label="Kilometertarief (€/km)">
-              <input
-                type="text"
-                inputMode="decimal"
-                value={form.kmRateCents}
-                onChange={(event) => setForm({ ...form, kmRateCents: event.target.value })}
-                placeholder="Uitgeschakeld"
-                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-sm text-white outline-none focus:border-swatt-gold"
-              />
-            </Field>
             <p className="text-xs text-neutral-500">
-              Leeg = km-vergoeding uitgeschakeld. Afstand wordt berekend tussen het adres hierboven en het
-              klantadres (heen-terug) — zie de projectpagina voor de berekende afstand per project.
+              De km-vergoeding wordt sinds 10/9/2026 per project ingesteld (vaste prijs voor de eerste x km,
+              daarboven een tarief per km) in plaats van één tarief voor het hele bedrijf. Ga naar de projectpagina
+              van het betreffende project om dit in te stellen.
             </p>
           </section>
 

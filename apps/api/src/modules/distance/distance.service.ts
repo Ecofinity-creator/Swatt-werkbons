@@ -208,17 +208,33 @@ interface HereRoutesResponse {
   routes: Array<{ sections: Array<{ summary: { length: number } }> }>;
 }
 
+/** Per-project prijsinstellingen voor computeKmAmountCents() — zie Project.kmFlatFeeThresholdKm/kmFlatFeeCents/kmRateAboveCentsPerKm in schema.prisma. */
+export interface KmPricingSettings {
+  /** Drempel (heen-en-terug, in km) die binnen de vaste prijs valt. */
+  flatFeeThresholdKm: number;
+  /** Vaste prijs (eurocent) voor de eerste `flatFeeThresholdKm`. `null` = km-vergoeding niet actief. */
+  flatFeeCents: number | null;
+  /** Tarief (eurocent) per km BOVEN de drempel. */
+  rateAboveCentsPerKm: number;
+}
+
 /**
- * Phase 12, deel D — km-vergoeding heen-en-terug: `kmDistanceOneWayMeters`
- * is de rijafstand in één richting (zie DistanceService hierboven);
- * vermenigvuldigd met 2 voor heen-terug, omgezet naar kilometer, en
- * vermenigvuldigd met het tarief (eurocent/km). `null` zodra één van beide
- * nog niet gekend is (adres nog niet berekend, of geen km-tarief ingesteld)
- * — een werkbon zonder km-bedrag is dus het normale, niet-foutieve geval
- * zolang de km-vergoeding niet actief is.
+ * Klantvraag 10/9/2026 — vervangt de vroegere vlakke formule (afstand ×
+ * bedrijfstarief, Phase 12 deel D) door een getrapte prijs per project: een
+ * vaste prijs voor de eerste `flatFeeThresholdKm` (heen-en-terug), en
+ * daarboven een tarief per extra km. `kmDistanceOneWayMeters` is de rijafstand
+ * in één richting (zie DistanceService hierboven); vermenigvuldigd met 2 voor
+ * heen-terug, omgezet naar kilometer, tegen de drempel afgezet. `null` zodra
+ * de afstand nog niet gekend is, of `pricing.flatFeeCents` leeg is (km-
+ * vergoeding niet actief voor dit project) — een werkbon zonder km-bedrag is
+ * dus het normale, niet-foutieve geval zolang de km-vergoeding niet actief is.
  */
-export function computeKmAmountCents(kmDistanceOneWayMeters: number | null, kmRateCents: number | null): number | null {
-  if (kmDistanceOneWayMeters === null || kmRateCents === null) return null;
+export function computeKmAmountCents(kmDistanceOneWayMeters: number | null, pricing: KmPricingSettings): number | null {
+  if (kmDistanceOneWayMeters === null || pricing.flatFeeCents === null) return null;
   const roundTripKm = (kmDistanceOneWayMeters * 2) / 1000;
-  return Math.round(roundTripKm * kmRateCents);
+  if (roundTripKm <= pricing.flatFeeThresholdKm) {
+    return pricing.flatFeeCents;
+  }
+  const extraKm = roundTripKm - pricing.flatFeeThresholdKm;
+  return Math.round(pricing.flatFeeCents + extraKm * pricing.rateAboveCentsPerKm);
 }

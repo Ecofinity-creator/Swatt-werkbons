@@ -46,7 +46,7 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
   const storage: StorageService = new DatabaseStorageService(app.prisma);
   const photoService = new WorkOrderPhotoService(app.prisma, storage);
   const companySettingsService = new CompanySettingsService(app.prisma);
-  const signatureService = new WorkOrderSignatureService(app.prisma, storage, companySettingsService);
+  const signatureService = new WorkOrderSignatureService(app.prisma, storage);
   const pdfService = new WorkOrderPdfService(app.prisma, storage, service, companySettingsService);
   const auditLogService = new AuditLogService(app.prisma);
 
@@ -182,6 +182,11 @@ export default async function workOrderRoutes(app: FastifyInstance): Promise<voi
         requestedByUserId: userId,
         ipAddress: request.ip ?? null,
         image: { data: Buffer.from(body.signatureDataBase64, 'base64'), mimeType: body.mimeType },
+        // Klantvraag 10/9/2026 — manuele km-correctie, ingevuld in km op het
+        // scherm, hier omgezet naar meter (zelfde eenheid als de rest van de
+        // km-berekening, zie distance.service.ts).
+        kmDistanceOneWayMetersOverride:
+          body.kmDistanceOneWayMetersOverrideKm != null ? Math.round(body.kmDistanceOneWayMetersOverrideKm * 1000) : null,
       });
       await auditLogService.record({
         actorUserId: userId,
@@ -477,7 +482,19 @@ async function toSummary(
     }
   }
 
-  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(projectKmDistanceOneWayMeters, companySettingsForKm.kmRateCents);
+  // Klantvraag 10/9/2026 — "verplaatsing manueel kunnen ingeven": vóór
+  // ondertekenen is er nog geen bevroren afstand (WorkOrder.kmDistanceOneWayMeters
+  // staat dan nog op `null`), dus de effectieve afstand is de levende
+  // projectberekening hierboven — precies wat de medewerker als vooringevulde,
+  // overschrijfbare waarde te zien krijgt. Ná ondertekenen wint de bevroren
+  // waarde altijd (blijft ongewijzigd, ook als het projectadres nadien wijzigt).
+  const effectiveKmDistanceOneWayMeters = workOrder.kmDistanceOneWayMeters ?? projectKmDistanceOneWayMeters;
+  const kmPricing = {
+    flatFeeThresholdKm: workOrder.project.kmFlatFeeThresholdKm,
+    flatFeeCents: workOrder.project.kmFlatFeeCents,
+    rateAboveCentsPerKm: workOrder.project.kmRateAboveCentsPerKm,
+  };
+  const kmAmountCents = workOrder.kmAmountCents ?? computeKmAmountCents(effectiveKmDistanceOneWayMeters, kmPricing);
 
   return {
     id: workOrder.id,
@@ -489,12 +506,18 @@ async function toSummary(
     status: workOrder.status,
     description: workOrder.description,
     kmAmountCents,
+    // Klantvraag 10/9/2026 — de effectieve afstand (vóór tekenen: levende
+    // preview/vooringevulde waarde; ná tekenen: bevroren), in meter, zodat de
+    // frontend dit kan tonen/laten overschrijven op het onderteken-scherm.
+    kmDistanceOneWayMeters: effectiveKmDistanceOneWayMeters,
     // Op vraag (7/9/2026, diagnose) — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
     kmDebug: {
       projectTeamleaderId: workOrder.project.teamleaderId,
       customerName: workOrder.project.customer.name,
       projectKmDistanceOneWayMeters,
-      companyKmRateCents: companySettingsForKm.kmRateCents,
+      projectKmFlatFeeThresholdKm: kmPricing.flatFeeThresholdKm,
+      projectKmFlatFeeCents: kmPricing.flatFeeCents,
+      projectKmRateAboveCentsPerKm: kmPricing.rateAboveCentsPerKm,
     },
     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
     createdAt: workOrder.createdAt.toISOString(),

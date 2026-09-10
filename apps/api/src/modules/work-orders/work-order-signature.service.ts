@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { WorkOrderErrors } from '../../errors';
-import type { CompanySettingsService } from '../company-settings/company-settings.service';
 import { computeKmAmountCents } from '../distance/distance.service';
 import type { StorageService } from '../storage/storage.service';
 import type { WorkOrderSignatureRecord } from './work-order.service';
@@ -14,6 +13,15 @@ export interface SignWorkOrderInput {
   /** Sectie 10: "eventueel IP-adres indien juridisch/GDPR-technisch wenselijk". */
   ipAddress: string | null;
   image: { data: Buffer; mimeType: string };
+  /**
+   * Klantvraag 10/9/2026: "verplaatsing manueel kunnen ingeven, want sommige
+   * medewerkers vertrekken van thuis i.p.v. het bedrijfsadres." Rijafstand
+   * ÉÉN richting, in meter — de medewerker ziet standaard de automatisch
+   * berekende projectafstand vooringevuld, maar mag dat vóór ondertekenen
+   * overschrijven. `undefined`/`null` = geen correctie, gebruik de
+   * projectberekening (zelfde gedrag als vóór deze wijziging).
+   */
+  kmDistanceOneWayMetersOverride?: number | null;
 }
 
 interface WorkOrderSnapshot {
@@ -24,6 +32,10 @@ interface WorkOrderSnapshot {
   photoIds: string[];
   /** Phase 12, deel D — nodig om kmAmountCents te bevriezen op het moment van ondertekenen. */
   projectKmDistanceOneWayMeters: number | null;
+  /** Klantvraag 10/9/2026 — per-project prijsinstellingen, zie Project.kmFlatFeeThresholdKm/kmFlatFeeCents/kmRateAboveCentsPerKm in schema.prisma. */
+  projectKmFlatFeeThresholdKm: number;
+  projectKmFlatFeeCents: number | null;
+  projectKmRateAboveCentsPerKm: number;
 }
 
 /**
@@ -48,7 +60,6 @@ export class WorkOrderSignatureService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly storage: StorageService,
-    private readonly companySettingsService: CompanySettingsService,
   ) {}
 
   async sign(employeeId: string, workOrderId: string, input: SignWorkOrderInput): Promise<WorkOrderSignatureRecord> {
@@ -58,11 +69,18 @@ export class WorkOrderSignatureService {
     const signedAt = new Date();
     const contentHash = computeContentHash(snapshot);
 
-    // Phase 12, deel D (sectie 5) — bevriezen op het moment van ondertekenen,
-    // net als de andere bedragen: wijzigt het projectadres of het km-tarief
-    // later, dan blijft dit bedrag op deze al ondertekende werkbon ongewijzigd.
-    const companySettings = await this.companySettingsService.get();
-    const kmAmountCents = computeKmAmountCents(snapshot.projectKmDistanceOneWayMeters, companySettings.kmRateCents);
+    // Phase 12, deel D (sectie 5), uitgebreid op klantvraag 10/9/2026 —
+    // bevriezen op het moment van ondertekenen: wijzigt het projectadres of
+    // de prijsinstellingen later, dan blijft dit bedrag op deze al
+    // ondertekende werkbon ongewijzigd. De effectieve afstand is de manuele
+    // correctie indien opgegeven, anders de automatisch berekende
+    // projectafstand (ongewijzigd gedrag t.o.v. vóór deze wijziging).
+    const effectiveKmDistanceOneWayMeters = input.kmDistanceOneWayMetersOverride ?? snapshot.projectKmDistanceOneWayMeters;
+    const kmAmountCents = computeKmAmountCents(effectiveKmDistanceOneWayMeters, {
+      flatFeeThresholdKm: snapshot.projectKmFlatFeeThresholdKm,
+      flatFeeCents: snapshot.projectKmFlatFeeCents,
+      rateAboveCentsPerKm: snapshot.projectKmRateAboveCentsPerKm,
+    });
 
     try {
       const [signature] = await this.prisma.$transaction([
@@ -80,7 +98,7 @@ export class WorkOrderSignatureService {
         }),
         this.prisma.workOrder.update({
           where: { id: workOrderId },
-          data: { status: 'SIGNED', kmAmountCents },
+          data: { status: 'SIGNED', kmAmountCents, kmDistanceOneWayMeters: effectiveKmDistanceOneWayMeters },
         }),
       ]);
       return signature;
@@ -109,7 +127,14 @@ export class WorkOrderSignatureService {
         description: true,
         timeEntries: { select: { timeEntryId: true, timeEntry: { select: { employeeId: true } } } },
         photos: { select: { id: true } },
-        project: { select: { kmDistanceOneWayMeters: true } },
+        project: {
+          select: {
+            kmDistanceOneWayMeters: true,
+            kmFlatFeeThresholdKm: true,
+            kmFlatFeeCents: true,
+            kmRateAboveCentsPerKm: true,
+          },
+        },
       },
     });
     if (!workOrder) {
@@ -131,6 +156,9 @@ export class WorkOrderSignatureService {
       timeEntryIds: workOrder.timeEntries.map((link: { timeEntryId: string }) => link.timeEntryId),
       photoIds: workOrder.photos.map((photo: { id: string }) => photo.id),
       projectKmDistanceOneWayMeters: workOrder.project.kmDistanceOneWayMeters,
+      projectKmFlatFeeThresholdKm: workOrder.project.kmFlatFeeThresholdKm,
+      projectKmFlatFeeCents: workOrder.project.kmFlatFeeCents,
+      projectKmRateAboveCentsPerKm: workOrder.project.kmRateAboveCentsPerKm,
     };
   }
 }
