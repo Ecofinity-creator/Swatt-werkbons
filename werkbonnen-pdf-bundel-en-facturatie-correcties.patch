@@ -1,0 +1,1760 @@
+From 9d48997a6b97c977baddbd842bc328bb8f074ec3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 10 Sep 2026 11:36:38 +0000
+Subject: [PATCH] =?UTF-8?q?Werkbonnen-PDF-bundel=20per=20klant/maand=20of?=
+ =?UTF-8?q?=20-week=20+=20uren/km-correctie=20v=C3=B3=C3=B3r=20Teamleader-?=
+ =?UTF-8?q?conceptfactuur?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Klantvraag 10/9/2026:
+1) 'het moet mogelijk zijn de werkbonnen te exporteren per klant/per maand
+   of per klant/per week in 1 pdf' — nieuwe InvoiceBatchPdfBundleService
+   (pdf-lib) voegt de reeds gegenereerde, onaangeroerde werkbon-PDF's van
+   een facturatiebatch samen tot één PDF (chronologisch op
+   ondertekeningsdatum), optioneel gefilterd op ISO-week. Nieuwe route
+   GET /admin/invoice-batches/:id/work-order-pdf-bundle?week=YYYY-Wnn.
+   Facturatiepagina toont per batch 'Volledige maand' + 'Week N'-downloadlinks.
+
+2) 'de klant wil ook nog een mogelijkheid om de gefactureerde km en uren
+   aan te passen vooraleer de factuur naar teamleader gaat' — nieuwe
+   nullable overrides InvoiceBatchLine.adjustedInvoiceableSeconds/
+   adjustedKmAmountCents/adjustmentNote (niet-destructief, de werkelijke/
+   bevroren waarden blijven ongewijzigd), enkel wijzigbaar op een
+   DRAFT-batch (InvoiceBatchService.setLineAdjustment). Uren-correctie
+   wordt evenredig verdeeld over de onderliggende tijdregistraties in
+   TeamleaderInvoiceService.buildGroupedLinesForBatch zodat de bestaande
+   technieker/week-groepering en dag/weekdrempel-overurenberekening
+   ongemoeid blijven; km-correctie vervangt de bevroren kmAmountCents in
+   addKmItemsToGroups. Facturatiepagina: per werkbon-regel corrigeerbaar
+   (H:MM-uren, km-bedrag, vrije notitie), met de werkelijke waarde
+   doorgestreept zichtbaar naast de correctie.
+
+Nieuw: migratie 20260910150000_invoice_batch_line_adjustments, 24 nieuwe
+tests (teamleader-invoice/invoice-batch/invoice-batch-pdf-bundle), zowel
+verduidelijkt in bewuste dependency pdf-lib toegevoegd aan apps/api.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01K682qexDdBu1y2TDUscPeY
+---
+ apps/api/package.json                         |   1 +
+ .../migration.sql                             |  11 +
+ apps/api/prisma/schema.prisma                 |  16 +
+ apps/api/src/errors.ts                        |  24 ++
+ .../invoice-batch-pdf-bundle.service.ts       | 117 ++++++++
+ .../invoice-batches/invoice-batch.routes.ts   |  54 ++++
+ .../invoice-batches/invoice-batch.schemas.ts  |  31 ++
+ .../invoice-batches/invoice-batch.service.ts  |  73 ++++-
+ .../teamleader/teamleader-invoice.service.ts  |  38 ++-
+ .../work-orders/work-order-pdf.service.ts     |   3 +-
+ .../invoice-batch-pdf-bundle.service.test.ts  | 160 ++++++++++
+ apps/api/test/invoice-batch.service.test.ts   | 107 ++++++-
+ .../test/teamleader-invoice.service.test.ts   |  88 ++++++
+ apps/web/src/api/client.ts                    |  19 ++
+ apps/web/src/pages/admin/InvoicingPage.tsx    | 282 +++++++++++++++++-
+ package-lock.json                             |  82 +++++
+ packages/shared-types/src/index.ts            |  35 +++
+ 17 files changed, 1130 insertions(+), 11 deletions(-)
+ create mode 100644 apps/api/prisma/migrations/20260910150000_invoice_batch_line_adjustments/migration.sql
+ create mode 100644 apps/api/src/modules/invoice-batches/invoice-batch-pdf-bundle.service.ts
+ create mode 100644 apps/api/test/invoice-batch-pdf-bundle.service.test.ts
+
+diff --git a/apps/api/package.json b/apps/api/package.json
+index ca8c731..8f2f999 100644
+--- a/apps/api/package.json
++++ b/apps/api/package.json
+@@ -28,6 +28,7 @@
+     "fastify": "^5.1.0",
+     "fastify-plugin": "^5.0.1",
+     "ioredis": "^5.4.2",
++    "pdf-lib": "^1.17.1",
+     "pino-pretty": "^11.3.0",
+     "react": "^18.3.1",
+     "zod": "^3.23.8"
+diff --git a/apps/api/prisma/migrations/20260910150000_invoice_batch_line_adjustments/migration.sql b/apps/api/prisma/migrations/20260910150000_invoice_batch_line_adjustments/migration.sql
+new file mode 100644
+index 0000000..13b1516
+--- /dev/null
++++ b/apps/api/prisma/migrations/20260910150000_invoice_batch_line_adjustments/migration.sql
+@@ -0,0 +1,11 @@
++-- Klantvraag 10/9/2026: "De klant wil ook nog een mogelijkheid om de
++-- gefactureerde km en uren aan te passen vooraleer de factuur naar
++-- teamleader gaat."
++--
++-- Niet-destructief: drie nieuwe nullable kolommen op `invoice_batch_line`.
++-- `null` = geen correctie, gebruik de werkelijke/bevroren waarde
++-- (invoiceable_seconds resp. work_order.km_amount_cents). Enkel te wijzigen
++-- zolang de batch nog DRAFT is (InvoiceBatchService.setLineAdjustment()).
++ALTER TABLE "invoice_batch_line" ADD COLUMN "adjusted_invoiceable_seconds" INTEGER;
++ALTER TABLE "invoice_batch_line" ADD COLUMN "adjusted_km_amount_cents" INTEGER;
++ALTER TABLE "invoice_batch_line" ADD COLUMN "adjustment_note" TEXT;
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 208b4e8..f1276cb 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -1356,6 +1356,22 @@ model InvoiceBatchLine {
+   invoiceableSeconds Int      @map("invoiceable_seconds")
+   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz
+ 
++  /// Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan
++  /// te passen vooraleer de factuur naar teamleader gaat". Beide velden zijn
++  /// nullable overrides (nooit een destructieve wijziging van de origineel
++  /// berekende/bevroren waarde): `null` betekent "geen correctie, gebruik de
++  /// werkelijke waarde" — `invoiceableSeconds` hierboven (bevroren bij
++  /// batch-aanmaak) resp. `WorkOrder.kmAmountCents` (bevroren bij
++  /// ondertekening). Enkel te wijzigen zolang de batch status DRAFT heeft
++  /// (zelfde regel als InvoiceBatchProjectRate hierboven) — zie
++  /// InvoiceBatchService.setLineAdjustment(). `adjustmentNote` is vrije tekst
++  /// zodat de admin kan documenteren waarom er gecorrigeerd werd (auditlog
++  /// legt de oude/nieuwe waarde zelf al vast, deze notitie is voor menselijke
++  /// context op de factuur/werkbonbundel).
++  adjustedInvoiceableSeconds Int?    @map("adjusted_invoiceable_seconds")
++  adjustedKmAmountCents      Int?    @map("adjusted_km_amount_cents")
++  adjustmentNote             String? @map("adjustment_note")
++
+   invoiceBatch InvoiceBatch @relation(fields: [invoiceBatchId], references: [id], onDelete: Cascade)
+   workOrder    WorkOrder    @relation(fields: [workOrderId], references: [id], onDelete: Restrict)
+ 
+diff --git a/apps/api/src/errors.ts b/apps/api/src/errors.ts
+index f50c9c8..05013a3 100644
+--- a/apps/api/src/errors.ts
++++ b/apps/api/src/errors.ts
+@@ -361,6 +361,30 @@ export const InvoiceBatchErrors = {
+       'INVOICE_BATCH_PROJECT_NOT_ON_BATCH',
+       'Dit project komt niet voor op een werkbon van deze facturatiebatch.',
+     ),
++  /** Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan te passen". De opgegeven regel (InvoiceBatchLine) hoort niet bij deze batch. */
++  lineNotOnBatch: () =>
++    new ApiError(404, 'INVOICE_BATCH_LINE_NOT_ON_BATCH', 'Deze werkbon komt niet voor op deze facturatiebatch.'),
++  /** Negatieve of anderszins ongeldige correctie (bv. min. -1 seconde) — zie invoice-batch.schemas.ts voor de basisvalidatie. */
++  invalidAdjustment: () =>
++    new ApiError(
++      400,
++      'INVOICE_BATCH_INVALID_ADJUSTMENT',
++      'Het gecorrigeerde aantal uren of kilometers moet nul of positief zijn.',
++    ),
++  /** Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per klant/per week in 1 pdf". Geen enkele werkbon in het gevraagde bereik heeft (nog) een klaarstaande PDF. */
++  noPdfsToBundle: () =>
++    new ApiError(
++      409,
++      'INVOICE_BATCH_NO_PDFS_TO_BUNDLE',
++      'Er is voor deze batch (of deze week) nog geen enkele werkbon-PDF beschikbaar.',
++    ),
++  /** Eén of meer werkbonnen in het gevraagde bereik hebben nog geen klaarstaande PDF (bv. nog PDF_GENERATING/PDF_PENDING) — de bundel zou dan onvolledig zijn. */
++  pdfsNotReady: (workOrderNumbers: string[]) =>
++    new ApiError(
++      409,
++      'INVOICE_BATCH_PDFS_NOT_READY',
++      `De PDF van volgende werkbon(nen) is nog niet klaar: ${workOrderNumbers.join(', ')}. Probeer het straks opnieuw.`,
++    ),
+ };
+ 
+ /** Phase 12, deel E — personeelsuitbetaling (maandoverzicht per medewerker). */
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch-pdf-bundle.service.ts b/apps/api/src/modules/invoice-batches/invoice-batch-pdf-bundle.service.ts
+new file mode 100644
+index 0000000..b0934a9
+--- /dev/null
++++ b/apps/api/src/modules/invoice-batches/invoice-batch-pdf-bundle.service.ts
+@@ -0,0 +1,117 @@
++import type { PrismaClient } from '@prisma/client';
++import { PDFDocument } from 'pdf-lib';
++import { InvoiceBatchErrors } from '../../errors';
++import type { StorageService } from '../storage/storage.service';
++import { slugify } from '../work-orders/work-order-pdf.service';
++
++/** Handgeschreven vorm van de query hieronder — zelfde reden als elders in deze codebase (stale gegenereerde Prisma-client in de sandbox). */
++interface BundleWorkOrderRow {
++  id: string;
++  workOrderNumber: string;
++  pdfStatus: string;
++  pdfFileKey: string | null;
++  signature: { signedAt: Date } | null;
++}
++
++interface BundleBatchRow {
++  id: string;
++  periodLabel: string;
++  customer: { name: string };
++  lines: Array<{ workOrder: BundleWorkOrderRow }>;
++}
++
++export interface WorkOrderPdfBundleResult {
++  fileName: string;
++  data: Buffer;
++}
++
++/**
++ * Klantvraag 10/9/2026 — "het moet mogelijk zijn de werkbonnen te
++ * exporteren per klant/per maand of per klant/per week in 1 pdf. dus alle
++ * afzonderlijke werkbonnen afzonderlijk laten zoals ze gemaakt worden maar
++ * in 1 bestand per week zetten, wat meegestuurd wordt met de factuur."
++ *
++ * Bewust een aparte, kleine service (i.p.v. dit in WorkOrderPdfService of
++ * InvoiceBatchService onder te brengen): dit bouwt GEEN nieuwe werkbon-PDF
++ * (dat blijft WorkOrderPdfService, sectie 31 — "PDF EN TEAMLEADER MOETEN
++ * LOSGEKOPPELD ZIJN"), het voegt enkel reeds gegenereerde, onaangeroerde
++ * PDF's samen tot één bestand via `pdf-lib` (i.t.t. `@react-pdf/renderer`,
++ * dat enkel nieuwe PDF's kan RENDEREN, geen bestaande kan MERGEN). Elke
++ * individuele werkbon-PDF blijft exact zoals ze was — deze service leest ze
++ * enkel uit `StorageService` en plakt de pagina's achter elkaar.
++ *
++ * Een InvoiceBatch is altijd al per klant+maand (zie InvoiceBatchService.create
++ * — `periodLabel`), dus "per maand" = de volledige batch, geen `week`-filter
++ * nodig. "Per week" groepeert op de ISO-8601-week van de ONDERTEKENINGSDATUM
++ * van elke werkbon (`WorkOrderSignature.signedAt`) — bewust een andere
++ * sleutel dan de ISO-week-groepering in teamleader-invoice.service.ts (die
++ * groepeert op de datum van de WERKELIJK GEWERKTE uren, wat voor een
++ * facturatiesectie de juiste keuze is). Voor "stuur deze week se werkbonnen
++ * mee met de factuur" is de ondertekeningsdatum de praktische, ondubbelzinnige
++ * keuze: elke werkbon heeft precies één ondertekeningsmoment (i.t.t. mogelijk
++ * meerdere tijdregistraties op meerdere dagen).
++ */
++export class InvoiceBatchPdfBundleService {
++  constructor(
++    private readonly prisma: PrismaClient,
++    private readonly storage: StorageService,
++  ) {}
++
++  /** `weekKey`: ISO-8601-weeksleutel ("2026-W32", zie isoWeekKeyOf hieronder) — `undefined` bundelt de volledige batch (= de hele maand). */
++  async buildBundle(batchId: string, weekKey?: string): Promise<WorkOrderPdfBundleResult> {
++    const batch = (await this.prisma.invoiceBatch.findUnique({
++      where: { id: batchId },
++      include: {
++        customer: true,
++        lines: { include: { workOrder: { include: { signature: true } } } },
++      },
++    })) as BundleBatchRow | null;
++    if (!batch) {
++      throw InvoiceBatchErrors.notFound();
++    }
++
++    const workOrders = batch.lines
++      .map((line) => line.workOrder)
++      .filter((workOrder) => !weekKey || (workOrder.signature !== null && isoWeekKeyOf(workOrder.signature.signedAt) === weekKey))
++      .sort((a, b) => (a.signature?.signedAt.getTime() ?? 0) - (b.signature?.signedAt.getTime() ?? 0));
++
++    if (workOrders.length === 0) {
++      throw InvoiceBatchErrors.noPdfsToBundle();
++    }
++
++    const notReady = workOrders.filter((workOrder) => workOrder.pdfStatus !== 'PDF_READY' || !workOrder.pdfFileKey);
++    if (notReady.length > 0) {
++      throw InvoiceBatchErrors.pdfsNotReady(notReady.map((workOrder) => workOrder.workOrderNumber).sort());
++    }
++
++    const merged = await PDFDocument.create();
++    for (const workOrder of workOrders) {
++      // `notReady` hierboven garandeert al dat pdfFileKey niet null is — enkel voor TypeScript-narrowing.
++      const file = await this.storage.read(workOrder.pdfFileKey!);
++      const sourceDoc = await PDFDocument.load(file.data);
++      const copiedPages = await merged.copyPages(sourceDoc, sourceDoc.getPageIndices());
++      for (const page of copiedPages) {
++        merged.addPage(page);
++      }
++    }
++    const mergedBytes = await merged.save();
++
++    const periodSuffix = weekKey ? weekKey.replace('-', '_') : batch.periodLabel.replace(/[^0-9A-Za-z]+/g, '_');
++    const fileName = `Werkbonnen_${slugify(batch.customer.name)}_${periodSuffix}.pdf`;
++
++    return { fileName, data: Buffer.from(mergedBytes) };
++  }
++}
++
++/** Zelfde formule als teamleader-invoice.service.ts's isoWeekKeyOf (ISO-8601, maandag als eerste dag) — bewust lokaal gehouden, zelfde patroon als computeWorkedSeconds elders in deze codebase. */
++function isoWeekKeyOf(date: Date): string {
++  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
++  const dayNumber = (d.getUTCDay() + 6) % 7; // maandag = 0
++  d.setUTCDate(d.getUTCDate() - dayNumber + 3); // donderdag van deze ISO-week
++  const isoYear = d.getUTCFullYear();
++  const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
++  const firstThursdayDayNumber = (firstThursday.getUTCDay() + 6) % 7;
++  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstThursdayDayNumber + 3);
++  const weekNumber = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 24 * 60 * 60 * 1000));
++  return `${isoYear}-W${String(weekNumber).padStart(2, '0')}`;
++}
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts b/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
+index f6a194e..394c154 100644
+--- a/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
++++ b/apps/api/src/modules/invoice-batches/invoice-batch.routes.ts
+@@ -6,6 +6,8 @@ import type {
+   InvoiceableWorkOrderSummary,
+   ListInvoiceBatchesResponseBody,
+   ListInvoiceableWorkOrdersResponseBody,
++  SetInvoiceBatchLineAdjustmentBody,
++  SetInvoiceBatchLineAdjustmentResponseBody,
+   UpdateInvoiceBatchProjectRateBody,
+   UpdateInvoiceBatchProjectRateResponseBody,
+ } from '@swatt/shared-types';
+@@ -13,15 +15,20 @@ import type { FastifyInstance } from 'fastify';
+ import { AuditLogService } from '../audit-log/audit-log.service';
+ import { AuthErrors } from '../../errors';
+ import { requireRole } from '../rbac/rbac.middleware';
++import { DatabaseStorageService, type StorageService } from '../storage/storage.service';
++import { InvoiceBatchPdfBundleService } from './invoice-batch-pdf-bundle.service';
+ import type { InvoiceBatchRecord, InvoiceableWorkOrderRecord } from './invoice-batch.service';
+ import { InvoiceBatchService } from './invoice-batch.service';
+ import {
+   createInvoiceBatchBodySchema,
+   invoiceBatchIdParamsSchema,
++  invoiceBatchLineParamsSchema,
+   invoiceBatchProjectRateParamsSchema,
+   listInvoiceBatchesQuerySchema,
+   listInvoiceableWorkOrdersQuerySchema,
++  setInvoiceBatchLineAdjustmentBodySchema,
+   updateInvoiceBatchProjectRateBodySchema,
++  workOrderPdfBundleQuerySchema,
+ } from './invoice-batch.schemas';
+ 
+ /**
+@@ -33,6 +40,8 @@ import {
+ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<void> {
+   const service = new InvoiceBatchService(app.prisma);
+   const auditLogService = new AuditLogService(app.prisma);
++  const storage: StorageService = new DatabaseStorageService(app.prisma);
++  const pdfBundleService = new InvoiceBatchPdfBundleService(app.prisma, storage);
+ 
+   app.get(
+     '/admin/invoice-batches/invoiceable-work-orders',
+@@ -134,6 +143,43 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
+       return { batch: toBatchSummary(batch) };
+     },
+   );
++
++  // Klantvraag 10/9/2026 — "de klant wil ook nog een mogelijkheid om de
++  // gefactureerde km en uren aan te passen vooraleer de factuur naar
++  // teamleader gaat". Zie InvoiceBatchService.setLineAdjustment.
++  app.post(
++    '/admin/invoice-batches/:id/lines/:lineId/adjustment',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request): Promise<SetInvoiceBatchLineAdjustmentResponseBody> => {
++      const params = invoiceBatchLineParamsSchema.parse(request.params);
++      const body: SetInvoiceBatchLineAdjustmentBody = setInvoiceBatchLineAdjustmentBodySchema.parse(request.body);
++      const batch = await service.setLineAdjustment(params.id, params.lineId, body);
++      await auditLogService.record({
++        actorUserId: request.currentUser?.id ?? null,
++        action: 'INVOICE_BATCH_LINE_ADJUSTED',
++        entityType: 'InvoiceBatchLine',
++        entityId: params.lineId,
++        metadata: { ...body },
++      });
++      return { batch: toBatchSummary(batch) };
++    },
++  );
++
++  // Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per
++  // klant/per week in 1 pdf ... wat meegestuurd wordt met de factuur." Zelfde
++  // download-reply-patroon als GET /work-orders/:id/pdf.
++  app.get(
++    '/admin/invoice-batches/:id/work-order-pdf-bundle',
++    { preHandler: [app.authenticate, requireRole('ADMIN')] },
++    async (request, reply) => {
++      const params = invoiceBatchIdParamsSchema.parse(request.params);
++      const query = workOrderPdfBundleQuerySchema.parse(request.query);
++      const bundle = await pdfBundleService.buildBundle(params.id, query.week);
++      reply.header('Content-Type', 'application/pdf');
++      reply.header('Content-Disposition', `attachment; filename="${bundle.fileName}"`);
++      return reply.send(bundle.data);
++    },
++  );
+ }
+ 
+ function toInvoiceableSummary(record: InvoiceableWorkOrderRecord): InvoiceableWorkOrderSummary {
+@@ -164,7 +210,15 @@ function toBatchSummary(batch: InvoiceBatchRecord): InvoiceBatchSummary {
+       workOrderId: line.workOrderId,
+       workOrderNumber: line.workOrder.workOrderNumber,
+       projectName: line.workOrder.project.name,
++      signedAt: line.workOrder.signature ? line.workOrder.signature.signedAt.toISOString() : null,
++      employeeDisplayNames: Array.from(new Set(line.workOrder.timeEntries.map((entry) => entry.timeEntry.employee.displayName))).sort(),
+       invoiceableSeconds: line.invoiceableSeconds,
++      adjustedInvoiceableSeconds: line.adjustedInvoiceableSeconds,
++      effectiveInvoiceableSeconds: line.adjustedInvoiceableSeconds ?? line.invoiceableSeconds,
++      kmAmountCents: line.workOrder.kmAmountCents,
++      adjustedKmAmountCents: line.adjustedKmAmountCents,
++      effectiveKmAmountCents: line.adjustedKmAmountCents ?? line.workOrder.kmAmountCents,
++      adjustmentNote: line.adjustmentNote,
+     })),
+     teamleaderInvoiceId: batch.teamleaderInvoiceId,
+     teamleaderSyncError: batch.teamleaderSyncError,
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts b/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts
+index 92b23a8..ebdc364 100644
+--- a/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts
++++ b/apps/api/src/modules/invoice-batches/invoice-batch.schemas.ts
+@@ -32,3 +32,34 @@ export const invoiceBatchProjectRateParamsSchema = z.object({
+ export const updateInvoiceBatchProjectRateBodySchema = z.object({
+   hourlyRateCents: z.number().int().positive().nullable(),
+ });
++
++export const invoiceBatchLineParamsSchema = z.object({
++  id: z.string().uuid(),
++  lineId: z.string().uuid(),
++});
++
++/**
++ * Klantvraag 10/9/2026 — correctie van uren/km per werkbonregel. Elk veld
++ * `null` wist die correctie weer (terug naar de werkelijke waarde); anders
++ * nul of positief (nooit negatief factureren). `adjustmentNote` is vrije
++ * tekst, optioneel.
++ */
++export const setInvoiceBatchLineAdjustmentBodySchema = z.object({
++  adjustedInvoiceableSeconds: z.number().int().min(0).nullable(),
++  adjustedKmAmountCents: z.number().int().min(0).nullable(),
++  adjustmentNote: z.string().trim().max(500).nullable(),
++});
++
++/**
++ * Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per
++ * klant/per week in 1 pdf". Zonder `week` wordt de volledige batch gebundeld
++ * (= de hele factuurperiode, altijd een maand — zie InvoiceBatch.periodLabel);
++ * met `week` enkel de werkbonnen die in die ISO-8601-week ondertekend werden
++ * (zie invoice-batch-pdf-bundle.service.ts's isoWeekKeyOf).
++ */
++export const workOrderPdfBundleQuerySchema = z.object({
++  week: z
++    .string()
++    .regex(/^\d{4}-W\d{2}$/, 'Ongeldige weeknotatie, verwacht bv. "2026-W32".')
++    .optional(),
++});
+diff --git a/apps/api/src/modules/invoice-batches/invoice-batch.service.ts b/apps/api/src/modules/invoice-batches/invoice-batch.service.ts
+index 0192e17..31a3a86 100644
+--- a/apps/api/src/modules/invoice-batches/invoice-batch.service.ts
++++ b/apps/api/src/modules/invoice-batches/invoice-batch.service.ts
+@@ -18,6 +18,13 @@ const WITH_BATCH_DETAILS = {
+           include: {
+             project: true,
+             timeEntries: { include: { timeEntry: { include: { employee: true } } } },
++            // Klantvraag 10/9/2026 — nodig voor de ondertekeningsdatum (per-
++            // regel weergave op de Facturatie-pagina en voor de
++            // week-groepering van de werkbonbundel, zie
++            // invoice-batch-pdf-bundle.service.ts) en het bevroren
++            // km-vergoedingsbedrag (getoond als "werkelijke" waarde naast een
++            // eventuele correctie).
++            signature: true,
+           },
+         },
+       },
+@@ -30,7 +37,23 @@ export interface InvoiceBatchLineRecord {
+   id: string;
+   workOrderId: string;
+   invoiceableSeconds: number;
+-  workOrder: { workOrderNumber: string; project: { name: string } };
++  /**
++   * Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan
++   * te passen vooraleer de factuur naar teamleader gaat". `null` = geen
++   * correctie, de werkelijke waarde (invoiceableSeconds hiernaast resp.
++   * workOrder.kmAmountCents) blijft gelden. Zie setLineAdjustment()
++   * hieronder en de toelichting bij InvoiceBatchLine in schema.prisma.
++   */
++  adjustedInvoiceableSeconds: number | null;
++  adjustedKmAmountCents: number | null;
++  adjustmentNote: string | null;
++  workOrder: {
++    workOrderNumber: string;
++    project: { name: string };
++    kmAmountCents: number | null;
++    signature: { signedAt: Date } | null;
++    timeEntries: Array<{ timeEntry: { employee: { displayName: string } } }>;
++  };
+ }
+ 
+ /** Zie InvoiceBatchProjectRateSummary in shared-types voor de betekenis van elk veld. */
+@@ -69,6 +92,8 @@ interface BatchWithProjectDataRow {
+   lines: Array<{
+     workOrder: {
+       project: { id: string; name: string; hourlyRateCents: number | null };
++      kmAmountCents: number | null;
++      signature: { signedAt: Date } | null;
+       timeEntries: Array<{
+         timeEntry: {
+           employee: { id: string; displayName: string };
+@@ -253,6 +278,52 @@ export class InvoiceBatchService {
+     return updated;
+   }
+ 
++  /**
++   * Klantvraag 10/9/2026 — "de klant wil ook nog een mogelijkheid om de
++   * gefactureerde km en uren aan te passen vooraleer de factuur naar
++   * teamleader gaat." Vult (of wist, met `null`) de correctie op één
++   * werkbonregel van deze batch. Enkel toegestaan op een DRAFT-batch, zelfde
++   * reden als setProjectRate hierboven: eens `invoices.draft` is
++   * aangeroepen liggen de geprijsde regels al vast bij Teamleader. Wijzigt
++   * bewust nooit `invoiceableSeconds`/`WorkOrder.kmAmountCents` zelf (de
++   * bevroren, werkelijke waarden — business rule 3-analoog) — enkel deze
++   * aparte override-kolommen, zodat de correctie zelf ook weer ongedaan
++   * gemaakt kan worden vóór de conceptfactuur effectief aangemaakt wordt.
++   */
++  async setLineAdjustment(
++    batchId: string,
++    lineId: string,
++    input: { adjustedInvoiceableSeconds: number | null; adjustedKmAmountCents: number | null; adjustmentNote: string | null },
++  ): Promise<InvoiceBatchRecord> {
++    const batch = await this.prisma.invoiceBatch.findUnique({ where: { id: batchId } });
++    if (!batch) {
++      throw InvoiceBatchErrors.notFound();
++    }
++    if (batch.status !== 'DRAFT') {
++      throw InvoiceBatchErrors.alreadySubmittedToTeamleader();
++    }
++    const line = await this.prisma.invoiceBatchLine.findUnique({ where: { id: lineId } });
++    if (!line || line.invoiceBatchId !== batchId) {
++      throw InvoiceBatchErrors.lineNotOnBatch();
++    }
++
++    await this.prisma.invoiceBatchLine.update({
++      where: { id: lineId },
++      data: {
++        adjustedInvoiceableSeconds: input.adjustedInvoiceableSeconds,
++        adjustedKmAmountCents: input.adjustedKmAmountCents,
++        adjustmentNote: input.adjustmentNote?.trim() || null,
++      },
++    });
++
++    const updated = await this.getById(batchId);
++    if (!updated) {
++      // Kan in de praktijk niet voorkomen — de batch bestond net hierboven nog.
++      throw InvoiceBatchErrors.notFound();
++    }
++    return updated;
++  }
++
+   /**
+    * "Voorbereiden voor facturatie" (sectie 17). Valideert expliciet vóór het
+    * aanmaken (in plaats van enkel op de databank-unique-constraint te
+diff --git a/apps/api/src/modules/teamleader/teamleader-invoice.service.ts b/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
+index 48d0d0a..f7aa872 100644
+--- a/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
++++ b/apps/api/src/modules/teamleader/teamleader-invoice.service.ts
+@@ -30,6 +30,16 @@ const WITH_DRAFT_DETAILS = {
+ /** Handgeschreven vorm van de query hierboven — zelfde reden als elders in deze codebase (stale gegenereerde Prisma-client in de sandbox, zie invoice-batch.service.ts). */
+ interface DraftBatchLineRow {
+   invoiceableSeconds: number;
++  /**
++   * Klantvraag 10/9/2026 — eenmalige correcties op déze batch, ingevuld via
++   * "Facturatie" vóór "Maak conceptfactuur in Teamleader" (zie
++   * InvoiceBatchService.setLineAdjustment). `null` = geen correctie, de
++   * werkelijke waarde (invoiceableSeconds hiernaast resp.
++   * workOrder.kmAmountCents) blijft gelden — zie buildGroupedLinesForBatch/
++   * addKmItemsToGroups hieronder voor hoe deze effectief toegepast worden.
++   */
++  adjustedInvoiceableSeconds: number | null;
++  adjustedKmAmountCents: number | null;
+   workOrder: {
+     workOrderNumber: string;
+     description: string | null;
+@@ -348,10 +358,27 @@ function buildGroupedLinesForBatch(
+   // Stap 1: uren bucketen per (technieker, project) → per periode (dag/week
+   // naargelang de overurendrempel), en meteen de bijhorende weekgroep
+   // aanmaken/vullen met werkbonnummers.
++  //
++  // Klantvraag 10/9/2026 — een eenmalige uren-correctie op déze batch
++  // (InvoiceBatchLine.adjustedInvoiceableSeconds) geldt per WERKBON, terwijl
++  // hier per individuele tijdregistratie gebucket wordt (er kunnen meerdere
++  // technici/dagen op één werkbon staan, sectie 8). Om de correctie toch
++  // consistent te verwerken zonder de bestaande (technieker, project,
++  // dag/week)-groepering en de dag/weekdrempel-berekening te moeten
++  // herschrijven: elke tijdregistratie van deze werkbon wordt evenredig
++  // geschaald (`ratio` = gecorrigeerd totaal ÷ werkelijk totaal), zodat de
++  // verhoudingen tussen technici/periodes behouden blijven en de som van de
++  // geschaalde uren exact het gecorrigeerde totaal oplevert. Is het
++  // werkelijke totaal (uitzonderlijk) 0 seconden, dan kan er niets evenredig
++  // verdeeld worden — de correctie heeft dan geen effect (kan in de praktijk
++  // niet voorkomen: een werkbon wordt pas factureerbaar ná minstens één
++  // afgeronde tijdregistratie).
+   for (const line of batch.lines) {
+     const project = line.workOrder.project;
++    const effectiveLineSeconds = line.adjustedInvoiceableSeconds ?? line.invoiceableSeconds;
++    const ratio = line.invoiceableSeconds > 0 ? effectiveLineSeconds / line.invoiceableSeconds : 0;
+     for (const entry of line.workOrder.timeEntries) {
+-      const seconds = computeWorkedSeconds(entry.timeEntry);
++      const seconds = computeWorkedSeconds(entry.timeEntry) * ratio;
+       if (seconds <= 0) continue;
+ 
+       const employee = entry.timeEntry.employee;
+@@ -453,7 +480,12 @@ function addKmItemsToGroups(
+ ): void {
+   for (const line of batch.lines) {
+     const workOrder = line.workOrder;
+-    if (workOrder.kmAmountCents === null || workOrder.kmAmountCents <= 0) continue;
++    // Klantvraag 10/9/2026 — een eenmalige km-correctie op déze batch
++    // (InvoiceBatchLine.adjustedKmAmountCents) vervangt het bevroren bedrag
++    // voor de factuur, zonder dat bevroren bedrag (workOrder.kmAmountCents)
++    // zelf te wijzigen.
++    const effectiveKmAmountCents = line.adjustedKmAmountCents ?? workOrder.kmAmountCents;
++    if (effectiveKmAmountCents === null || effectiveKmAmountCents <= 0) continue;
+ 
+     const ownEntries = workOrder.timeEntries.filter((entry) => entry.timeEntry.employee.id === workOrder.createdByEmployeeId);
+     const candidateEntries = ownEntries.length > 0 ? ownEntries : workOrder.timeEntries;
+@@ -470,7 +502,7 @@ function addKmItemsToGroups(
+     group.kmItems.push({
+       quantity: 1,
+       description: `${workOrder.workOrderNumber} — verplaatsingskosten`,
+-      unit_price: { amount: workOrder.kmAmountCents / 100, tax: 'excluding' as const },
++      unit_price: { amount: effectiveKmAmountCents / 100, tax: 'excluding' as const },
+       tax_rate_id: taxRateId,
+     });
+   }
+diff --git a/apps/api/src/modules/work-orders/work-order-pdf.service.ts b/apps/api/src/modules/work-orders/work-order-pdf.service.ts
+index b6964fc..a0f9c66 100644
+--- a/apps/api/src/modules/work-orders/work-order-pdf.service.ts
++++ b/apps/api/src/modules/work-orders/work-order-pdf.service.ts
+@@ -163,7 +163,8 @@ export function buildPdfFileName(workOrderNumber: string, customerName: string,
+   return `${workOrderNumber}_${slugify(customerName)}_${slugify(projectName)}.pdf`;
+ }
+ 
+-function slugify(value: string): string {
++/** Ook gebruikt door invoice-batch-pdf-bundle.service.ts (klantvraag 10/9/2026) voor de gebundelde-PDF-bestandsnaam. */
++export function slugify(value: string): string {
+   return value
+     .normalize('NFKD')
+     .replace(/[\u0300-\u036f]/g, '') // accenten weg (bv. é → e)
+diff --git a/apps/api/test/invoice-batch-pdf-bundle.service.test.ts b/apps/api/test/invoice-batch-pdf-bundle.service.test.ts
+new file mode 100644
+index 0000000..a3d922e
+--- /dev/null
++++ b/apps/api/test/invoice-batch-pdf-bundle.service.test.ts
+@@ -0,0 +1,160 @@
++import type { PrismaClient } from '@prisma/client';
++import { PDFDocument } from 'pdf-lib';
++import { describe, expect, it } from 'vitest';
++import { InvoiceBatchPdfBundleService } from '../src/modules/invoice-batches/invoice-batch-pdf-bundle.service';
++import type { StorageService } from '../src/modules/storage/storage.service';
++
++/**
++ * Unit-tests voor "werkbonnen exporteren per klant/per maand of per
++ * klant/per week in 1 pdf" (klantvraag 10/9/2026). Elke individuele
++ * werkbon-PDF blijft ongewijzigd — deze service plakt enkel de bestaande
++ * pagina's samen (pdf-lib), dus de tests verifiëren vooral: welke
++ * werkbonnen in scope komen (batch/week-filter, PDF-gereedheid) en dat de
++ * samengevoegde PDF exact evenveel pagina's telt als de som van de
++ * afzonderlijke PDF's.
++ */
++
++interface FakeWorkOrder {
++  id: string;
++  workOrderNumber: string;
++  pdfStatus: string;
++  pdfFileKey: string | null;
++  signature: { signedAt: Date } | null;
++}
++
++interface FakeBatch {
++  id: string;
++  periodLabel: string;
++  customer: { name: string };
++  lines: Array<{ workOrder: FakeWorkOrder }>;
++}
++
++function createFakePrisma(batch: FakeBatch | null) {
++  const prisma = {
++    invoiceBatch: {
++      findUnique: async ({ where }: { where: { id: string } }) => (batch && where.id === batch.id ? batch : null),
++    },
++  };
++  return prisma as unknown as PrismaClient;
++}
++
++/** In-memory StorageService — bewaart per key gewoon de meegegeven PDF-bytes, zoals DatabaseStorageService dat via Postgres bytea zou doen. */
++function createFakeStorage(files: Map<string, Buffer>): StorageService {
++  return {
++    save: async (data) => {
++      const key = `key-${files.size}`;
++      files.set(key, data);
++      return key;
++    },
++    read: async (key) => {
++      const data = files.get(key);
++      if (!data) throw new Error(`onbekende key: ${key}`);
++      return { mimeType: 'application/pdf', data };
++    },
++    delete: async (key) => {
++      files.delete(key);
++    },
++  };
++}
++
++/** Bouwt een minimale, geldige PDF met `pageCount` lege pagina's — voor testdoeleinden identiek genoeg aan een echte werkbon-PDF. */
++async function fakePdf(pageCount: number): Promise<Buffer> {
++  const doc = await PDFDocument.create();
++  for (let i = 0; i < pageCount; i++) {
++    doc.addPage();
++  }
++  return Buffer.from(await doc.save());
++}
++
++function workOrder(overrides: Partial<FakeWorkOrder> & { id: string }): FakeWorkOrder {
++  return {
++    workOrderNumber: `WB-${overrides.id}`,
++    pdfStatus: 'PDF_READY',
++    pdfFileKey: `${overrides.id}-pdf`,
++    signature: { signedAt: new Date('2026-08-10T10:00:00Z') },
++    ...overrides,
++  };
++}
++
++describe('InvoiceBatchPdfBundleService', () => {
++  it('bundelt alle werkbon-PDFs van de batch tot één PDF (= "per maand", geen weekfilter)', async () => {
++    const files = new Map<string, Buffer>();
++    const storage = createFakeStorage(files);
++    files.set('wo1-pdf', await fakePdf(2));
++    files.set('wo2-pdf', await fakePdf(1));
++
++    const batch: FakeBatch = {
++      id: 'batch-1',
++      periodLabel: '2026-08',
++      customer: { name: 'Janssens BV' },
++      lines: [{ workOrder: workOrder({ id: 'wo1' }) }, { workOrder: workOrder({ id: 'wo2', signature: { signedAt: new Date('2026-08-15T10:00:00Z') } }) }],
++    };
++    const service = new InvoiceBatchPdfBundleService(createFakePrisma(batch), storage);
++
++    const result = await service.buildBundle('batch-1');
++
++    const merged = await PDFDocument.load(result.data);
++    expect(merged.getPageCount()).toBe(3); // 2 + 1 pagina's, ongewijzigd samengevoegd
++    expect(result.fileName).toContain('Janssens');
++    expect(result.fileName).toContain('2026_08');
++  });
++
++  it('filtert op ISO-week (ondertekeningsdatum) wanneer week meegegeven wordt', async () => {
++    const files = new Map<string, Buffer>();
++    const storage = createFakeStorage(files);
++    files.set('wo1-pdf', await fakePdf(1)); // 10/08/2026 = ISO-week 32
++    files.set('wo2-pdf', await fakePdf(1)); // 20/08/2026 = ISO-week 34
++
++    const batch: FakeBatch = {
++      id: 'batch-1',
++      periodLabel: '2026-08',
++      customer: { name: 'Janssens BV' },
++      lines: [
++        { workOrder: workOrder({ id: 'wo1', signature: { signedAt: new Date('2026-08-10T10:00:00Z') } }) },
++        { workOrder: workOrder({ id: 'wo2', signature: { signedAt: new Date('2026-08-20T10:00:00Z') } }) },
++      ],
++    };
++    const service = new InvoiceBatchPdfBundleService(createFakePrisma(batch), storage);
++
++    const result = await service.buildBundle('batch-1', '2026-W34');
++
++    const merged = await PDFDocument.load(result.data);
++    expect(merged.getPageCount()).toBe(1); // enkel wo2
++    expect(result.fileName).toContain('2026_W34');
++  });
++
++  it('weigert wanneer geen enkele werkbon in het gevraagde bereik valt', async () => {
++    const batch: FakeBatch = {
++      id: 'batch-1',
++      periodLabel: '2026-08',
++      customer: { name: 'Janssens BV' },
++      lines: [{ workOrder: workOrder({ id: 'wo1', signature: { signedAt: new Date('2026-08-10T10:00:00Z') } }) }],
++    };
++    const service = new InvoiceBatchPdfBundleService(createFakePrisma(batch), createFakeStorage(new Map()));
++
++    await expect(service.buildBundle('batch-1', '2026-W01')).rejects.toMatchObject({ code: 'INVOICE_BATCH_NO_PDFS_TO_BUNDLE' });
++  });
++
++  it('weigert wanneer één of meer werkbonnen in scope nog geen klare PDF hebben', async () => {
++    const files = new Map<string, Buffer>();
++    files.set('wo1-pdf', await fakePdf(1));
++    const batch: FakeBatch = {
++      id: 'batch-1',
++      periodLabel: '2026-08',
++      customer: { name: 'Janssens BV' },
++      lines: [
++        { workOrder: workOrder({ id: 'wo1' }) },
++        { workOrder: workOrder({ id: 'wo2', pdfStatus: 'PDF_GENERATING', pdfFileKey: null }) },
++      ],
++    };
++    const service = new InvoiceBatchPdfBundleService(createFakePrisma(batch), createFakeStorage(files));
++
++    await expect(service.buildBundle('batch-1')).rejects.toMatchObject({ code: 'INVOICE_BATCH_PDFS_NOT_READY' });
++  });
++
++  it('weigert een onbestaande batch', async () => {
++    const service = new InvoiceBatchPdfBundleService(createFakePrisma(null), createFakeStorage(new Map()));
++
++    await expect(service.buildBundle('does-not-exist')).rejects.toMatchObject({ code: 'INVOICE_BATCH_NOT_FOUND' });
++  });
++});
+diff --git a/apps/api/test/invoice-batch.service.test.ts b/apps/api/test/invoice-batch.service.test.ts
+index 7d62892..e05bc36 100644
+--- a/apps/api/test/invoice-batch.service.test.ts
++++ b/apps/api/test/invoice-batch.service.test.ts
+@@ -45,7 +45,19 @@ interface FakeWorkOrder {
+ 
+ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+   const batches = new Map<string, { id: string; customerId: string; periodLabel: string; status: string; totalInvoiceableSeconds: number; createdByUserId: string; createdAt: Date }>();
+-  const lines = new Map<string, { id: string; invoiceBatchId: string; workOrderId: string; invoiceableSeconds: number }>();
++  const lines = new Map<
++    string,
++    {
++      id: string;
++      invoiceBatchId: string;
++      workOrderId: string;
++      invoiceableSeconds: number;
++      /** Klantvraag 10/9/2026 — zie InvoiceBatchService.setLineAdjustment. */
++      adjustedInvoiceableSeconds: number | null;
++      adjustedKmAmountCents: number | null;
++      adjustmentNote: string | null;
++    }
++  >();
+   /** invoiceBatchId → projectId → hourlyRateCents — zie InvoiceBatchProjectRate. */
+   const projectRateOverrides = new Map<string, Map<string, number>>();
+   let nextId = 1;
+@@ -97,7 +109,15 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+         batches.set(id, batch);
+         for (const line of data.lines.create) {
+           const lineId = genId('line');
+-          lines.set(lineId, { id: lineId, invoiceBatchId: id, workOrderId: line.workOrderId, invoiceableSeconds: line.invoiceableSeconds });
++          lines.set(lineId, {
++            id: lineId,
++            invoiceBatchId: id,
++            workOrderId: line.workOrderId,
++            invoiceableSeconds: line.invoiceableSeconds,
++            adjustedInvoiceableSeconds: null,
++            adjustedKmAmountCents: null,
++            adjustmentNote: null,
++          });
+         }
+         return hydrateBatch(id);
+       },
+@@ -132,6 +152,16 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+         projectRateOverrides.get(where.invoiceBatchId)?.delete(where.projectId);
+       },
+     },
++    /** Klantvraag 10/9/2026 — zie InvoiceBatchService.setLineAdjustment. */
++    invoiceBatchLine: {
++      findUnique: async ({ where }: { where: { id: string } }) => (lines.has(where.id) ? { ...lines.get(where.id)! } : null),
++      update: async ({ where, data }: { where: { id: string }; data: Partial<{ adjustedInvoiceableSeconds: number | null; adjustedKmAmountCents: number | null; adjustmentNote: string | null }> }) => {
++        const line = lines.get(where.id);
++        if (!line) throw new Error('regel niet gevonden');
++        Object.assign(line, data);
++        return { ...line };
++      },
++    },
+   };
+ 
+   function hydrateBatch(id: string) {
+@@ -149,9 +179,14 @@ function createFakePrisma(workOrders: FakeWorkOrder[]) {
+           id: line.id,
+           workOrderId: line.workOrderId,
+           invoiceableSeconds: line.invoiceableSeconds,
++          adjustedInvoiceableSeconds: line.adjustedInvoiceableSeconds,
++          adjustedKmAmountCents: line.adjustedKmAmountCents,
++          adjustmentNote: line.adjustmentNote,
+           workOrder: {
+             workOrderNumber: wo?.workOrderNumber ?? '?',
+             project: { id: wo?.project.id ?? '?', name: wo?.project.name ?? '?', hourlyRateCents: wo?.project.hourlyRateCents ?? null },
++            kmAmountCents: null as number | null,
++            signature: wo?.signature ?? null,
+             timeEntries: wo?.timeEntries ?? [],
+           },
+         };
+@@ -370,4 +405,72 @@ describe('InvoiceBatchService', () => {
+       await expect(service.setProjectRate(batch.id, proj1.id, 6500)).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
+     });
+   });
++
++  describe('setLineAdjustment() — klantvraag 10/9/2026: uren/km corrigeren vóór "Maak conceptfactuur in Teamleader"', () => {
++    async function createBatchWithOneLine() {
++      const wo1 = workOrder({
++        id: 'wo1',
++        timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-10T08:00:00Z'), endedAt: new Date('2026-08-10T10:17:00Z'), pausedSeconds: 0, employeeId: peter, employee: { id: peter, displayName: 'Peter Janssens' } } }],
++      });
++      const { prisma } = createFakePrisma([wo1]);
++      const service = new InvoiceBatchService(prisma);
++      const batch = await service.create({ customerId: janssens.id, periodLabel: '2026-08', workOrderIds: ['wo1'], createdByUserId: 'user-admin' });
++      return { prisma, service, batch };
++    }
++
++    it('vult een correctie op één regel — de werkelijke invoiceableSeconds blijft ongewijzigd, enkel de override wordt gezet', async () => {
++      const { service, batch } = await createBatchWithOneLine();
++      const line = batch.lines[0]!;
++
++      const updated = await service.setLineAdjustment(batch.id, line.id, {
++        adjustedInvoiceableSeconds: 3600,
++        adjustedKmAmountCents: 500,
++        adjustmentNote: 'Klant akkoord met 1u i.p.v. 2u17',
++      });
++
++      const updatedLine = updated.lines[0]!;
++      expect(updatedLine.invoiceableSeconds).toBe(2 * 60 * 60 + 17 * 60); // werkelijke waarde onaangeroerd
++      expect(updatedLine).toMatchObject({
++        adjustedInvoiceableSeconds: 3600,
++        adjustedKmAmountCents: 500,
++        adjustmentNote: 'Klant akkoord met 1u i.p.v. 2u17',
++      });
++    });
++
++    it('wist de correctie weer bij null', async () => {
++      const { service, batch } = await createBatchWithOneLine();
++      const line = batch.lines[0]!;
++      await service.setLineAdjustment(batch.id, line.id, { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: 500, adjustmentNote: 'test' });
++
++      const updated = await service.setLineAdjustment(batch.id, line.id, { adjustedInvoiceableSeconds: null, adjustedKmAmountCents: null, adjustmentNote: null });
++
++      expect(updated.lines[0]).toMatchObject({ adjustedInvoiceableSeconds: null, adjustedKmAmountCents: null, adjustmentNote: null });
++    });
++
++    it('weigert een regel die niet op deze batch voorkomt', async () => {
++      const { service, batch } = await createBatchWithOneLine();
++
++      await expect(
++        service.setLineAdjustment(batch.id, 'does-not-exist', { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: null, adjustmentNote: null }),
++      ).rejects.toMatchObject({ code: 'INVOICE_BATCH_LINE_NOT_ON_BATCH' });
++    });
++
++    it('weigert op een batch die al naar Teamleader verstuurd is', async () => {
++      const { prisma, service, batch } = await createBatchWithOneLine();
++      const line = batch.lines[0]!;
++      await prisma.invoiceBatch.update({ where: { id: batch.id }, data: { status: 'SUBMITTED_TO_TEAMLEADER' } });
++
++      await expect(
++        service.setLineAdjustment(batch.id, line.id, { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: null, adjustmentNote: null }),
++      ).rejects.toMatchObject({ code: 'INVOICE_BATCH_ALREADY_SUBMITTED' });
++    });
++
++    it('weigert een onbestaande batch', async () => {
++      const { service } = await createBatchWithOneLine();
++
++      await expect(
++        service.setLineAdjustment('does-not-exist', 'line-1', { adjustedInvoiceableSeconds: 3600, adjustedKmAmountCents: null, adjustmentNote: null }),
++      ).rejects.toMatchObject({ code: 'INVOICE_BATCH_NOT_FOUND' });
++    });
++  });
+ });
+diff --git a/apps/api/test/teamleader-invoice.service.test.ts b/apps/api/test/teamleader-invoice.service.test.ts
+index d12bff0..3b8e3d3 100644
+--- a/apps/api/test/teamleader-invoice.service.test.ts
++++ b/apps/api/test/teamleader-invoice.service.test.ts
+@@ -54,6 +54,9 @@ interface FakeBatch {
+   projectRates: Array<{ projectId: string; hourlyRateCents: number }>;
+   lines: Array<{
+     invoiceableSeconds: number;
++    /** Klantvraag 10/9/2026 — zie DraftBatchLineRow in teamleader-invoice.service.ts. */
++    adjustedInvoiceableSeconds: number | null;
++    adjustedKmAmountCents: number | null;
+     workOrder: {
+       workOrderNumber: string;
+       description: string | null;
+@@ -134,6 +137,8 @@ function peterTimeEntry(overrides: Partial<FakeTimeEntry['employee']> = {}) {
+ 
+ const baseLine = {
+   invoiceableSeconds: 2 * 60 * 60 + 17 * 60, // 2u17
++  adjustedInvoiceableSeconds: null as number | null,
++  adjustedKmAmountCents: null as number | null,
+   workOrder: {
+     workOrderNumber: 'WB-2026-000123',
+     description: 'Onderhoud uitgevoerd.',
+@@ -427,6 +432,89 @@ describe('TeamleaderInvoiceService', () => {
+     expect(client.post).not.toHaveBeenCalled();
+   });
+ 
++  describe('Klantvraag 10/9/2026 — uren-/km-correctie per werkbonregel vóór Teamleader-sync', () => {
++    it('gebruikt de gecorrigeerde uren i.p.v. de werkelijke wanneer adjustedInvoiceableSeconds gezet is (evenredig geschaald)', async () => {
++      // Werkelijk 2u17 (8220s), gecorrigeerd naar exact 1u (3600s) ⇒ ratio 3600/8220.
++      const line = { ...baseLine, adjustedInvoiceableSeconds: 3600 };
++      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
++      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
++      const service = new TeamleaderInvoiceService(prisma, client);
++
++      await service.createDraftInvoice('batch-1');
++
++      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
++      const lineItems = allLineItems(payload);
++      expect(lineItems).toHaveLength(1);
++      expect(lineItems[0]?.quantity).toBeCloseTo(1, 2); // 1u i.p.v. de werkelijke 2,28u
++      expect(lineItems[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' }); // tarief zelf verandert niet
++    });
++
++    it('verdeelt een uren-correctie evenredig over meerdere technici op dezelfde werkbon (verhouding blijft behouden)', async () => {
++      const wannes = { id: 'emp-wannes', displayName: 'Wannes Peeters' };
++      // Peter 2u17 (8220s) + Wannes 7u45 (27900s) = 10u02 (36120s) werkelijk. Correctie naar exact de helft (18060s).
++      const multiEmployeeLine = {
++        ...baseLine,
++        adjustedInvoiceableSeconds: 18060,
++        invoiceableSeconds: 36120,
++        workOrder: {
++          ...baseLine.workOrder,
++          timeEntries: [
++            peterTimeEntry(),
++            {
++              timeEntry: {
++                startedAt: new Date('2026-08-20T08:15:00Z'),
++                endedAt: new Date('2026-08-20T16:30:00Z'), // 8u15 - 0u30 pauze = 7u45
++                pausedSeconds: 30 * 60,
++                employee: wannes,
++              },
++            },
++          ],
++        },
++      };
++      const { prisma } = createFakePrisma(baseBatch({ lines: [multiEmployeeLine] }), validSettings);
++      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
++      const service = new TeamleaderInvoiceService(prisma, client);
++
++      await service.createDraftInvoice('batch-1');
++
++      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
++      const groups = payload.grouped_lines as Array<{ section: { title: string }; line_items: Array<Record<string, unknown>> }>;
++      const peterGroup = groups.find((g) => g.section.title.includes('Peter'))!;
++      const wannesGroup = groups.find((g) => g.section.title.includes('Wannes'))!;
++      // Beide technici precies gehalveerd — de onderlinge verhouding (2u17 : 7u45) blijft behouden.
++      expect(peterGroup.line_items[0]?.quantity).toBeCloseTo(1.14, 2); // 2,28u / 2
++      expect(wannesGroup.line_items[0]?.quantity).toBeCloseTo(3.875, 2); // 7,75u / 2
++    });
++
++    it('gebruikt het gecorrigeerde km-bedrag i.p.v. het bevroren bedrag wanneer adjustedKmAmountCents gezet is', async () => {
++      const line = { ...baseLine, workOrder: { ...baseLine.workOrder, kmAmountCents: 868 }, adjustedKmAmountCents: 1200 };
++      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
++      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
++      const service = new TeamleaderInvoiceService(prisma, client);
++
++      await service.createDraftInvoice('batch-1');
++
++      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
++      const lineItems = allLineItems(payload);
++      const kmLine = lineItems.find((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'));
++      expect(kmLine?.unit_price).toEqual({ amount: 12, tax: 'excluding' }); // gecorrigeerd (1200), niet het bevroren bedrag (868)
++    });
++
++    it('voegt alsnog een km-regel toe via adjustedKmAmountCents, ook al was er origineel geen km-vergoeding (kmAmountCents null)', async () => {
++      const line = { ...baseLine, adjustedKmAmountCents: 500 }; // baseLine.workOrder.kmAmountCents = null
++      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
++      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
++      const service = new TeamleaderInvoiceService(prisma, client);
++
++      await service.createDraftInvoice('batch-1');
++
++      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
++      const lineItems = allLineItems(payload);
++      const kmLine = lineItems.find((item) => (item.description as string).toLowerCase().includes('verplaatsingskosten'));
++      expect(kmLine?.unit_price).toEqual({ amount: 5, tax: 'excluding' });
++    });
++  });
++
+   it('laat de batch op DRAFT staan met een mensentaal-fout bij een mislukte Teamleader-aanroep (business rule 9)', async () => {
+     const { prisma, getState } = createFakePrisma(baseBatch(), validSettings);
+     const client = fakeClient(async () => {
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index b89befd..8faaed8 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -56,6 +56,8 @@ import type {
+   UpdateCompanySettingsBody,
+   UpdateCustomerHourlyRateBody,
+   UpdateCustomerHourlyRateResponseBody,
++  SetInvoiceBatchLineAdjustmentBody,
++  SetInvoiceBatchLineAdjustmentResponseBody,
+   UpdateInvoiceBatchProjectRateBody,
+   UpdateInvoiceBatchProjectRateResponseBody,
+   UpdateProjectHourlyRateBody,
+@@ -445,6 +447,23 @@ export const invoiceBatchesApi = {
+       method: 'POST',
+       body: JSON.stringify(body),
+     }),
++  /** Klantvraag 10/9/2026 — correctie van uren/km per werkbonregel vóór "Maak conceptfactuur in Teamleader" (zie InvoiceBatchService.setLineAdjustment). */
++  setLineAdjustment: (batchId: string, lineId: string, body: SetInvoiceBatchLineAdjustmentBody) =>
++    request<SetInvoiceBatchLineAdjustmentResponseBody>(`/admin/invoice-batches/${batchId}/lines/${lineId}/adjustment`, {
++      method: 'POST',
++      body: JSON.stringify(body),
++    }),
++  /**
++   * Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per
++   * klant/per week in 1 pdf". Geeft enkel de download-URL terug (geen
++   * `request()`-aanroep: dit is een binaire PDF-download, geen JSON) — zelfde
++   * patroon als de bestaande "Download PDF"-link op één werkbon
++   * (WorkOrderReviewPage.tsx): een gewone `<a href=... target="_blank">`
++   * stuurt de httpOnly-sessiecookie automatisch mee. `weekKey`: ISO-8601
++   * ("2026-W32") — leeg = de volledige batch (= de hele maand).
++   */
++  workOrderPdfBundleUrl: (batchId: string, weekKey?: string) =>
++    `${API_BASE_URL}/admin/invoice-batches/${batchId}/work-order-pdf-bundle${weekKey ? `?week=${encodeURIComponent(weekKey)}` : ''}`,
+ };
+ 
+ /**
+diff --git a/apps/web/src/pages/admin/InvoicingPage.tsx b/apps/web/src/pages/admin/InvoicingPage.tsx
+index 243c049..c2d5296 100644
+--- a/apps/web/src/pages/admin/InvoicingPage.tsx
++++ b/apps/web/src/pages/admin/InvoicingPage.tsx
+@@ -1,4 +1,9 @@
+-import type { InvoiceBatchProjectRateSummary, InvoiceBatchSummary, InvoiceableWorkOrderSummary } from '@swatt/shared-types';
++import type {
++  InvoiceBatchLineSummary,
++  InvoiceBatchProjectRateSummary,
++  InvoiceBatchSummary,
++  InvoiceableWorkOrderSummary,
++} from '@swatt/shared-types';
+ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+ import { Link } from 'react-router-dom';
+ import { invoiceBatchesApi } from '../../api/client';
+@@ -40,6 +45,66 @@ function formatPeriodLabel(periodLabel: string): string {
+   return date.toLocaleDateString('nl-BE', { month: 'long', year: 'numeric' });
+ }
+ 
++/** "2,17" i.p.v. "niet ingesteld" — voor het km-invoerveld hieronder (leeg = geen km-vergoeding). */
++function formatEuroInputValue(cents: number | null): string {
++  return cents === null ? '' : (cents / 100).toFixed(2);
++}
++
++/**
++ * Klantvraag 10/9/2026 — "H:MM"-invoerveld voor de uren-correctie, bv. "2:17".
++ * `null` bij een ongeldige invoer (i.p.v. gooien) zodat de aanroeper zelf een
++ * duidelijke Nederlandstalige foutmelding kan tonen (sectie 27).
++ */
++function parseHmInput(value: string): number | null {
++  const trimmed = value.trim();
++  if (trimmed === '') return null;
++  const match = /^(\d{1,3}):([0-5]?\d)$/.exec(trimmed);
++  if (!match) return null;
++  const hours = Number(match[1]);
++  const minutes = Number(match[2]);
++  return hours * 3600 + minutes * 60;
++}
++
++/**
++ * Zelfde formule als teamleader-invoice.service.ts's/invoice-batch-pdf-
++ * bundle.service.ts's isoWeekKeyOf (ISO-8601, maandag als eerste dag) —
++ * hier enkel gebruikt om de "Download per week"-links hieronder te
++ * groeperen/labelen; de backend berekent deze sleutel zelf onafhankelijk
++ * opnieuw bij de effectieve bundeling, dus een eventuele frontend/backend-
++ * afwijking kan hoogstens een verkeerd label opleveren, nooit een verkeerde
++ * bundel-inhoud.
++ */
++function isoWeekKeyOf(date: Date): string {
++  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
++  const dayNumber = (d.getUTCDay() + 6) % 7; // maandag = 0
++  d.setUTCDate(d.getUTCDate() - dayNumber + 3); // donderdag van deze ISO-week
++  const isoYear = d.getUTCFullYear();
++  const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
++  const firstThursdayDayNumber = (firstThursday.getUTCDay() + 6) % 7;
++  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstThursdayDayNumber + 3);
++  const weekNumber = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 24 * 60 * 60 * 1000));
++  return `${isoYear}-W${String(weekNumber).padStart(2, '0')}`;
++}
++
++interface WeekPdfGroup {
++  weekKey: string;
++  weekNumber: number;
++  lineCount: number;
++}
++
++/** Groepeert de werkbonnen van een batch per ISO-week van hun ondertekeningsdatum — voor de "Download per week"-links (klantvraag 10/9/2026). */
++function weekPdfGroupsForBatch(batch: InvoiceBatchSummary): WeekPdfGroup[] {
++  const counts = new Map<string, number>();
++  for (const line of batch.lines) {
++    if (!line.signedAt) continue;
++    const weekKey = isoWeekKeyOf(new Date(line.signedAt));
++    counts.set(weekKey, (counts.get(weekKey) ?? 0) + 1);
++  }
++  return Array.from(counts.entries())
++    .map(([weekKey, lineCount]) => ({ weekKey, weekNumber: Number(weekKey.split('-W')[1]), lineCount }))
++    .sort((a, b) => a.weekKey.localeCompare(b.weekKey));
++}
++
+ interface ProjectGroup {
+   customerId: string;
+   customerName: string;
+@@ -108,6 +173,17 @@ export function InvoicingPage() {
+   const [creatingDraftBatchId, setCreatingDraftBatchId] = useState<string | null>(null);
+   const [draftErrorByBatchId, setDraftErrorByBatchId] = useState<Record<string, string>>({});
+ 
++  // Klantvraag 10/9/2026: werkbonnen van een batch tonen/corrigeren (uren/km
++  // vóór "Maak conceptfactuur in Teamleader") en de werkbon-PDF-bundel
++  // downloaden.
++  const [expandedBatchId, setExpandedBatchId] = useState<string | null>(null);
++  const [editingLine, setEditingLine] = useState<{ batchId: string; lineId: string } | null>(null);
++  const [hoursInputValue, setHoursInputValue] = useState('');
++  const [kmInputValue, setKmInputValue] = useState('');
++  const [noteInputValue, setNoteInputValue] = useState('');
++  const [isSavingAdjustment, setIsSavingAdjustment] = useState(false);
++  const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
++
+   const load = useCallback(async (period: string) => {
+     try {
+       const [invoiceableResponse, batchesResponse] = await Promise.all([
+@@ -236,6 +312,44 @@ export function InvoicingPage() {
+     }
+   }
+ 
++  function handleStartEditLine(batchId: string, line: InvoiceBatchLineSummary) {
++    setEditingLine({ batchId, lineId: line.id });
++    setHoursInputValue(line.adjustedInvoiceableSeconds !== null ? formatHm(line.adjustedInvoiceableSeconds) : '');
++    setKmInputValue(formatEuroInputValue(line.adjustedKmAmountCents));
++    setNoteInputValue(line.adjustmentNote ?? '');
++    setAdjustmentError(null);
++  }
++
++  async function handleSaveLineAdjustment(batchId: string, lineId: string) {
++    const adjustedInvoiceableSeconds = parseHmInput(hoursInputValue);
++    if (hoursInputValue.trim() !== '' && adjustedInvoiceableSeconds === null) {
++      setAdjustmentError('Vul de uren in als uur:minuut (bv. 2:17), of laat leeg om de correctie te wissen.');
++      return;
++    }
++    const trimmedKm = kmInputValue.trim().replace(',', '.');
++    const kmEuros = trimmedKm === '' ? null : Number(trimmedKm);
++    if (trimmedKm !== '' && (Number.isNaN(kmEuros) || (kmEuros as number) < 0)) {
++      setAdjustmentError('Vul een geldig km-vergoedingsbedrag in (bv. 8,68), of laat leeg om de correctie te wissen.');
++      return;
++    }
++
++    setIsSavingAdjustment(true);
++    setAdjustmentError(null);
++    try {
++      await invoiceBatchesApi.setLineAdjustment(batchId, lineId, {
++        adjustedInvoiceableSeconds,
++        adjustedKmAmountCents: kmEuros === null ? null : Math.round(kmEuros * 100),
++        adjustmentNote: noteInputValue.trim() || null,
++      });
++      setEditingLine(null);
++      await load(periodLabel);
++    } catch (err) {
++      setAdjustmentError(err instanceof ApiRequestError ? err.message : 'Opslaan van de correctie is mislukt.');
++    } finally {
++      setIsSavingAdjustment(false);
++    }
++  }
++
+   return (
+     <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
+       <header className="mb-8 flex items-center justify-between">
+@@ -391,11 +505,22 @@ export function InvoicingPage() {
+                 </tr>
+               </thead>
+               <tbody>
+-                {batches.map((batch) => (
++                {batches.map((batch) => {
++                  const isBatchExpanded = expandedBatchId === batch.id;
++                  const weekGroups = weekPdfGroupsForBatch(batch);
++                  return (
+                   <Fragment key={batch.id}>
+                     <tr className="border-b border-neutral-100 last:border-0 align-top">
+                       <td className="px-4 py-3 font-medium">{batch.customerName}</td>
+-                      <td className="px-4 py-3 text-neutral-600">{batch.lines.map((line) => line.workOrderNumber).join(', ')}</td>
++                      <td className="px-4 py-3 text-neutral-600">
++                        <button
++                          type="button"
++                          onClick={() => setExpandedBatchId(isBatchExpanded ? null : batch.id)}
++                          className="text-sm font-medium text-swatt-gold-dark underline"
++                        >
++                          {batch.lines.length} werkbon(nen) {isBatchExpanded ? '(verbergen)' : '(tonen)'}
++                        </button>
++                      </td>
+                       <td className="px-4 py-3 text-neutral-600">{formatHm(batch.totalInvoiceableSeconds)} u</td>
+                       <td className="px-4 py-3 text-neutral-600">
+                         <ul className="space-y-1">
+@@ -510,8 +635,157 @@ export function InvoicingPage() {
+                         </td>
+                       </tr>
+                     )}
++                    {isBatchExpanded && (
++                      <tr className="border-b border-neutral-100 bg-neutral-50/60 last:border-0">
++                        <td colSpan={7} className="px-4 py-3">
++                          {/* Klantvraag 10/9/2026 — "werkbonnen exporteren per klant/per maand of per klant/per week in 1 pdf". */}
++                          <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-neutral-200 pb-3 text-sm">
++                            <span className="font-medium text-neutral-700">Download werkbonnen (PDF):</span>
++                            <a
++                              href={invoiceBatchesApi.workOrderPdfBundleUrl(batch.id)}
++                              target="_blank"
++                              rel="noreferrer"
++                              className="text-swatt-gold-dark underline"
++                            >
++                              Volledige maand ({batch.lines.length})
++                            </a>
++                            {weekGroups.map((week) => (
++                              <a
++                                key={week.weekKey}
++                                href={invoiceBatchesApi.workOrderPdfBundleUrl(batch.id, week.weekKey)}
++                                target="_blank"
++                                rel="noreferrer"
++                                className="text-swatt-gold-dark underline"
++                              >
++                                Week {week.weekNumber} ({week.lineCount})
++                              </a>
++                            ))}
++                          </div>
++
++                          {/* Klantvraag 10/9/2026 — gefactureerde uren/km per werkbon corrigeren vóór "Maak conceptfactuur in Teamleader". */}
++                          <table className="w-full text-left text-sm">
++                            <thead className="text-xs uppercase tracking-wide text-neutral-400">
++                              <tr>
++                                <th className="py-1">Werkbon</th>
++                                <th className="py-1">Ondertekend</th>
++                                <th className="py-1">Medewerker(s)</th>
++                                <th className="py-1 text-right">Uren</th>
++                                <th className="py-1 text-right">Km-vergoeding</th>
++                                <th className="py-1" />
++                              </tr>
++                            </thead>
++                            <tbody>
++                              {batch.lines.map((line) => {
++                                const isEditingLine = editingLine?.batchId === batch.id && editingLine.lineId === line.id;
++                                const hasHoursAdjustment = line.adjustedInvoiceableSeconds !== null;
++                                const hasKmAdjustment = line.adjustedKmAmountCents !== null;
++                                return (
++                                  <Fragment key={line.id}>
++                                    <tr className="border-t border-neutral-100 align-top">
++                                      <td className="py-2 font-medium">{line.workOrderNumber}</td>
++                                      <td className="py-2 text-neutral-600">{formatDate(line.signedAt)}</td>
++                                      <td className="py-2 text-neutral-600">{line.employeeDisplayNames.join(', ')}</td>
++                                      <td className="py-2 text-right text-neutral-600">
++                                        {isEditingLine ? (
++                                          <input
++                                            type="text"
++                                            inputMode="numeric"
++                                            value={hoursInputValue}
++                                            onChange={(event) => setHoursInputValue(event.target.value)}
++                                            placeholder={formatHm(line.invoiceableSeconds)}
++                                            className="w-16 rounded border border-neutral-300 px-2 py-1 text-right text-sm outline-none focus:border-swatt-gold-dark"
++                                          />
++                                        ) : (
++                                          <>
++                                            {formatHm(line.effectiveInvoiceableSeconds)} u
++                                            {hasHoursAdjustment && (
++                                              <span className="ml-1 text-xs text-neutral-400 line-through">{formatHm(line.invoiceableSeconds)} u</span>
++                                            )}
++                                          </>
++                                        )}
++                                      </td>
++                                      <td className="py-2 text-right text-neutral-600">
++                                        {isEditingLine ? (
++                                          <input
++                                            type="text"
++                                            inputMode="decimal"
++                                            value={kmInputValue}
++                                            onChange={(event) => setKmInputValue(event.target.value)}
++                                            placeholder={formatEuroInputValue(line.kmAmountCents) || '0,00'}
++                                            className="w-16 rounded border border-neutral-300 px-2 py-1 text-right text-sm outline-none focus:border-swatt-gold-dark"
++                                          />
++                                        ) : (
++                                          <>
++                                            {formatEuroCents(line.effectiveKmAmountCents)}
++                                            {hasKmAdjustment && (
++                                              <span className="ml-1 text-xs text-neutral-400 line-through">{formatEuroCents(line.kmAmountCents)}</span>
++                                            )}
++                                          </>
++                                        )}
++                                      </td>
++                                      <td className="py-2 text-right">
++                                        {batch.status !== 'DRAFT' ? null : isEditingLine ? (
++                                          <div className="flex items-center justify-end gap-2">
++                                            <button
++                                              type="button"
++                                              onClick={() => void handleSaveLineAdjustment(batch.id, line.id)}
++                                              disabled={isSavingAdjustment}
++                                              className="text-xs font-semibold text-swatt-gold-dark underline disabled:opacity-50"
++                                            >
++                                              {isSavingAdjustment ? '...' : 'Opslaan'}
++                                            </button>
++                                            <button
++                                              type="button"
++                                              onClick={() => setEditingLine(null)}
++                                              disabled={isSavingAdjustment}
++                                              className="text-xs text-neutral-500 underline"
++                                            >
++                                              Annuleren
++                                            </button>
++                                          </div>
++                                        ) : (
++                                          <button
++                                            type="button"
++                                            onClick={() => handleStartEditLine(batch.id, line)}
++                                            className="text-xs text-swatt-gold-dark underline decoration-dotted underline-offset-2"
++                                          >
++                                            Corrigeren
++                                          </button>
++                                        )}
++                                      </td>
++                                    </tr>
++                                    {isEditingLine && (
++                                      <tr className="border-t border-neutral-50">
++                                        <td colSpan={6} className="pb-2">
++                                          <input
++                                            type="text"
++                                            value={noteInputValue}
++                                            onChange={(event) => setNoteInputValue(event.target.value)}
++                                            placeholder="Opmerking bij deze correctie (optioneel)"
++                                            className="w-full max-w-md rounded border border-neutral-300 px-2 py-1 text-xs outline-none focus:border-swatt-gold-dark"
++                                          />
++                                          {adjustmentError && <p className="mt-1 text-xs text-red-700">{adjustmentError}</p>}
++                                        </td>
++                                      </tr>
++                                    )}
++                                    {!isEditingLine && line.adjustmentNote && (
++                                      <tr className="border-t border-neutral-50">
++                                        <td colSpan={6} className="pb-2 text-xs italic text-neutral-500">
++                                          {line.adjustmentNote}
++                                        </td>
++                                      </tr>
++                                    )}
++                                  </Fragment>
++                                );
++                              })}
++                            </tbody>
++                          </table>
++                        </td>
++                      </tr>
++                    )}
+                   </Fragment>
+-                ))}
++                  );
++                })}
+               </tbody>
+             </table>
+           </div>
+diff --git a/package-lock.json b/package-lock.json
+index 0d3773b..4d1b9f9 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -29,6 +29,7 @@
+         "fastify": "^5.1.0",
+         "fastify-plugin": "^5.0.1",
+         "ioredis": "^5.4.2",
++        "pdf-lib": "^1.17.1",
+         "pino-pretty": "^11.3.0",
+         "react": "^18.3.1",
+         "zod": "^3.23.8"
+@@ -494,6 +495,7 @@
+       "os": [
+         "aix"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -511,6 +513,7 @@
+       "os": [
+         "android"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -528,6 +531,7 @@
+       "os": [
+         "android"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -545,6 +549,7 @@
+       "os": [
+         "android"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -562,6 +567,7 @@
+       "os": [
+         "darwin"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -579,6 +585,7 @@
+       "os": [
+         "darwin"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -596,6 +603,7 @@
+       "os": [
+         "freebsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -613,6 +621,7 @@
+       "os": [
+         "freebsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -630,6 +639,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -647,6 +657,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -664,6 +675,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -681,6 +693,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -698,6 +711,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -715,6 +729,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -732,6 +747,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -749,6 +765,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -766,6 +783,7 @@
+       "os": [
+         "linux"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -783,6 +801,7 @@
+       "os": [
+         "netbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -800,6 +819,7 @@
+       "os": [
+         "netbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -817,6 +837,7 @@
+       "os": [
+         "openbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -834,6 +855,7 @@
+       "os": [
+         "openbsd"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -851,6 +873,7 @@
+       "os": [
+         "openharmony"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -868,6 +891,7 @@
+       "os": [
+         "sunos"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -885,6 +909,7 @@
+       "os": [
+         "win32"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -902,6 +927,7 @@
+       "os": [
+         "win32"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -919,6 +945,7 @@
+       "os": [
+         "win32"
+       ],
++      "peer": true,
+       "engines": {
+         "node": ">=18"
+       }
+@@ -1555,6 +1582,36 @@
+         "node": ">= 8"
+       }
+     },
++    "node_modules/@pdf-lib/standard-fonts": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/@pdf-lib/standard-fonts/-/standard-fonts-1.0.0.tgz",
++      "integrity": "sha512-hU30BK9IUN/su0Mn9VdlVKsWBS6GyhVfqjwl1FjZN4TxP6cCw0jP2w7V3Hf5uX7M0AZJ16vey9yE0ny7Sa59ZA==",
++      "license": "MIT",
++      "dependencies": {
++        "pako": "^1.0.6"
++      }
++    },
++    "node_modules/@pdf-lib/standard-fonts/node_modules/pako": {
++      "version": "1.0.11",
++      "resolved": "https://registry.npmjs.org/pako/-/pako-1.0.11.tgz",
++      "integrity": "sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==",
++      "license": "(MIT AND Zlib)"
++    },
++    "node_modules/@pdf-lib/upng": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/@pdf-lib/upng/-/upng-1.0.1.tgz",
++      "integrity": "sha512-dQK2FUMQtowVP00mtIksrlZhdFXQZPC+taih1q4CvPZ5vqdxR/LKBaFg0oAfzd1GlHZXXSPdQfzQnt+ViGvEIQ==",
++      "license": "MIT",
++      "dependencies": {
++        "pako": "^1.0.10"
++      }
++    },
++    "node_modules/@pdf-lib/upng/node_modules/pako": {
++      "version": "1.0.11",
++      "resolved": "https://registry.npmjs.org/pako/-/pako-1.0.11.tgz",
++      "integrity": "sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==",
++      "license": "(MIT AND Zlib)"
++    },
+     "node_modules/@pinojs/redact": {
+       "version": "0.4.0",
+       "resolved": "https://registry.npmjs.org/@pinojs/redact/-/redact-0.4.0.tgz",
+@@ -4474,6 +4531,7 @@
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+       "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+       "optional": true,
+@@ -5738,6 +5796,30 @@
+         "node": ">= 14.16"
+       }
+     },
++    "node_modules/pdf-lib": {
++      "version": "1.17.1",
++      "resolved": "https://registry.npmjs.org/pdf-lib/-/pdf-lib-1.17.1.tgz",
++      "integrity": "sha512-V/mpyJAoTsN4cnP31vc0wfNA1+p20evqqnap0KLoRUN0Yk/p3wN52DOEsL4oBFcLdb76hlpKPtzJIgo67j/XLw==",
++      "license": "MIT",
++      "dependencies": {
++        "@pdf-lib/standard-fonts": "^1.0.0",
++        "@pdf-lib/upng": "^1.0.1",
++        "pako": "^1.0.11",
++        "tslib": "^1.11.1"
++      }
++    },
++    "node_modules/pdf-lib/node_modules/pako": {
++      "version": "1.0.11",
++      "resolved": "https://registry.npmjs.org/pako/-/pako-1.0.11.tgz",
++      "integrity": "sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==",
++      "license": "(MIT AND Zlib)"
++    },
++    "node_modules/pdf-lib/node_modules/tslib": {
++      "version": "1.14.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-1.14.1.tgz",
++      "integrity": "sha512-Xni35NKzjgMrwevysHTCArtLDpPvye8zV/0E4EyYn43P7/7qvQwPh9BGkHewbMulVntbigmcT7rdX3BNo9wRJg==",
++      "license": "0BSD"
++    },
+     "node_modules/pdfkit": {
+       "version": "0.20.1",
+       "resolved": "https://registry.npmjs.org/pdfkit/-/pdfkit-0.20.1.tgz",
+diff --git a/packages/shared-types/src/index.ts b/packages/shared-types/src/index.ts
+index 0b78e1f..2ac08f2 100644
+--- a/packages/shared-types/src/index.ts
++++ b/packages/shared-types/src/index.ts
+@@ -998,12 +998,31 @@ export interface ListInvoiceableWorkOrdersResponseBody {
+   workOrders: InvoiceableWorkOrderSummary[];
+ }
+ 
++/**
++ * Klantvraag 10/9/2026 — "mogelijkheid om de gefactureerde km en uren aan te
++ * passen vooraleer de factuur naar teamleader gaat". `invoiceableSeconds`/
++ * `kmAmountCents` blijven de werkelijke, bevroren waarden (nooit gewijzigd
++ * door een correctie); `adjustedXxx` is de eenmalige override voor déze
++ * batch (`null` = geen correctie); `effectiveXxx` is wat effectief naar
++ * Teamleader gestuurd wordt (`adjustedXxx ?? werkelijkeXxx`) — wat de
++ * Facturatie-pagina toont als het "echte" totaal.
++ */
+ export interface InvoiceBatchLineSummary {
+   id: string;
+   workOrderId: string;
+   workOrderNumber: string;
+   projectName: string;
++  /** ISO-datum, of `null` als de werkbon (uitzonderlijk) nog geen handtekening heeft. */
++  signedAt: string | null;
++  employeeDisplayNames: string[];
+   invoiceableSeconds: number;
++  adjustedInvoiceableSeconds: number | null;
++  effectiveInvoiceableSeconds: number;
++  /** Bevroren km-vergoedingsbedrag (eurocent) — zie WorkOrder.kmAmountCents. `null` = geen km-vergoeding van toepassing op deze werkbon. */
++  kmAmountCents: number | null;
++  adjustedKmAmountCents: number | null;
++  effectiveKmAmountCents: number | null;
++  adjustmentNote: string | null;
+ }
+ 
+ /**
+@@ -1080,6 +1099,22 @@ export interface UpdateInvoiceBatchProjectRateResponseBody {
+   batch: InvoiceBatchSummary;
+ }
+ 
++/**
++ * Body van POST /admin/invoice-batches/:id/lines/:lineId/adjustment —
++ * klantvraag 10/9/2026. Elk veld `null` wist die correctie weer.
++ * `adjustedInvoiceableSeconds`/`adjustedKmAmountCents` zijn nul of positief
++ * (nooit negatief factureren).
++ */
++export interface SetInvoiceBatchLineAdjustmentBody {
++  adjustedInvoiceableSeconds: number | null;
++  adjustedKmAmountCents: number | null;
++  adjustmentNote: string | null;
++}
++
++export interface SetInvoiceBatchLineAdjustmentResponseBody {
++  batch: InvoiceBatchSummary;
++}
++
+ /**
+  * Phase 12, deel E — "Personeelsuitbetaling". Eén rij per medewerker voor een
+  * gekozen periode; `totalAmountCents` is `null` zolang de medewerker geen
+-- 
+2.43.0
+
