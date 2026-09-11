@@ -245,3 +245,15 @@ export function ArrowLeftIcon(props: IconProps) {
     </>,
   );
 }
+
+/** Spraak-naar-tekst — microfoonknop bij omschrijvingsvelden. */
+export function MicrophoneIcon(props: IconProps) {
+  return base(
+    props,
+    <>
+      <rect x="9" y="2.5" width="6" height="11" rx="3" />
+      <path d="M5.5 11a6.5 6.5 0 0 0 13 0" />
+      <path d="M12 17.5v4M9 21.5h6" />
+    </>,
+  );
+}

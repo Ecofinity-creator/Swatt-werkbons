@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { projectsApi, timeEntriesApi, workOrdersApi } from '../api/client';
 import { ApiRequestError } from '../auth/AuthContext';
+import { DescriptionField } from '../components/DescriptionField';
 
 /**
  * Phase 5 — werkbonnen (basis). De werkbon wordt automatisch aangemaakt
@@ -441,16 +442,12 @@ export function ProjectTimerPage() {
                 onChange={(event) => setManualPauseMinutes(event.target.value)}
                 className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
               />
-              <label htmlFor="manual-description" className="text-sm text-neutral-300">
-                Omschrijving (optioneel)
-              </label>
-              <textarea
+              <DescriptionField
                 id="manual-description"
-                rows={4}
+                label="Omschrijving (optioneel)"
                 value={manualDescription}
-                onChange={(event) => setManualDescription(event.target.value)}
+                onChange={setManualDescription}
                 placeholder="Uitgevoerde werkzaamheden..."
-                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
               />
               <button
                 type="button"
@@ -544,16 +541,12 @@ export function ProjectTimerPage() {
                 </div>
               ) : (
                 <div className="flex w-full flex-col gap-3">
-                  <label htmlFor="description" className="text-sm text-neutral-300">
-                    Omschrijving (optioneel)
-                  </label>
-                  <textarea
+                  <DescriptionField
                     id="description"
-                    rows={4}
+                    label="Omschrijving (optioneel)"
                     value={description}
-                    onChange={(event) => setDescription(event.target.value)}
+                    onChange={setDescription}
                     placeholder="Uitgevoerde werkzaamheden..."
-                    className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-4 py-3 text-base text-white outline-none focus:border-swatt-gold"
                   />
                   <button
                     type="button"
