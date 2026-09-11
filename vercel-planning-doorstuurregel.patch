@@ -1,0 +1,54 @@
+From d87a9261bb16cebeee25c8cd41a4b91e2d60f1e3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 11 Sep 2026 07:59:55 +0000
+Subject: [PATCH] Vercel-doorstuurregel toevoegen voor /planning/mine (ontbrak
+ volledig)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Kernvondst via de Network-tab (F12) op verzoek van de klant: de aanvraag
+naar /planning/mine kreeg status 304 terug met Server: Vercel en
+X-Vercel-Cache: HIT, en de effectieve inhoud was de HTML van de app zelf
+(index.html) i.p.v. JSON-planningdata.
+
+Oorzaak: apps/web/vercel.json's `rewrites`-lijst stuurt /auth/*, /admin/*,
+/public/*, /projects(/*), /weekly-approvals(/*), /teamleader/..., /time-
+entries(/*) en /work-orders(/*) door naar de echte backend
+(swatt-api.onrender.com), maar had GEEN regel voor /planning of
+/planning/:path* — het gewone (niet-/admin) /planning/mine-endpoint dat de
+werknemer-app gebruikt voor "vandaag ingepland" viel daardoor altijd terug
+op de laatste catch-all-regel (`/(.*) -> /index.html`), en kreeg dus nooit
+echte data van de server. Dit verklaart vermoedelijk waarom de "automatisch
+ingepland project"-functie (Fase 16) nooit heeft gewerkt zoals bedoeld,
+onafhankelijk van alle latere fixes (ProjectAssignment-koppeling,
+dag/tijdzone-mismatch) — die waren op zich terecht, maar liepen allemaal
+vast op deze ene ontbrekende doorstuurregel.
+
+Toegevoegd, naar analogie van de bestaande /projects + /projects/:path*
+regels:
+- { "source": "/planning", ... }
+- { "source": "/planning/:path*", ... }
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01K682qexDdBu1y2TDUscPeY
+---
+ apps/web/vercel.json | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/apps/web/vercel.json b/apps/web/vercel.json
+index 38fdf79..a1913ab 100644
+--- a/apps/web/vercel.json
++++ b/apps/web/vercel.json
+@@ -9,6 +9,8 @@
+     { "source": "/public/:path*", "destination": "https://swatt-api.onrender.com/public/:path*" },
+     { "source": "/projects", "destination": "https://swatt-api.onrender.com/projects" },
+     { "source": "/projects/:path*", "destination": "https://swatt-api.onrender.com/projects/:path*" },
++    { "source": "/planning", "destination": "https://swatt-api.onrender.com/planning" },
++    { "source": "/planning/:path*", "destination": "https://swatt-api.onrender.com/planning/:path*" },
+     { "source": "/weekly-approvals", "destination": "https://swatt-api.onrender.com/weekly-approvals" },
+     { "source": "/weekly-approvals/:path*", "destination": "https://swatt-api.onrender.com/weekly-approvals/:path*" },
+     { "source": "/teamleader/status", "destination": "https://swatt-api.onrender.com/teamleader/status" },
+-- 
+2.43.0
+
