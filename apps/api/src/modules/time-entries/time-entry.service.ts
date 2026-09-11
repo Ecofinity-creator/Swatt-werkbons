@@ -30,6 +30,8 @@ export interface CreateManualTimeEntryInput {
   endedAt: Date;
   pausedSeconds: number;
   description: string | null;
+  /** Zie de toelichting bij TimeEntry.clientRequestId in schema.prisma. */
+  clientRequestId?: string | null;
 }
 
 export interface CorrectTimeEntryInput {
@@ -147,6 +149,24 @@ export class TimeEntryService {
    * werknemer typisch afrondt) zonder meteen als "in de toekomst" te gelden.
    */
   async createManual(employeeId: string, input: CreateManualTimeEntryInput): Promise<TimeEntryRecord> {
+    // Idempotentie (offline-modus, 11/9/2026): een herhaalde poging met
+    // hetzelfde clientRequestId (bv. omdat de offline-wachtrij een POST
+    // herhaalt nadat het antwoord op een eerdere, wél geslaagde poging
+    // onderweg verloren ging) geeft de bestaande rij terug i.p.v. een
+    // tweede, dubbel gefactureerde/doorbetaalde registratie aan te maken.
+    // Bewust employeeId+clientRequestId samen gecontroleerd (niet enkel de
+    // unieke kolom) zodat dit nooit per ongeluk een andere werknemer diens
+    // registratie teruggeeft, ook al zou clientRequestId botsen.
+    if (input.clientRequestId) {
+      const existing = await this.prisma.timeEntry.findUnique({
+        where: { clientRequestId: input.clientRequestId },
+        ...WITH_PROJECT,
+      });
+      if (existing && existing.employeeId === employeeId) {
+        return existing;
+      }
+    }
+
     if (input.endedAt.getTime() <= input.startedAt.getTime()) {
       throw TimeEntryErrors.manualEndBeforeStart();
     }
@@ -184,6 +204,7 @@ export class TimeEntryService {
         pausedSeconds: input.pausedSeconds,
         description: input.description,
         isManual: true,
+        clientRequestId: input.clientRequestId ?? null,
       },
       ...WITH_PROJECT,
     });

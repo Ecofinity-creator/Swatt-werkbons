@@ -1,8 +1,57 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    // Offline-modus (sectie 16, backlog-extra 11/9/2026) — deel 1: de
+    // "app-shell" (HTML/JS/CSS/iconen) offline beschikbaar maken via een
+    // service worker, zodat de app zelf opent op een werf zonder bereik
+    // i.p.v. een blanco/foutscherm te tonen. Het echte manifest.webmanifest
+    // in public/ (met de Uurivo-iconen) blijft ongewijzigd de bron van
+    // waarheid — `manifest: false` laat deze plugin enkel de service worker
+    // genereren, niet nóg een manifest erbovenop.
+    VitePWA({
+      manifest: false,
+      registerType: 'autoUpdate',
+      includeAssets: [
+        'favicon-16x16.png',
+        'favicon-32x32.png',
+        'apple-touch-icon.png',
+        'icon-192.png',
+        'icon-512.png',
+        'icon-maskable-192.png',
+        'icon-maskable-512.png',
+      ],
+      // Enkel actief in een productiebuild (npm run build && npm run
+      // preview) — tijdens `npm run dev` zou een service worker Vite's
+      // eigen hot-reload-cyclus alleen maar in de weg zitten.
+      devOptions: { enabled: false },
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,png,svg,ico,webmanifest}'],
+        // GET-only (POST/PUT laat Workbox hier sowieso ongemoeid) —
+        // NetworkFirst: probeer altijd eerst een verse server-respons (max.
+        // 4s), val pas terug op de laatst gekende cache als er geen bereik
+        // is. Zo blijft "Mijn projecten"/de actieve timerstatus bruikbaar
+        // (weliswaar mogelijk een beetje verouderd) wanneer een technieker
+        // de app op de werf heropent zonder ontvangst.
+        runtimeCaching: [
+          {
+            urlPattern: ({ url, sameOrigin }) =>
+              sameOrigin && /^\/(projects|time-entries|work-orders|auth\/me)/.test(url.pathname),
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'uurivo-api-cache',
+              networkTimeoutSeconds: 4,
+              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 7 },
+              cacheableResponse: { statuses: [200] },
+            },
+          },
+        ],
+      },
+    }),
+  ],
   server: {
     port: 5173,
     proxy: {

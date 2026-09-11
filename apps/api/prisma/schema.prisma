@@ -887,6 +887,18 @@ model TimeEntry {
   /// Mensentaal-fout (sectie 27) van de laatste mislukte synchronisatiepoging — null zolang alles goed gaat of nog niet geprobeerd is.
   syncError                String?             @map("sync_error")
 
+  /// Idempotentiesleutel voor createManual() (sectie 16 — offline-modus,
+  /// 11/9/2026). De frontend genereert dit client-side (UUID) vóór de
+  /// eerste poging en stuurt hetzelfde ID mee bij elke retry — nodig omdat
+  /// een offline-wachtrij een POST kan herhalen zonder zeker te weten of de
+  /// vorige poging de server al bereikte (verbinding kan wegvallen net na
+  /// een geslaagde create, vóór het antwoord de telefoon bereikt).
+  /// TimeEntryService.createManual() geeft bij een herhaald ID de bestaande
+  /// rij terug i.p.v. een tweede aan te maken — voorkomt dubbel
+  /// gefactureerde/doorbetaalde uren. Nullable/optioneel: een manuele
+  /// registratie via de normale (online) flow heeft dit niet nodig.
+  clientRequestId String? @unique @map("client_request_id")
+
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   project  Project? @relation(fields: [projectId], references: [id], onDelete: Restrict)
 

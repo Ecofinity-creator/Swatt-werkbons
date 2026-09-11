@@ -50,6 +50,12 @@ export const createManualTimeEntryBodySchema = z.object({
   endedAt: z.string().datetime({ message: 'Ongeldig eindtijdstip.' }),
   pausedMinutes: z.number().int().min(0).max(24 * 60).optional().default(0),
   description: z.string().trim().min(1).optional(),
+  /**
+   * Idempotentiesleutel (offline-modus, 11/9/2026) — de frontend genereert
+   * dit client-side (UUID) vóór de eerste poging en stuurt hetzelfde ID mee
+   * bij elke retry vanuit de offline-wachtrij. Zie TimeEntryService.createManual().
+   */
+  clientRequestId: z.string().trim().min(1).max(100).optional(),
 });
 
 export type CreateManualTimeEntryBody = z.infer<typeof createManualTimeEntryBodySchema>;

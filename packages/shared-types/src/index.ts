@@ -462,6 +462,13 @@ export interface CreateManualTimeEntryBody {
   endedAt: string;
   pausedMinutes?: number;
   description?: string;
+  /**
+   * Idempotentiesleutel (offline-modus, 11/9/2026) — client-gegenereerd
+   * (UUID), meegestuurd bij elke retry vanuit de offline-wachtrij zodat een
+   * herhaalde POST geen dubbele tijdregistratie aanmaakt. Zie
+   * TimeEntryService.createManual() in apps/api.
+   */
+  clientRequestId?: string;
 }
 
 /**

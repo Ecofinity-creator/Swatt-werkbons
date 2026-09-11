@@ -4,6 +4,17 @@ import { Link, useLocation, useParams } from 'react-router-dom';
 import { projectsApi, timeEntriesApi, workOrdersApi } from '../api/client';
 import { ApiRequestError } from '../auth/AuthContext';
 import { DescriptionField } from '../components/DescriptionField';
+import { SyncStatusBadge } from '../components/SyncStatusBadge';
+import {
+  clearLocalTimer,
+  isLocalTimerId,
+  loadLocalTimer,
+  pauseLocalTimer,
+  resumeLocalTimer,
+  startLocalTimer,
+  stopLocalTimer,
+} from '../offline/localTimer';
+import { enqueueOutboxItem, isNetworkError } from '../offline/outbox';
 
 /**
  * Phase 5 — werkbonnen (basis). De werkbon wordt automatisch aangemaakt
@@ -19,6 +30,14 @@ interface StoppedSummary {
   workOrderId: string | null;
   workOrderNumber: string | null;
   workOrderError: string | null;
+  /**
+   * Offline-modus (sectie 16) — true wanneer stop/manuele registratie én de
+   * werkbon-aanmaak niet meteen naar de server konden en in de wachtrij
+   * staan (zie offline/outbox.ts). Géén fout: `workOrderError` blijft null,
+   * de UI toont hiervoor een neutrale "wacht op synchronisatie"-melding
+   * i.p.v. het rode foutblok.
+   */
+  queuedOffline: boolean;
 }
 
 /**
@@ -68,12 +87,27 @@ export function ProjectTimerPage() {
   const [manualErrorMessage, setManualErrorMessage] = useState<string | null>(null);
   const [isSubmittingManual, setIsSubmittingManual] = useState(false);
 
+  // Offline-modus (sectie 16), business rule 1 ("één actieve timer per
+  // werknemer") ook lokaal afgedwongen: een niet-gesynchroniseerde,
+  // offline-gestarte timer bij een ANDER project blokkeert dit scherm,
+  // i.p.v. de gebruiker toe te laten er ondertussen een tweede te starten.
+  const [otherProjectLocalTimer, setOtherProjectLocalTimer] = useState<TimeEntrySummary | null>(null);
+
   useEffect(() => {
     if (!projectId) return;
 
     let cancelled = false;
 
     async function load() {
+      const local = loadLocalTimer();
+      if (local && local.projectId !== projectId) {
+        if (!cancelled) {
+          setOtherProjectLocalTimer(local);
+          setIsLoading(false);
+        }
+        return;
+      }
+
       try {
         const [activeResponse] = await Promise.all([
           timeEntriesApi.active(),
@@ -84,10 +118,18 @@ export function ProjectTimerPage() {
                 if (!cancelled) setProject(match ?? null);
               }),
         ]);
-        if (!cancelled) setActiveEntry(activeResponse.timeEntry);
+        if (!cancelled) setActiveEntry(activeResponse.timeEntry ?? local);
       } catch (err) {
         if (!cancelled) {
-          setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de timerstatus niet ophalen.');
+          if (local) {
+            // Geen bereik om de serverstatus op te halen, maar er ligt al
+            // een lokale (dit-project) timer klaar — die gewoon tonen i.p.v.
+            // een foutmelding: dit IS precies het scenario dat offline-modus
+            // moet opvangen.
+            setActiveEntry(local);
+          } else {
+            setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de timerstatus niet ophalen.');
+          }
         }
       } finally {
         if (!cancelled) setIsLoading(false);
@@ -140,7 +182,15 @@ export function ProjectTimerPage() {
       const response = await timeEntriesApi.start(projectId!);
       setActiveEntry(response.timeEntry);
     } catch (err) {
-      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de timer niet starten.');
+      // Offline-modus (sectie 16): geen bereik om de timer server-side te
+      // starten — val terug op een volledig lokale timer i.p.v. de
+      // technieker met een foutmelding te blokkeren. Een échte serverfout
+      // (bv. "niet aan dit project gekoppeld") blijft wél gewoon getoond.
+      if (isNetworkError(err) && project) {
+        setActiveEntry(startLocalTimer({ id: project.id, name: project.name, customerName: project.customerName }));
+      } else {
+        setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de timer niet starten.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -149,6 +199,10 @@ export function ProjectTimerPage() {
   async function handlePause() {
     if (!activeEntry) return;
     setErrorMessage(null);
+    if (isLocalTimerId(activeEntry.id)) {
+      setActiveEntry(pauseLocalTimer(activeEntry));
+      return;
+    }
     setIsSubmitting(true);
     try {
       const response = await timeEntriesApi.pause(activeEntry.id);
@@ -163,6 +217,10 @@ export function ProjectTimerPage() {
   async function handleResume() {
     if (!activeEntry) return;
     setErrorMessage(null);
+    if (isLocalTimerId(activeEntry.id)) {
+      setActiveEntry(resumeLocalTimer(activeEntry));
+      return;
+    }
     setIsSubmitting(true);
     try {
       const response = await timeEntriesApi.resume(activeEntry.id);
@@ -175,12 +233,47 @@ export function ProjectTimerPage() {
   }
 
   async function handleStop() {
-    if (!activeEntry) return;
+    if (!activeEntry || !projectId) return;
     setErrorMessage(null);
     setIsSubmitting(true);
+    const trimmedDescription = description.trim() || null;
+
+    // Volledig offline gestart (nooit een server-ID gehad) — dit kan sowieso
+    // nooit via `/time-entries/:id/stop`. Dient in één keer als manuele
+    // registratie in bij de wachtrij (zie offline/localTimer.ts).
+    if (isLocalTimerId(activeEntry.id)) {
+      const stopped = stopLocalTimer(activeEntry, trimmedDescription);
+      clearLocalTimer();
+      setActiveEntry(null);
+      setShowStopForm(false);
+      setDescription('');
+      setStoppedSummary({
+        elapsedSeconds: Math.max(0, Math.floor((new Date(stopped.endedAt).getTime() - new Date(stopped.startedAt).getTime()) / 1000) - stopped.pausedSeconds),
+        description: stopped.description,
+        timeEntryId: activeEntry.id,
+        workOrderId: null,
+        workOrderNumber: null,
+        workOrderError: null,
+        queuedOffline: true,
+      });
+      enqueueOutboxItem(
+        'manual-entry',
+        {
+          projectId,
+          startedAt: stopped.startedAt,
+          endedAt: stopped.endedAt,
+          pausedMinutes: Math.round(stopped.pausedSeconds / 60),
+          description: stopped.description,
+          clientRequestId: crypto.randomUUID(),
+        },
+        project?.name ?? 'Onbekend project',
+      );
+      setIsSubmitting(false);
+      return;
+    }
+
     try {
-      const trimmedDescription = description.trim() || undefined;
-      const response = await timeEntriesApi.stop(activeEntry.id, trimmedDescription);
+      const response = await timeEntriesApi.stop(activeEntry.id, trimmedDescription ?? undefined);
       const stoppedEntry = response.timeEntry;
       setActiveEntry(null);
       setShowStopForm(false);
@@ -192,10 +285,36 @@ export function ProjectTimerPage() {
         workOrderId: null,
         workOrderNumber: null,
         workOrderError: null,
+        queuedOffline: false,
       });
-      await createWorkOrder(stoppedEntry.id, trimmedDescription ?? null);
+      await createWorkOrder(stoppedEntry.id, trimmedDescription);
     } catch (err) {
-      setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de timer niet stoppen.');
+      // Timer was al online gestart (heeft dus een echt server-ID) maar de
+      // verbinding viel weg net vóór/tijdens het stoppen — de tijdsregistratie
+      // zelf mag hierdoor nooit verloren gaan (business rule 9). In de
+      // wachtrij zetten i.p.v. een foutmelding tonen die de indruk wekt dat
+      // er niets bewaard is.
+      if (isNetworkError(err)) {
+        setActiveEntry(null);
+        setShowStopForm(false);
+        setDescription('');
+        setStoppedSummary({
+          elapsedSeconds: computeElapsedSeconds(activeEntry, Date.now()),
+          description: trimmedDescription,
+          timeEntryId: activeEntry.id,
+          workOrderId: null,
+          workOrderNumber: null,
+          workOrderError: null,
+          queuedOffline: true,
+        });
+        enqueueOutboxItem(
+          'stop-timer',
+          { timeEntryId: activeEntry.id, projectId, description: trimmedDescription },
+          project?.name ?? 'Onbekend project',
+        );
+      } else {
+        setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de timer niet stoppen.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -272,16 +391,16 @@ export function ProjectTimerPage() {
 
     const pauseMinutesValue = Number.parseInt(manualPauseMinutes, 10);
     const pausedMinutes = Number.isNaN(pauseMinutesValue) ? 0 : Math.max(0, pauseMinutesValue);
+    const trimmedDescription = manualDescription.trim() || null;
 
     setIsSubmittingManual(true);
     try {
-      const trimmedDescription = manualDescription.trim() || undefined;
       const response = await timeEntriesApi.createManual({
         projectId,
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
         pausedMinutes,
-        description: trimmedDescription,
+        description: trimmedDescription ?? undefined,
       });
       const createdEntry = response.timeEntry;
       setShowManualForm(false);
@@ -296,10 +415,40 @@ export function ProjectTimerPage() {
         workOrderId: null,
         workOrderNumber: null,
         workOrderError: null,
+        queuedOffline: false,
       });
-      await createWorkOrder(createdEntry.id, trimmedDescription ?? null);
+      await createWorkOrder(createdEntry.id, trimmedDescription);
     } catch (err) {
-      setManualErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de tijdsregistratie niet opslaan.');
+      if (isNetworkError(err)) {
+        setShowManualForm(false);
+        setManualStartTime('');
+        setManualEndTime('');
+        setManualPauseMinutes('0');
+        setManualDescription('');
+        setStoppedSummary({
+          elapsedSeconds: Math.max(0, Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000) - pausedMinutes * 60),
+          description: trimmedDescription,
+          timeEntryId: `pending-${crypto.randomUUID()}`,
+          workOrderId: null,
+          workOrderNumber: null,
+          workOrderError: null,
+          queuedOffline: true,
+        });
+        enqueueOutboxItem(
+          'manual-entry',
+          {
+            projectId,
+            startedAt: startedAt.toISOString(),
+            endedAt: endedAt.toISOString(),
+            pausedMinutes,
+            description: trimmedDescription,
+            clientRequestId: crypto.randomUUID(),
+          },
+          project?.name ?? 'Onbekend project',
+        );
+      } else {
+        setManualErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon de tijdsregistratie niet opslaan.');
+      }
     } finally {
       setIsSubmittingManual(false);
     }
@@ -307,28 +456,47 @@ export function ProjectTimerPage() {
 
   return (
     <main className="flex min-h-screen flex-col bg-swatt-black px-6 py-10 text-white">
-      <header className="mb-8 flex items-center justify-between">
+      <header className="mb-4 flex items-center justify-between">
         <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">Tijdsregistratie</p>
         <Link to="/mijn-projecten" className="text-sm text-neutral-400 underline">
           Terug
         </Link>
       </header>
 
-      {errorMessage && (
+      <div className="mb-4">
+        <SyncStatusBadge />
+      </div>
+
+      {otherProjectLocalTimer && (
+        <div className="rounded-xl border border-amber-800 bg-amber-950 p-5 text-center text-amber-200">
+          <p className="font-semibold">
+            Je hebt nog een niet-gesynchroniseerde tijdsregistratie open bij {otherProjectLocalTimer.projectName}.
+          </p>
+          <p className="mt-2 text-sm">Rond die eerst af (stoppen) — een werknemer kan maar één actieve timer tegelijk hebben.</p>
+          <Link
+            to={`/projecten/${otherProjectLocalTimer.projectId}`}
+            className="mt-4 inline-block rounded-lg bg-swatt-gold px-6 py-3 text-sm font-bold text-swatt-black"
+          >
+            Naar {otherProjectLocalTimer.projectName} →
+          </Link>
+        </div>
+      )}
+
+      {!otherProjectLocalTimer && errorMessage && (
         <p role="alert" className="mb-4 rounded-lg bg-red-950 px-4 py-3 text-sm text-red-300">
           {errorMessage}
         </p>
       )}
 
-      {isLoading && !errorMessage && <p className="text-neutral-400">Laden...</p>}
+      {!otherProjectLocalTimer && isLoading && !errorMessage && <p className="text-neutral-400">Laden...</p>}
 
-      {!isLoading && !project && !errorMessage && (
+      {!otherProjectLocalTimer && !isLoading && !project && !errorMessage && (
         <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-5 text-center text-neutral-400">
           Dit project is niet gevonden of niet aan jou gekoppeld.
         </div>
       )}
 
-      {!isLoading && project && stoppedSummary && (
+      {!otherProjectLocalTimer && !isLoading && project && stoppedSummary && (
         <div className="flex flex-col items-center gap-4 rounded-xl border border-neutral-800 bg-neutral-900 p-8 text-center">
           <p className="text-lg font-semibold">Tijdsregistratie gestopt</p>
           <p className="text-4xl font-extrabold tabular-nums text-swatt-gold">
@@ -338,7 +506,15 @@ export function ProjectTimerPage() {
             <p className="max-w-sm text-sm text-neutral-400">&ldquo;{stoppedSummary.description}&rdquo;</p>
           )}
 
-          {stoppedSummary.workOrderNumber ? (
+          {stoppedSummary.queuedOffline ? (
+            <div className="w-full rounded-lg border border-amber-800 bg-amber-950 px-4 py-3 text-sm text-amber-200">
+              <p className="font-semibold">🟠 Geen verbinding — bewaard op je toestel.</p>
+              <p className="mt-1">
+                De werkbon wordt automatisch aangemaakt en gesynchroniseerd zodra er weer bereik is. Je hoeft niets
+                opnieuw in te voeren.
+              </p>
+            </div>
+          ) : stoppedSummary.workOrderNumber ? (
             <div className="w-full rounded-lg bg-neutral-800 px-4 py-3">
               <p className="text-xs uppercase tracking-wide text-neutral-400">Werkbon</p>
               <p className="text-lg font-bold text-white">{stoppedSummary.workOrderNumber}</p>
@@ -377,7 +553,7 @@ export function ProjectTimerPage() {
         </div>
       )}
 
-      {!isLoading && project && !stoppedSummary && (
+      {!otherProjectLocalTimer && !isLoading && project && !stoppedSummary && (
         <>
           <div className="mb-6 rounded-xl border border-neutral-800 bg-neutral-900 p-5">
             <p className="text-xs font-medium uppercase tracking-wide text-swatt-gold">{project.customerName}</p>

@@ -60,6 +60,7 @@ export default async function timeEntryRoutes(app: FastifyInstance): Promise<voi
       endedAt: new Date(body.endedAt),
       pausedSeconds: (body.pausedMinutes ?? 0) * 60,
       description: body.description ?? null,
+      clientRequestId: body.clientRequestId ?? null,
     });
     reply.code(201);
     return { timeEntry: toSummary(entry) };
