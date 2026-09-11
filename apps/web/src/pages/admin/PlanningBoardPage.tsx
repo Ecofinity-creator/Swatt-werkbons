@@ -371,8 +371,43 @@ function AssignmentModal({
   const [untilDate, setUntilDate] = useState<string>(isoLocal(addDays(new Date(`${context.date}T00:00:00`), 56)));
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Klantvraag 11/9/2026: enkel projecten die al gekoppeld zijn aan deze
+  // medewerker mogen ingepland worden (mogelijks staan de prijsinstellingen
+  // nog niet vast bij een niet-gekoppeld project) — zie PlanningErrors.projectNotAssigned
+  // op de backend, dit is de bijbehorende UI-beperking.
+  const [linkedProjectIds, setLinkedProjectIds] = useState<Set<string> | null>(null);
+  const [linkedProjectsError, setLinkedProjectsError] = useState<string | null>(null);
 
-  const filteredProjects = projects.filter((p) => {
+  useEffect(() => {
+    let cancelled = false;
+    setLinkedProjectIds(null);
+    setLinkedProjectsError(null);
+    projectsApi.assignments
+      .list(context.employeeId)
+      .then((res) => {
+        if (!cancelled) setLinkedProjectIds(new Set(res.projectIds));
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLinkedProjectsError(
+            err instanceof ApiRequestError ? err.message : 'Kon de gekoppelde projecten van deze medewerker niet ophalen.',
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [context.employeeId]);
+
+  // De reeds toegewezen project blijft altijd zichtbaar/kiesbaar, ook wanneer
+  // die koppeling intussen (nog) niet in "Projecten aan medewerker koppelen"
+  // staat — zo blokkeert deze beperking nooit het beheren van bestaande,
+  // van vóór deze wijziging daterende toewijzingen.
+  const availableProjects = projects.filter(
+    (p) => linkedProjectIds?.has(p.id) || p.id === context.currentProjectId,
+  );
+
+  const filteredProjects = availableProjects.filter((p) => {
     if (!search.trim()) return true;
     const haystack = `${p.customerName} ${p.name} ${p.address ?? ''}`.toLowerCase();
     return haystack.includes(search.trim().toLowerCase());
@@ -441,16 +476,34 @@ function AssignmentModal({
           <p className="text-sm text-neutral-500">{dateLabel}</p>
         </div>
 
-        <input
-          type="text"
-          placeholder="Zoek op klant, project of adres..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="mx-5 mt-4 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
-        />
+        {linkedProjectIds && linkedProjectIds.size > 0 && (
+          <input
+            type="text"
+            placeholder="Zoek op klant, project of adres..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="mx-5 mt-4 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+          />
+        )}
 
         <ul className="flex-1 overflow-y-auto px-3 py-2">
-          {filteredProjects.length === 0 && <li className="px-2 py-3 text-sm text-neutral-400">Geen project gevonden.</li>}
+          {linkedProjectsError && (
+            <li className="mx-2 mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{linkedProjectsError}</li>
+          )}
+          {!linkedProjectIds && !linkedProjectsError && (
+            <li className="px-2 py-3 text-sm text-neutral-400">Gekoppelde projecten laden...</li>
+          )}
+          {linkedProjectIds && linkedProjectIds.size === 0 && (
+            <li className="mx-2 mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+              <p className="font-semibold">Deze medewerker heeft nog geen gekoppelde projecten.</p>
+              <p className="mt-1 text-amber-800">
+                Koppel eerst minstens één project via <span className="font-medium">Medewerkers → {context.employeeDisplayName} → Gekoppelde projecten</span> — zo staan de prijsinstellingen vast vóór je dit inplant.
+              </p>
+            </li>
+          )}
+          {linkedProjectIds && linkedProjectIds.size > 0 && filteredProjects.length === 0 && (
+            <li className="px-2 py-3 text-sm text-neutral-400">Geen project gevonden.</li>
+          )}
           {filteredProjects.map((project) => {
             const isSelected = project.id === selectedProjectId;
             return (

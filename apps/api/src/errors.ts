@@ -465,4 +465,16 @@ export const PlanningErrors = {
       'Deze periode is te lang om in één keer te plannen. Kies een kortere periode.',
     ),
   seriesNotFound: () => new ApiError(404, 'PLANNING_SERIES_NOT_FOUND', 'Deze planningsreeks bestaat niet (meer).'),
+  /**
+   * Klantvraag 11/9/2026 (herziening van de vorige aanpak — zie
+   * planning.service.ts): een medewerker mag enkel ingepland worden op een
+   * project waaraan hij al expliciet gekoppeld is via "Projecten aan
+   * medewerker koppelen", nooit automatisch.
+   */
+  projectNotAssigned: () =>
+    new ApiError(
+      409,
+      'PLANNING_PROJECT_NOT_ASSIGNED',
+      'Dit project is nog niet gekoppeld aan deze medewerker. Koppel het project eerst via "Projecten aan medewerker koppelen" in het medewerkersprofiel voordat je het inplant — zo staan de juiste prijsinstellingen al vast.',
+    ),
 };

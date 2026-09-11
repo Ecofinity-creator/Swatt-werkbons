@@ -1,6 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
-import { ApiError } from '../src/errors';
 import {
   addDaysUtc,
   formatDateOnly,
@@ -56,7 +55,12 @@ interface FakeSeries {
   active: boolean;
 }
 
-/** Klantvraag 11/9/2026 — de ProjectAssignment die een planningtoewijzing voortaan automatisch meekoppelt. */
+/**
+ * Klantvraag 11/9/2026, herzien: een planningtoewijzing vereist voortaan dat
+ * deze echte autorisatie (ProjectAssignment) al bestaat — ze wordt niet meer
+ * automatisch aangemaakt. Tests koppelen dit dus bewust vooraf via
+ * `linkProject()` wanneer een toewijzing moet slagen.
+ */
 interface FakeProjectAssignment {
   id: string;
   projectId: string;
@@ -124,21 +128,16 @@ function createFakePrisma() {
       findUnique: async ({ where }: { where: { id: string } }) => projects.find((p) => p.id === where.id) ?? null,
     },
     projectAssignment: {
-      upsert: async ({
+      findUnique: async ({
         where,
-        create,
       }: {
         where: { projectId_employeeId: { projectId: string; employeeId: string } };
-        create: Omit<FakeProjectAssignment, 'id'>;
-        update: Record<string, never>;
       }) => {
-        const existing = projectAssignments.find(
-          (a) => a.projectId === where.projectId_employeeId.projectId && a.employeeId === where.projectId_employeeId.employeeId,
+        return (
+          projectAssignments.find(
+            (a) => a.projectId === where.projectId_employeeId.projectId && a.employeeId === where.projectId_employeeId.employeeId,
+          ) ?? null
         );
-        if (existing) return existing;
-        const created: FakeProjectAssignment = { id: genId('assign'), ...create };
-        projectAssignments.push(created);
-        return created;
       },
     },
     planningAssignment: {
@@ -210,15 +209,21 @@ function createFakePrisma() {
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fake),
   };
 
-  return { prisma: fake as unknown as PrismaClient, assignments, series, projectAssignments };
+  /** Test-helper: koppelt (Fase 3, "Projecten aan medewerker koppelen") vooraf, zodat inplannen mag slagen. */
+  function linkProject(employeeId: string, projectId: string, assignedByUserId = 'user-admin'): void {
+    projectAssignments.push({ id: genId('assign'), employeeId, projectId, assignedByUserId });
+  }
+
+  return { prisma: fake as unknown as PrismaClient, assignments, series, projectAssignments, linkProject };
 }
 
 describe('PlanningService', () => {
   describe('setAssignment', () => {
     it('maakt een nieuwe losse toewijzing aan', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = formatDateOnly(todayDateOnly());
+      linkProject('emp-peter', 'proj-janssens');
 
       const assignment = await service.setAssignment({
         employeeId: 'emp-peter',
@@ -232,9 +237,11 @@ describe('PlanningService', () => {
     });
 
     it('overschrijft een bestaande toewijzing op dezelfde dag (business rule 11)', async () => {
-      const { prisma, assignments } = createFakePrisma();
+      const { prisma, assignments, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = formatDateOnly(todayDateOnly());
+      linkProject('emp-peter', 'proj-janssens');
+      linkProject('emp-peter', 'proj-desmet');
 
       await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-janssens', date: today, createdById: 'u1' });
       await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-desmet', date: today, createdById: 'u1' });
@@ -245,10 +252,12 @@ describe('PlanningService', () => {
     });
 
     it('koppelt een dag altijd los van een reeks bij een individuele toewijzing (business rule 16)', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
       const wednesdayIsh = addDaysUtc(today, 7); // ruim in de toekomst, weekdag maakt hier niet uit
+      linkProject('emp-sofie', 'proj-janssens');
+      linkProject('emp-sofie', 'proj-desmet');
 
       const { series } = await service.createSeries({
         employeeId: 'emp-sofie',
@@ -285,37 +294,35 @@ describe('PlanningService', () => {
       ).rejects.toMatchObject({ code: 'PLANNING_PROJECT_NOT_FOUND' });
     });
 
-    // Klantvraag 11/9/2026: "ik krijg nog steeds de keuze uit de projecten
-    // waaraan ik toegewezen ben en niet wat er in de planning staat" — een
-    // planningtoewijzing moet voortaan meteen ook de echte autorisatie
-    // (ProjectAssignment) meekoppelen, anders blijft de app stil terugvallen
-    // op de gewone keuzelijst (en kan de medewerker sowieso niet starten).
-    it('koppelt automatisch een ProjectAssignment (autorisatie) wanneer die nog ontbreekt', async () => {
+    // Klantvraag 11/9/2026, herziening van een eerdere aanpak: "het zou niet
+    // mogelijk mogen zijn om een project in te plannen wat niet aangevinkt
+    // staat, omdat er mogelijks ook nog niet de juiste prijsinstellingen
+    // gemaakt zijn" — inplannen vereist dus voortaan dat de echte autorisatie
+    // (ProjectAssignment, "Projecten aan medewerker koppelen") al bestaat.
+    it('weigert een project dat nog niet aan deze medewerker gekoppeld is', async () => {
       const { prisma, projectAssignments } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = formatDateOnly(todayDateOnly());
 
       expect(projectAssignments).toHaveLength(0);
 
-      await service.setAssignment({
-        employeeId: 'emp-peter',
-        projectId: 'proj-janssens',
-        date: today,
-        createdById: 'user-supervisor',
-      });
+      await expect(
+        service.setAssignment({
+          employeeId: 'emp-peter',
+          projectId: 'proj-janssens',
+          date: today,
+          createdById: 'user-supervisor',
+        }),
+      ).rejects.toMatchObject({ code: 'PLANNING_PROJECT_NOT_ASSIGNED' });
 
-      expect(projectAssignments).toHaveLength(1);
-      expect(projectAssignments[0]).toMatchObject({
-        employeeId: 'emp-peter',
-        projectId: 'proj-janssens',
-        assignedByUserId: 'user-supervisor',
-      });
+      expect(projectAssignments).toHaveLength(0); // geen stilzwijgende auto-koppeling meer
     });
 
-    it('dupliceert géén ProjectAssignment die al bestaat', async () => {
-      const { prisma, projectAssignments } = createFakePrisma();
+    it('lukt zodra het project vooraf gekoppeld is, zonder de koppeling te verdubbelen', async () => {
+      const { prisma, projectAssignments, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-peter', 'proj-janssens');
 
       await service.setAssignment({
         employeeId: 'emp-peter',
@@ -323,7 +330,7 @@ describe('PlanningService', () => {
         date: formatDateOnly(today),
         createdById: 'u1',
       });
-      // Zelfde medewerker/project, andere dag — mag geen tweede rij geven.
+      // Zelfde medewerker/project, andere dag — mag geen tweede koppeling geven.
       await service.setAssignment({
         employeeId: 'emp-peter',
         projectId: 'proj-janssens',
@@ -337,9 +344,10 @@ describe('PlanningService', () => {
 
   describe('clearAssignment', () => {
     it('wist enkel de opgegeven dag, andere dagen van dezelfde reeks blijven staan', async () => {
-      const { prisma, assignments } = createFakePrisma();
+      const { prisma, assignments, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-peter', 'proj-janssens');
 
       await service.createSeries({
         employeeId: 'emp-peter',
@@ -357,10 +365,11 @@ describe('PlanningService', () => {
       expect(assignments.some((a) => a.date.getTime() === today.getTime())).toBe(false);
     });
 
-    it('trekt de automatisch gekoppelde ProjectAssignment NIET in — enkel de planningdag zelf verdwijnt', async () => {
-      const { prisma, projectAssignments } = createFakePrisma();
+    it('laat de bestaande ProjectAssignment ongemoeid — enkel de planningdag zelf verdwijnt', async () => {
+      const { prisma, projectAssignments, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-peter', 'proj-janssens');
 
       await service.setAssignment({
         employeeId: 'emp-peter',
@@ -372,15 +381,16 @@ describe('PlanningService', () => {
 
       await service.clearAssignment({ employeeId: 'emp-peter', date: formatDateOnly(today) });
 
-      expect(projectAssignments).toHaveLength(1); // ongewijzigd — expliciet loskoppelen blijft een aparte actie
+      expect(projectAssignments).toHaveLength(1); // ongewijzigd — expliciet loskoppelen blijft een aparte actie op "Projecten aan medewerker koppelen"
     });
   });
 
   describe('createSeries', () => {
     it('genereert enkel toewijzingen op de geselecteerde dagen, binnen de periode', async () => {
-      const { prisma, assignments } = createFakePrisma();
+      const { prisma, assignments, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-sofie', 'proj-janssens');
 
       const { series, generatedCount } = await service.createSeries({
         employeeId: 'emp-sofie',
@@ -399,29 +409,31 @@ describe('PlanningService', () => {
       expect(series.weekdays).toEqual([0, 4]);
     });
 
-    it('koppelt automatisch één ProjectAssignment voor de hele reeks (niet één per gegenereerde dag)', async () => {
-      const { prisma, projectAssignments } = createFakePrisma();
+    it('weigert een reeks voor een project dat nog niet aan deze medewerker gekoppeld is', async () => {
+      const { prisma, assignments, series } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
 
-      await service.createSeries({
-        employeeId: 'emp-sofie',
-        projectId: 'proj-janssens',
-        weekdays: [0, 1, 2, 3, 4, 5, 6],
-        startDate: formatDateOnly(today),
-        endDate: formatDateOnly(addDaysUtc(today, 13)),
-        createdById: 'user-supervisor',
-      });
+      await expect(
+        service.createSeries({
+          employeeId: 'emp-sofie',
+          projectId: 'proj-janssens',
+          weekdays: [0, 1, 2, 3, 4, 5, 6],
+          startDate: formatDateOnly(today),
+          endDate: formatDateOnly(addDaysUtc(today, 13)),
+          createdById: 'user-supervisor',
+        }),
+      ).rejects.toMatchObject({ code: 'PLANNING_PROJECT_NOT_ASSIGNED' });
 
-      const forSofie = projectAssignments.filter((a) => a.employeeId === 'emp-sofie' && a.projectId === 'proj-janssens');
-      expect(forSofie).toHaveLength(1);
-      expect(forSofie[0]?.assignedByUserId).toBe('user-supervisor');
+      expect(assignments).toHaveLength(0); // geen enkele dag aangemaakt — de reeks als geheel weigert
+      expect(series).toHaveLength(0);
     });
 
     it('weigert een lege dagselectie', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = formatDateOnly(todayDateOnly());
+      linkProject('emp-peter', 'proj-janssens');
 
       await expect(
         service.createSeries({
@@ -436,9 +448,10 @@ describe('PlanningService', () => {
     });
 
     it('weigert een ongeldige weekdag', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = formatDateOnly(todayDateOnly());
+      linkProject('emp-peter', 'proj-janssens');
 
       await expect(
         service.createSeries({
@@ -453,9 +466,10 @@ describe('PlanningService', () => {
     });
 
     it('weigert een einddatum vóór de startdatum', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-peter', 'proj-janssens');
 
       await expect(
         service.createSeries({
@@ -472,9 +486,10 @@ describe('PlanningService', () => {
 
   describe('stopSeries', () => {
     it('verwijdert enkel nog niet-verstreken toewijzingen, historiek blijft staan (business rule 15)', async () => {
-      const { prisma, assignments } = createFakePrisma();
+      const { prisma, assignments, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-peter', 'proj-janssens');
 
       // Reeks die al een week vóór vandaag begon en nog een week doorloopt —
       // zo bevat ze zowel verleden als toekomst t.o.v. "vandaag".
@@ -500,9 +515,10 @@ describe('PlanningService', () => {
     });
 
     it('is idempotent — een tweede keer stopzetten geeft gewoon succes', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = formatDateOnly(todayDateOnly());
+      linkProject('emp-peter', 'proj-janssens');
 
       const { series } = await service.createSeries({
         employeeId: 'emp-peter',
@@ -529,9 +545,11 @@ describe('PlanningService', () => {
 
   describe('listActiveSeries', () => {
     it('toont enkel actieve reeksen die nog niet volledig verstreken zijn', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-peter', 'proj-janssens');
+      linkProject('emp-sofie', 'proj-desmet');
 
       const { series: futureSeries } = await service.createSeries({
         employeeId: 'emp-peter',
@@ -559,9 +577,12 @@ describe('PlanningService', () => {
 
   describe('listForEmployee ("Mijn planning")', () => {
     it('geeft enkel de eigen toewijzingen vanaf vandaag terug', async () => {
-      const { prisma } = createFakePrisma();
+      const { prisma, linkProject } = createFakePrisma();
       const service = new PlanningService(prisma);
       const today = todayDateOnly();
+      linkProject('emp-peter', 'proj-janssens');
+      linkProject('emp-peter', 'proj-desmet');
+      linkProject('emp-sofie', 'proj-desmet');
 
       await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-janssens', date: formatDateOnly(addDaysUtc(today, -1)), createdById: 'u1' });
       await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-desmet', date: formatDateOnly(today), createdById: 'u1' });

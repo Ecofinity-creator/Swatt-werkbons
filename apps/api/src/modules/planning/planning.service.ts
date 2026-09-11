@@ -63,11 +63,10 @@ export class PlanningService {
   }): Promise<PlanningAssignmentRecord> {
     await this.assertEmployeeExists(input.employeeId);
     await this.assertProjectExists(input.projectId);
+    await this.assertProjectAssignmentExists(input.employeeId, input.projectId);
     const date = parseDateOnly(input.date);
 
     return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      await this.ensureProjectAssignment(tx, input.employeeId, input.projectId, input.createdById);
-
       return tx.planningAssignment.upsert({
         where: { employeeId_date: { employeeId: input.employeeId, date } },
         create: {
@@ -109,6 +108,7 @@ export class PlanningService {
   }): Promise<{ series: PlanningSeriesRecord; generatedCount: number }> {
     await this.assertEmployeeExists(input.employeeId);
     await this.assertProjectExists(input.projectId);
+    await this.assertProjectAssignmentExists(input.employeeId, input.projectId);
 
     const uniqueWeekdays = Array.from(new Set(input.weekdays));
     if (uniqueWeekdays.length === 0) {
@@ -138,8 +138,6 @@ export class PlanningService {
     // helaas terug op `any`, maar dat is de library's eigen typedefinitie,
     // geen losse `any` van onzentwege.
     const series = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      await this.ensureProjectAssignment(tx, input.employeeId, input.projectId, input.createdById);
-
       const createdSeries = await tx.planningSeries.create({
         data: {
           employeeId: input.employeeId,
@@ -223,40 +221,32 @@ export class PlanningService {
   }
 
   /**
-   * Klantvraag 11/9/2026: "ik krijg nog steeds de keuze uit de projecten
-   * waaraan ik toegewezen ben en niet wat er in de planning staat." Oorzaak:
-   * een planningtoewijzing (dit bestand) gaf voorheen GEEN automatische
-   * `ProjectAssignment` (Fase 3 — de eigenlijke autorisatie om een timer te
-   * starten, zie `TimeEntryService.start()`/`addManual()`, die zonder een
-   * `ProjectAssignment`-rij hard weigert met `ProjectErrors.notAssigned()`).
-   * Stond een medewerker dus nog niet apart gekoppeld aan het project via
-   * "Projecten aan medewerker koppelen", dan verscheen de ingeplande opdracht
-   * op de app nergens (de rule-12-veiligheidscheck op HomePage.tsx/
-   * EmployeeProjectsPage.tsx viel stil terug op de gewone lijst) én kon de
-   * medewerker hem sowieso niet starten, ook niet via die gewone lijst.
+   * Klantvraag 11/9/2026, herziening van een eerdere aanpak: een eerste
+   * versie liet een planningtoewijzing automatisch de echte autorisatie
+   * (`ProjectAssignment`, Fase 3 — zie `TimeEntryService.start()`/
+   * `addManual()`, die zonder zo'n rij hard weigert met
+   * `ProjectErrors.notAssigned()`) aanmaken. Expliciete klantfeedback
+   * daarop: "het zou niet mogelijk mogen zijn om een project in te plannen
+   * wat niet aangevinkt staat, omdat er mogelijks ook nog niet de juiste
+   * prijsinstellingen gemaakt zijn" — een project dat nog niet gekoppeld is
+   * via "Projecten aan medewerker koppelen" heeft mogelijk nog geen correct
+   * facturatietarief (`Project.hourlyRateCents`) of uitbetalingstarief
+   * ingesteld, dus mag het niet stilzwijgend "erbij genomen" worden zodra
+   * een supervisor het inplant.
    *
-   * Een planningtoewijzing impliceert dus voortaan meteen ook de
-   * `ProjectAssignment` — de supervisor plant het werk één keer, op het
-   * planningsbord, en dat volstaat. Bewust enkel TOEVOEGEN, nooit
-   * automatisch verwijderen: een dag uit de planning wissen of een reeks
-   * stopzetten mag een bestaande, mogelijk voor andere dagen/doeleinden
-   * gebruikte projectkoppeling niet stilzwijgend intrekken (zelfde
-   * voorzichtigheidsprincipe als business rules 8/9 — wijzigingen mogen
-   * afgeleide/lokale autorisatie nooit ongevraagd beschadigen). Expliciet
-   * loskoppelen blijft mogelijk via de bestaande "Projecten aan medewerker
-   * koppelen"-beheerpagina.
+   * Een planningtoewijzing vereist dus voortaan dat de koppeling al
+   * bestaat — bestaat ze niet, dan weigert dit expliciet i.p.v. ze aan te
+   * maken. De supervisor moet het project eerst bewust koppelen via die
+   * beheerpagina (waar de prijsinstellingen al gecontroleerd kunnen
+   * worden) vóór hij het kan inplannen.
    */
-  private async ensureProjectAssignment(
-    tx: Prisma.TransactionClient,
-    employeeId: string,
-    projectId: string,
-    assignedByUserId: string,
-  ): Promise<void> {
-    await tx.projectAssignment.upsert({
+  private async assertProjectAssignmentExists(employeeId: string, projectId: string): Promise<void> {
+    const assignment = await this.prisma.projectAssignment.findUnique({
       where: { projectId_employeeId: { projectId, employeeId } },
-      create: { projectId, employeeId, assignedByUserId },
-      update: {},
     });
+    if (!assignment) {
+      throw PlanningErrors.projectNotAssigned();
+    }
   }
 }
 
