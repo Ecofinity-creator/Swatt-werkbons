@@ -69,6 +69,11 @@ export function ClockIcon(props: IconProps) {
   );
 }
 
+/** Vandaag ingepland — "Start [project]"-knop op HomePage.tsx. */
+export function PlayIcon(props: IconProps) {
+  return base(props, <path d="M7 4.5v15l13-7.5-13-7.5Z" strokeLinejoin="round" />);
+}
+
 /** QR-code — app op smartphone. */
 export function QrCodeIcon(props: IconProps) {
   return base(

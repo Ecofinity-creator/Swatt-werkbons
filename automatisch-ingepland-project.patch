@@ -1,0 +1,246 @@
+From 3aa9dab083d01d96e58f2e331c5212ed6017e0bd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 11 Sep 2026 05:41:53 +0000
+Subject: [PATCH] Automatisch ingepland project meteen tonen op HomePage i.p.v.
+ keuzelijst
+
+Klantvraag 11/9/2026: "als ik als werknemer inlog komt niet automatisch
+het project naar voor waar ik ben ingepland, maar krijg ik nog steeds
+de mogelijkheid om te kiezen uit projecten. Dat was niet de bedoeling."
+
+De planning (Fase 13) zette het ingeplande project voorheen enkel als
+banner BOVENOP de "Mijn projecten"-lijst -- de technieker moest dus
+altijd eerst naar die pagina navigeren en zag daar nog steeds de
+volledige keuzelijst als eerste aanraakpunt.
+
+Nieuw: is er via de planning een project voor vandaag toegewezen, dan
+toont HomePage.tsx meteen een uitgelichte "Start [project]"-kaart
+i.p.v. de "Mijn projecten"-keuzeknop -- een tik en de timer start. Een
+kleine link "Ander project kiezen" blijft staan voor uitzonderingen
+(bv. een spoedopdracht die niet in de planning stond), zodat business
+rule 12 (planning is een suggestie, geen harde autorisatie) intact
+blijft.
+
+- hooks/useTodayPlannedProject.ts (nieuw): gedeelde hook (project +
+  laadstatus) o.b.v. planningApi.mine()/projectsApi.mine(), zelfde
+  rule-12-check als de bestaande banner op EmployeeProjectsPage.tsx.
+  Slaat de aanroepen over voor accounts zonder Employee-record.
+- components/icons.tsx: nieuw PlayIcon voor de Start-kaart.
+- pages/HomePage.tsx: "Mijn werk"-sectie toont conditioneel de
+  Start-kaart i.p.v. de gewone "Mijn projecten"-knop.
+
+EmployeeProjectsPage.tsx (de "Ander project kiezen"-terugval) is
+ongewijzigd -- toont nog steeds dezelfde banner plus de volledige lijst.
+
+Geverifieerd: typecheck/lint/build (apps/web) schoon.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01K682qexDdBu1y2TDUscPeY
+---
+ apps/web/src/components/icons.tsx            |  5 ++
+ apps/web/src/hooks/useTodayPlannedProject.ts | 85 ++++++++++++++++++++
+ apps/web/src/pages/HomePage.tsx              | 58 ++++++++++---
+ 3 files changed, 137 insertions(+), 11 deletions(-)
+ create mode 100644 apps/web/src/hooks/useTodayPlannedProject.ts
+
+diff --git a/apps/web/src/components/icons.tsx b/apps/web/src/components/icons.tsx
+index 78a50ef..6cad516 100644
+--- a/apps/web/src/components/icons.tsx
++++ b/apps/web/src/components/icons.tsx
+@@ -69,6 +69,11 @@ export function ClockIcon(props: IconProps) {
+   );
+ }
+ 
++/** Vandaag ingepland — "Start [project]"-knop op HomePage.tsx. */
++export function PlayIcon(props: IconProps) {
++  return base(props, <path d="M7 4.5v15l13-7.5-13-7.5Z" strokeLinejoin="round" />);
++}
++
+ /** QR-code — app op smartphone. */
+ export function QrCodeIcon(props: IconProps) {
+   return base(
+diff --git a/apps/web/src/hooks/useTodayPlannedProject.ts b/apps/web/src/hooks/useTodayPlannedProject.ts
+new file mode 100644
+index 0000000..c542b3d
+--- /dev/null
++++ b/apps/web/src/hooks/useTodayPlannedProject.ts
+@@ -0,0 +1,85 @@
++import type { ProjectSummary } from '@swatt/shared-types';
++import { useEffect, useState } from 'react';
++import { planningApi, projectsApi } from '../api/client';
++
++/** JJJJ-MM-DD in LOKALE tijd — zelfde conventie/reden als PlanningBoardPage.tsx's `isoLocal`. */
++function pad(n: number): string {
++  return n < 10 ? `0${n}` : `${n}`;
++}
++function todayIsoLocal(): string {
++  const now = new Date();
++  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
++}
++
++export interface TodayPlannedProjectState {
++  /** true zolang de onderliggende aanroepen nog niet allebei klaar zijn. */
++  loading: boolean;
++  /** Het vandaag-ingeplande project — enkel gezet als het ook effectief in
++   *  "Mijn projecten" (ProjectAssignment) voorkomt, zie business rule 12. */
++  project: ProjectSummary | null;
++}
++
++/**
++ * Klantvraag 11/9/2026: "als ik als werknemer inlog komt niet automatisch
++ * het project naar voor waar ik ben ingepland, maar krijg ik nog steeds de
++ * mogelijkheid om te kiezen uit projecten. Dat was niet de bedoeling."
++ *
++ * Voorheen (Fase 13) stond het ingeplande project enkel als uitgelichte
++ * banner ÓP de "Mijn projecten"-lijst — de technieker moest dus altijd eerst
++ * naar die pagina navigeren en zag daar nog steeds de volledige lijst.
++ * HomePage.tsx gebruikt deze hook nu om, zodra er een planning is, meteen
++ * één "Start [project]"-knop te tonen i.p.v. de "Mijn projecten"-keuzeknop
++ * (gekozen aanpak: "Automatisch naar START, met terugvalmogelijkheid" —
++ * de volledige projectkeuze blijft bereikbaar via een kleine link, voor
++ * uitzonderingen zoals een spoedopdracht die niet in de planning stond).
++ * EmployeeProjectsPage.tsx (die terugvallijst) gebruikt exact dezelfde hook,
++ * zodat beide schermen precies hetzelfde "vandaag"-project hanteren.
++ *
++ * Business rule 12 blijft gelden: een planningtoewijzing is een suggestie/
++ * versnelling, geen aparte toegangsdeur. Het ingeplande project wordt enkel
++ * teruggegeven als het ook effectief in `projectsApi.mine()` voorkomt
++ * (dezelfde ProjectAssignment-controle als de rest van de app) — ontbreekt
++ * die koppeling toch, dan geeft deze hook `project: null` terug en valt de
++ * UI stil terug op de normale projectkeuze (geen foutmelding).
++ *
++ * `enabled=false` (geen Employee-record — bv. een zuiver kantoor-/
++ * adminaccount zonder eigen tijdregistratie) slaat beide aanroepen over,
++ * i.p.v. een "niet geauthenticeerd"-fout van `/planning/mine` te laten
++ * optreden (die route vereist `currentUser.employee.id`, zie
++ * planning.routes.ts).
++ */
++export function useTodayPlannedProject(enabled: boolean): TodayPlannedProjectState {
++  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
++  const [todayProjectId, setTodayProjectId] = useState<string | null>(null);
++  const [planningLoaded, setPlanningLoaded] = useState(false);
++
++  useEffect(() => {
++    if (!enabled) {
++      setProjects([]);
++      setTodayProjectId(null);
++      setPlanningLoaded(true);
++      return;
++    }
++
++    projectsApi
++      .mine()
++      .then((response) => setProjects(response.projects))
++      .catch(() => setProjects([]));
++
++    // Stille best-effort ophaling — geen planning voor vandaag is een
++    // normale situatie, geen foutmelding tonen; de gewone projectkeuze
++    // blijft sowieso het vangnet.
++    planningApi
++      .mine(1)
++      .then((response) => {
++        const todayIso = todayIsoLocal();
++        setTodayProjectId(response.assignments.find((a) => a.date === todayIso)?.projectId ?? null);
++      })
++      .catch(() => setTodayProjectId(null))
++      .finally(() => setPlanningLoaded(true));
++  }, [enabled]);
++
++  const loading = projects === null || !planningLoaded;
++  const project = todayProjectId ? (projects?.find((p) => p.id === todayProjectId) ?? null) : null;
++  return { loading, project };
++}
+diff --git a/apps/web/src/pages/HomePage.tsx b/apps/web/src/pages/HomePage.tsx
+index 11612a6..23c3f87 100644
+--- a/apps/web/src/pages/HomePage.tsx
++++ b/apps/web/src/pages/HomePage.tsx
+@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
+ import { Link } from 'react-router-dom';
+ import { publicBrandingApi } from '../api/client';
+ import { ApiRequestError, useAuth } from '../auth/AuthContext';
+-import { ChevronRightIcon, ClockIcon, DocumentTextIcon, LogoutIcon, MapPinIcon } from '../components/icons';
++import { ChevronRightIcon, ClockIcon, DocumentTextIcon, LogoutIcon, MapPinIcon, PlayIcon } from '../components/icons';
+ import { Logo } from '../components/Logo';
+ import { ROLE_LABELS } from '../constants';
++import { useTodayPlannedProject } from '../hooks/useTodayPlannedProject';
+ import { getMenuSections } from '../navigation/menuSections';
+ 
+ /**
+@@ -22,11 +23,20 @@ import { getMenuSections } from '../navigation/menuSections';
+  * `/menu/:sectionId` (SubmenuPage.tsx) waar de onderliggende items als
+  * grote knoppen staan. De indeling zelf staat in `navigation/menuSections.ts`,
+  * gedeeld tussen dit scherm en SubmenuPage.
++ *
++ * Klantvraag 11/9/2026 — "als ik inlog komt niet automatisch het project
++ * naar voor waar ik ben ingepland... dat was niet de bedoeling": is er via
++ * de planning een project voor vandaag toegewezen, dan vervangt een gouden
++ * "Start [project]"-knop de "Mijn projecten"-keuzeknop hierboven — één tik
++ * en de timer start (zie ProjectTimerPage.tsx). Een kleine link "Ander
++ * project kiezen" blijft staan voor uitzonderingen (bv. een spoedopdracht
++ * die niet in de planning stond); zie useTodayPlannedProject.ts.
+  */
+ export function HomePage() {
+   const { user, logout } = useAuth();
+   const [isLoggingOut, setIsLoggingOut] = useState(false);
+   const [logoutError, setLogoutError] = useState<string | null>(null);
++  const { project: todayProject } = useTodayPlannedProject(Boolean(user?.employee));
+   // Sectie 21/33 — klantlogo (Bedrijfsgegevens) i.p.v. de eerder generieke
+   // "Technical Support Team"-tekst, zelfde publieke route als LoginPage.tsx
+   // (werkt voor élke rol, niet enkel ADMIN — company-settings.routes.ts zelf
+@@ -85,17 +95,43 @@ export function HomePage() {
+           <p className="text-sm text-swatt-gold">{ROLE_LABELS[user.role] ?? user.role}</p>
+         </section>
+ 
+-        {/* "Mijn werk" — de primaire, dagelijkse flow (sectie 21): drie grote
+-            knoppen, met "Mijn projecten" als gouden hoofdknop (het startpunt
+-            van élke werkdag). */}
++        {/* "Mijn werk" — de primaire, dagelijkse flow (sectie 21). Is er via
++            de planning een project voor vandaag toegewezen, dan vervangt een
++            uitgelichte "Start"-kaart de gewone "Mijn projecten"-keuzeknop
++            (klantvraag 11/9/2026) — de volledige keuzelijst blijft één tik
++            verderop bereikbaar via "Ander project kiezen". */}
+         <nav aria-label="Mijn werk" className="mt-6 flex flex-col gap-3">
+-          <Link
+-            to="/mijn-projecten"
+-            className="flex items-center gap-3 rounded-lg bg-swatt-gold px-4 py-4 text-base font-semibold text-swatt-black active:opacity-80"
+-          >
+-            <MapPinIcon className="h-5 w-5 shrink-0" />
+-            Mijn projecten
+-          </Link>
++          {todayProject ? (
++            <div className="flex flex-col gap-2">
++              <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">Vandaag ingepland</p>
++              <Link
++                to={`/projecten/${todayProject.id}`}
++                state={{ project: todayProject }}
++                className="block rounded-xl border-2 border-swatt-gold bg-neutral-900 p-5 transition active:bg-neutral-800"
++              >
++                <p className="text-xs font-medium uppercase tracking-wide text-swatt-gold">
++                  {todayProject.customerName}
++                </p>
++                <p className="mt-1 text-xl font-bold">{todayProject.name}</p>
++                {todayProject.address && <p className="mt-1 text-sm text-neutral-400">{todayProject.address}</p>}
++                <p className="mt-3 flex items-center justify-center gap-2 rounded-lg bg-swatt-gold px-4 py-3 text-base font-semibold text-swatt-black">
++                  <PlayIcon className="h-5 w-5 shrink-0" />
++                  Start werk
++                </p>
++              </Link>
++              <Link to="/mijn-projecten" className="self-center text-sm text-neutral-400 underline">
++                Ander project kiezen
++              </Link>
++            </div>
++          ) : (
++            <Link
++              to="/mijn-projecten"
++              className="flex items-center gap-3 rounded-lg bg-swatt-gold px-4 py-4 text-base font-semibold text-swatt-black active:opacity-80"
++            >
++              <MapPinIcon className="h-5 w-5 shrink-0" />
++              Mijn projecten
++            </Link>
++          )}
+           <Link
+             to="/mijn-werkbonnen"
+             className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-800"
+-- 
+2.43.0
+

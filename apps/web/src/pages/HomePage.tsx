@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { publicBrandingApi } from '../api/client';
 import { ApiRequestError, useAuth } from '../auth/AuthContext';
-import { ChevronRightIcon, ClockIcon, DocumentTextIcon, LogoutIcon, MapPinIcon } from '../components/icons';
+import { ChevronRightIcon, ClockIcon, DocumentTextIcon, LogoutIcon, MapPinIcon, PlayIcon } from '../components/icons';
 import { Logo } from '../components/Logo';
 import { ROLE_LABELS } from '../constants';
+import { useTodayPlannedProject } from '../hooks/useTodayPlannedProject';
 import { getMenuSections } from '../navigation/menuSections';
 
 /**
@@ -22,11 +23,20 @@ import { getMenuSections } from '../navigation/menuSections';
  * `/menu/:sectionId` (SubmenuPage.tsx) waar de onderliggende items als
  * grote knoppen staan. De indeling zelf staat in `navigation/menuSections.ts`,
  * gedeeld tussen dit scherm en SubmenuPage.
+ *
+ * Klantvraag 11/9/2026 — "als ik inlog komt niet automatisch het project
+ * naar voor waar ik ben ingepland... dat was niet de bedoeling": is er via
+ * de planning een project voor vandaag toegewezen, dan vervangt een gouden
+ * "Start [project]"-knop de "Mijn projecten"-keuzeknop hierboven — één tik
+ * en de timer start (zie ProjectTimerPage.tsx). Een kleine link "Ander
+ * project kiezen" blijft staan voor uitzonderingen (bv. een spoedopdracht
+ * die niet in de planning stond); zie useTodayPlannedProject.ts.
  */
 export function HomePage() {
   const { user, logout } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const { project: todayProject } = useTodayPlannedProject(Boolean(user?.employee));
   // Sectie 21/33 — klantlogo (Bedrijfsgegevens) i.p.v. de eerder generieke
   // "Technical Support Team"-tekst, zelfde publieke route als LoginPage.tsx
   // (werkt voor élke rol, niet enkel ADMIN — company-settings.routes.ts zelf
@@ -85,17 +95,43 @@ export function HomePage() {
           <p className="text-sm text-swatt-gold">{ROLE_LABELS[user.role] ?? user.role}</p>
         </section>
 
-        {/* "Mijn werk" — de primaire, dagelijkse flow (sectie 21): drie grote
-            knoppen, met "Mijn projecten" als gouden hoofdknop (het startpunt
-            van élke werkdag). */}
+        {/* "Mijn werk" — de primaire, dagelijkse flow (sectie 21). Is er via
+            de planning een project voor vandaag toegewezen, dan vervangt een
+            uitgelichte "Start"-kaart de gewone "Mijn projecten"-keuzeknop
+            (klantvraag 11/9/2026) — de volledige keuzelijst blijft één tik
+            verderop bereikbaar via "Ander project kiezen". */}
         <nav aria-label="Mijn werk" className="mt-6 flex flex-col gap-3">
-          <Link
-            to="/mijn-projecten"
-            className="flex items-center gap-3 rounded-lg bg-swatt-gold px-4 py-4 text-base font-semibold text-swatt-black active:opacity-80"
-          >
-            <MapPinIcon className="h-5 w-5 shrink-0" />
-            Mijn projecten
-          </Link>
+          {todayProject ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-xs font-medium uppercase tracking-[0.2em] text-swatt-gold">Vandaag ingepland</p>
+              <Link
+                to={`/projecten/${todayProject.id}`}
+                state={{ project: todayProject }}
+                className="block rounded-xl border-2 border-swatt-gold bg-neutral-900 p-5 transition active:bg-neutral-800"
+              >
+                <p className="text-xs font-medium uppercase tracking-wide text-swatt-gold">
+                  {todayProject.customerName}
+                </p>
+                <p className="mt-1 text-xl font-bold">{todayProject.name}</p>
+                {todayProject.address && <p className="mt-1 text-sm text-neutral-400">{todayProject.address}</p>}
+                <p className="mt-3 flex items-center justify-center gap-2 rounded-lg bg-swatt-gold px-4 py-3 text-base font-semibold text-swatt-black">
+                  <PlayIcon className="h-5 w-5 shrink-0" />
+                  Start werk
+                </p>
+              </Link>
+              <Link to="/mijn-projecten" className="self-center text-sm text-neutral-400 underline">
+                Ander project kiezen
+              </Link>
+            </div>
+          ) : (
+            <Link
+              to="/mijn-projecten"
+              className="flex items-center gap-3 rounded-lg bg-swatt-gold px-4 py-4 text-base font-semibold text-swatt-black active:opacity-80"
+            >
+              <MapPinIcon className="h-5 w-5 shrink-0" />
+              Mijn projecten
+            </Link>
+          )}
           <Link
             to="/mijn-werkbonnen"
             className="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-4 text-base font-semibold text-neutral-200 active:bg-neutral-800"
