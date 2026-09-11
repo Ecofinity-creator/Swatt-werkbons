@@ -43,8 +43,17 @@ export class PlanningService {
     });
   }
 
-  async listForEmployee(employeeId: string, days: number): Promise<PlanningAssignmentRecord[]> {
-    const start = todayDateOnly();
+  /**
+   * `referenceDate`: klantvraag 11/9/2026 — "vandaag" wordt bij voorkeur
+   * meegegeven door de aanroeper (de telefoon, in zijn eigen lokale
+   * kalenderdag), i.p.v. hier zelf uit de systeemklok van de server (UTC)
+   * afgeleid te worden — die twee kunnen rond middernacht een andere dag
+   * aanwijzen (zie planning.routes.ts/planning.schemas.ts). Ontbreekt hij
+   * (bv. een oudere frontend-versie), dan valt dit terug op de servertijd,
+   * exact het gedrag van vóór deze wijziging.
+   */
+  async listForEmployee(employeeId: string, days: number, referenceDate?: Date): Promise<PlanningAssignmentRecord[]> {
+    const start = referenceDate ?? todayDateOnly();
     const end = addDaysUtc(start, Math.max(days - 1, 0));
     return this.findAssignments({ employeeId, date: { gte: start, lte: end } });
   }

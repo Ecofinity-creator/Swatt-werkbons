@@ -1,0 +1,254 @@
+From c7394e810dd74063d10d8ebfee2b2541e37b9d10 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 11 Sep 2026 07:33:01 +0000
+Subject: [PATCH] Vandaag-planning gebruikt lokale telefoondag i.p.v.
+ systeemklok van de server
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Klantfeedback: "ik kan nog steeds kiezen tussen de 2 toegewezen projecten,
+niet wat er op de planning staat" — bleek na verificatie (overleefde harde
+herlaad én herinstalleren van de app, dus geen caching-probleem) een
+dag-grens-mismatch: /planning/mine bepaalde "vandaag" tot nu toe uit de
+systeemklok van de server (UTC via todayDateOnly()), terwijl de telefoon
+"vandaag" in lokale tijd berekent (bv. UTC+1/+2 in België) — rond
+middernacht kunnen die twee een andere kalenderdag aanwijzen, waardoor een
+wél correct ingeplande en gekoppelde opdracht toch niet als het "vandaag"-
+project herkend werd.
+
+Backend:
+- planning.schemas.ts: nieuwe optionele `today`-queryparameter op
+  planningMineQuerySchema (JJJJ-MM-DD); dateOnlySchema geëxporteerd voor
+  hergebruik.
+- planning.service.ts: listForEmployee() aanvaardt nu een optionele
+  `referenceDate` — gebruikt die i.p.v. todayDateOnly() wanneer opgegeven.
+- planning.routes.ts: GET /planning/mine geeft `query.today` (indien
+  aanwezig) door als referenceDate; ontbreekt hij (oudere frontend), dan
+  blijft het gedrag exact zoals voorheen (systeemklok van de server).
+- planning.service.test.ts: nieuwe test die het exacte scenario nabootst
+  (telefoon een dag verder dan de systeemklok van de server) en bevestigt
+  dat de meegegeven referenceDate de mismatch oplost.
+
+Frontend:
+- api/client.ts: planningApi.mine() aanvaardt nu ook een optionele `today`.
+- hooks/useTodayPlannedProject.ts en pages/EmployeeProjectsPage.tsx: sturen
+  voortaan hun eigen lokale kalenderdag (`todayIsoLocal()`) expliciet mee
+  i.p.v. te vertrouwen op de systeemklok van de server.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01K682qexDdBu1y2TDUscPeY
+---
+ .../src/modules/planning/planning.routes.ts   |  9 +++--
+ .../src/modules/planning/planning.schemas.ts  | 16 ++++++++-
+ .../src/modules/planning/planning.service.ts  | 13 +++++--
+ apps/api/test/planning.service.test.ts        | 35 +++++++++++++++++++
+ apps/web/src/api/client.ts                    | 13 +++++--
+ apps/web/src/hooks/useTodayPlannedProject.ts  | 13 +++++--
+ apps/web/src/pages/EmployeeProjectsPage.tsx   |  9 +++--
+ 7 files changed, 97 insertions(+), 11 deletions(-)
+
+diff --git a/apps/api/src/modules/planning/planning.routes.ts b/apps/api/src/modules/planning/planning.routes.ts
+index a295188..d9af2dd 100644
+--- a/apps/api/src/modules/planning/planning.routes.ts
++++ b/apps/api/src/modules/planning/planning.routes.ts
+@@ -23,7 +23,7 @@ import {
+   planningSeriesIdParamsSchema,
+   planningWeekQuerySchema,
+ } from './planning.schemas';
+-import { formatDateOnly, PlanningService } from './planning.service';
++import { formatDateOnly, parseDateOnly, PlanningService } from './planning.service';
+ import type { PlanningAssignmentRecord, PlanningEmployeeRecord, PlanningSeriesRecord } from './planning.service';
+ 
+ /**
+@@ -122,7 +122,12 @@ export default async function planningRoutes(app: FastifyInstance): Promise<void
+       throw AuthErrors.notAuthenticated();
+     }
+     const query = planningMineQuerySchema.parse(request.query);
+-    const assignments = await service.listForEmployee(employeeId, query.days);
++    // Klantvraag 11/9/2026: bij voorkeur de telefoon zijn eigen lokale
++    // "vandaag" laten meesturen i.p.v. hier de systeemklok van de server
++    // (UTC) te gebruiken — zie de toelichting bij `today` in
++    // planning.schemas.ts en `listForEmployee` in planning.service.ts.
++    const referenceDate = query.today ? parseDateOnly(query.today) : undefined;
++    const assignments = await service.listForEmployee(employeeId, query.days, referenceDate);
+     return { assignments: assignments.map(toAssignmentSummary) };
+   });
+ }
+diff --git a/apps/api/src/modules/planning/planning.schemas.ts b/apps/api/src/modules/planning/planning.schemas.ts
+index 19266ce..23c13b0 100644
+--- a/apps/api/src/modules/planning/planning.schemas.ts
++++ b/apps/api/src/modules/planning/planning.schemas.ts
+@@ -8,7 +8,7 @@ import { z } from 'zod';
+  * mensentaal-foutmelding bij de gebruiker terechtkomt (sectie 27) i.p.v. de
+  * generieke "De ingevoerde gegevens zijn niet geldig" van een ZodError.
+  */
+-const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'Ongeldige datum (verwacht: JJJJ-MM-DD).' });
++export const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'Ongeldige datum (verwacht: JJJJ-MM-DD).' });
+ 
+ /** 0=maandag .. 6=zondag. */
+ const weekdaySchema = z.number().int().min(0).max(6);
+@@ -20,6 +20,20 @@ export const planningWeekQuerySchema = z.object({
+ export const planningMineQuerySchema = z.object({
+   /** Aantal dagen vooruit (incl. vandaag) — default 14, zie EmployeeProjectsPage.tsx ("Mijn planning"). */
+   days: z.coerce.number().int().min(1).max(60).optional().default(14),
++  /**
++   * Klantvraag 11/9/2026: "ik kan nog steeds kiezen tussen de 2 projecten,
++   * niet wat er op de planning staat" — het bleek geen caching-probleem
++   * (overleefde herinstalleren van de app), maar een dag-mismatch: de
++   * server bepaalde "vandaag" voorheen zelf via zijn eigen systeemklok
++   * (UTC, zie todayDateOnly() in planning.service.ts), terwijl de telefoon
++   * "vandaag" in LOKALE tijd (bv. UTC+1/+2 in België) berekent — rond
++   * middernacht kunnen die twee een andere kalenderdag aanwijzen. Optioneel
++   * meegeven, zodat de telefoon zijn eigen lokale "vandaag" doorstuurt i.p.v.
++   * te vertrouwen op de systeemklok van de server; ontbreekt dit (oudere
++   * frontend-versie), dan valt de server terug op zijn eigen klok, exact
++   * zoals voorheen.
++   */
++  today: dateOnlySchema.optional(),
+ });
+ 
+ export const createPlanningAssignmentBodySchema = z.object({
+diff --git a/apps/api/src/modules/planning/planning.service.ts b/apps/api/src/modules/planning/planning.service.ts
+index c1c4002..cd1e3cf 100644
+--- a/apps/api/src/modules/planning/planning.service.ts
++++ b/apps/api/src/modules/planning/planning.service.ts
+@@ -43,8 +43,17 @@ export class PlanningService {
+     });
+   }
+ 
+-  async listForEmployee(employeeId: string, days: number): Promise<PlanningAssignmentRecord[]> {
+-    const start = todayDateOnly();
++  /**
++   * `referenceDate`: klantvraag 11/9/2026 — "vandaag" wordt bij voorkeur
++   * meegegeven door de aanroeper (de telefoon, in zijn eigen lokale
++   * kalenderdag), i.p.v. hier zelf uit de systeemklok van de server (UTC)
++   * afgeleid te worden — die twee kunnen rond middernacht een andere dag
++   * aanwijzen (zie planning.routes.ts/planning.schemas.ts). Ontbreekt hij
++   * (bv. een oudere frontend-versie), dan valt dit terug op de servertijd,
++   * exact het gedrag van vóór deze wijziging.
++   */
++  async listForEmployee(employeeId: string, days: number, referenceDate?: Date): Promise<PlanningAssignmentRecord[]> {
++    const start = referenceDate ?? todayDateOnly();
+     const end = addDaysUtc(start, Math.max(days - 1, 0));
+     return this.findAssignments({ employeeId, date: { gte: start, lte: end } });
+   }
+diff --git a/apps/api/test/planning.service.test.ts b/apps/api/test/planning.service.test.ts
+index 1cfb096..8f69194 100644
+--- a/apps/api/test/planning.service.test.ts
++++ b/apps/api/test/planning.service.test.ts
+@@ -594,6 +594,41 @@ describe('PlanningService', () => {
+       expect(mine).toHaveLength(2); // vandaag + over 3 dagen; gisteren valt buiten het venster
+       expect(mine.every((a) => a.employeeId === 'emp-peter')).toBe(true);
+     });
++
++    // Klantvraag 11/9/2026: "ik kan nog steeds kiezen tussen de 2 projecten,
++    // niet wat er op de planning staat" — bleek een mismatch tussen de
++    // systeemklok van de server (UTC) en de lokale kalenderdag van de
++    // telefoon (bv. UTC+1/+2 in België), die rond middernacht een andere dag
++    // kunnen aanwijzen. `referenceDate` laat de aanroeper zijn eigen
++    // "vandaag" expliciet meegeven i.p.v. te vertrouwen op de systeemklok.
++    it('gebruikt de meegegeven referenceDate i.p.v. de systeemklok van de server, indien opgegeven', async () => {
++      const { prisma, linkProject } = createFakePrisma();
++      const service = new PlanningService(prisma);
++      const systemToday = todayDateOnly();
++      // Simuleert een telefoon wiens lokale kalenderdag al één dag verder
++      // staat dan de (UTC-)systeemklok van de server — bv. net na
++      // middernacht in UTC+1/+2.
++      const phoneToday = addDaysUtc(systemToday, 1);
++      linkProject('emp-peter', 'proj-janssens');
++
++      await service.setAssignment({
++        employeeId: 'emp-peter',
++        projectId: 'proj-janssens',
++        date: formatDateOnly(phoneToday),
++        createdById: 'u1',
++      });
++
++      // Zonder referenceDate (oud gedrag, systeemklok): de toewijzing van
++      // "morgen" (volgens de server) valt buiten een venster van 1 dag.
++      const usingServerClock = await service.listForEmployee('emp-peter', 1);
++      expect(usingServerClock).toHaveLength(0);
++
++      // Met de telefoon zijn eigen "vandaag" expliciet meegegeven: de
++      // toewijzing wordt wél gevonden.
++      const usingPhoneClock = await service.listForEmployee('emp-peter', 1, phoneToday);
++      expect(usingPhoneClock).toHaveLength(1);
++      expect(usingPhoneClock[0]?.projectId).toBe('proj-janssens');
++    });
+   });
+ 
+   describe('generateSeriesDates (MVP-veiligheidsgrens)', () => {
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 017ca9c..fd11b24 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -643,6 +643,15 @@ export const planningApi = {
+     stopSeries: (seriesId: string) =>
+       request<void>(`/admin/planning/series/${seriesId}/stop`, { method: 'POST' }),
+   },
+-  mine: (days?: number) =>
+-    request<ListMyPlanningResponseBody>(`/planning/mine${days ? `?days=${days}` : ''}`, { method: 'GET' }),
++  // `today`: klantvraag 11/9/2026 — de telefoon geeft zijn eigen lokale
++  // kalenderdag mee i.p.v. te vertrouwen op de systeemklok van de server,
++  // die rond middernacht een andere dag kan aanwijzen (zie
++  // useTodayPlannedProject.ts/EmployeeProjectsPage.tsx's `todayIsoLocal()`).
++  mine: (days?: number, today?: string) => {
++    const params = new URLSearchParams();
++    if (days) params.set('days', String(days));
++    if (today) params.set('today', today);
++    const qs = params.toString();
++    return request<ListMyPlanningResponseBody>(`/planning/mine${qs ? `?${qs}` : ''}`, { method: 'GET' });
++  },
+ };
+diff --git a/apps/web/src/hooks/useTodayPlannedProject.ts b/apps/web/src/hooks/useTodayPlannedProject.ts
+index c542b3d..faa2709 100644
+--- a/apps/web/src/hooks/useTodayPlannedProject.ts
++++ b/apps/web/src/hooks/useTodayPlannedProject.ts
+@@ -69,10 +69,19 @@ export function useTodayPlannedProject(enabled: boolean): TodayPlannedProjectSta
+     // Stille best-effort ophaling — geen planning voor vandaag is een
+     // normale situatie, geen foutmelding tonen; de gewone projectkeuze
+     // blijft sowieso het vangnet.
++    //
++    // Klantvraag 11/9/2026: "ik kan nog steeds kiezen tussen de 2 projecten,
++    // niet wat er op de planning staat" — bleek geen caching-probleem
++    // (overleefde herinstalleren), maar een dag-mismatch: de server bepaalde
++    // "vandaag" voorheen uit zijn eigen systeemklok (UTC), die rond
++    // middernacht een andere kalenderdag kan aanwijzen dan de telefoon
++    // (lokale tijd, bv. UTC+1/+2 in België). `today` stuurt nu expliciet de
++    // lokale kalenderdag van de telefoon mee, zodat beide kanten altijd
++    // dezelfde dag bedoelen.
++    const todayIso = todayIsoLocal();
+     planningApi
+-      .mine(1)
++      .mine(1, todayIso)
+       .then((response) => {
+-        const todayIso = todayIsoLocal();
+         setTodayProjectId(response.assignments.find((a) => a.date === todayIso)?.projectId ?? null);
+       })
+       .catch(() => setTodayProjectId(null))
+diff --git a/apps/web/src/pages/EmployeeProjectsPage.tsx b/apps/web/src/pages/EmployeeProjectsPage.tsx
+index 0eec73b..e6e6977 100644
+--- a/apps/web/src/pages/EmployeeProjectsPage.tsx
++++ b/apps/web/src/pages/EmployeeProjectsPage.tsx
+@@ -51,10 +51,15 @@ export function EmployeeProjectsPage() {
+     // Stille best-effort ophaling — geen planning voor vandaag is een normale
+     // situatie (geen foutmelding tonen), de bestaande projectenlijst blijft
+     // sowieso het vangnet.
++    //
++    // Klantvraag 11/9/2026: `today` stuurt expliciet de lokale kalenderdag
++    // van de telefoon mee i.p.v. te vertrouwen op de systeemklok van de
++    // server — zie useTodayPlannedProject.ts voor de volledige toelichting
++    // (dezelfde dag-mismatch, dezelfde fix).
++    const todayIso = todayIsoLocal();
+     planningApi
+-      .mine(1)
++      .mine(1, todayIso)
+       .then((response) => {
+-        const todayIso = todayIsoLocal();
+         setTodayAssignment(response.assignments.find((a) => a.date === todayIso) ?? null);
+       })
+       .catch(() => setTodayAssignment(null));
+-- 
+2.43.0
+

@@ -594,6 +594,41 @@ describe('PlanningService', () => {
       expect(mine).toHaveLength(2); // vandaag + over 3 dagen; gisteren valt buiten het venster
       expect(mine.every((a) => a.employeeId === 'emp-peter')).toBe(true);
     });
+
+    // Klantvraag 11/9/2026: "ik kan nog steeds kiezen tussen de 2 projecten,
+    // niet wat er op de planning staat" — bleek een mismatch tussen de
+    // systeemklok van de server (UTC) en de lokale kalenderdag van de
+    // telefoon (bv. UTC+1/+2 in België), die rond middernacht een andere dag
+    // kunnen aanwijzen. `referenceDate` laat de aanroeper zijn eigen
+    // "vandaag" expliciet meegeven i.p.v. te vertrouwen op de systeemklok.
+    it('gebruikt de meegegeven referenceDate i.p.v. de systeemklok van de server, indien opgegeven', async () => {
+      const { prisma, linkProject } = createFakePrisma();
+      const service = new PlanningService(prisma);
+      const systemToday = todayDateOnly();
+      // Simuleert een telefoon wiens lokale kalenderdag al één dag verder
+      // staat dan de (UTC-)systeemklok van de server — bv. net na
+      // middernacht in UTC+1/+2.
+      const phoneToday = addDaysUtc(systemToday, 1);
+      linkProject('emp-peter', 'proj-janssens');
+
+      await service.setAssignment({
+        employeeId: 'emp-peter',
+        projectId: 'proj-janssens',
+        date: formatDateOnly(phoneToday),
+        createdById: 'u1',
+      });
+
+      // Zonder referenceDate (oud gedrag, systeemklok): de toewijzing van
+      // "morgen" (volgens de server) valt buiten een venster van 1 dag.
+      const usingServerClock = await service.listForEmployee('emp-peter', 1);
+      expect(usingServerClock).toHaveLength(0);
+
+      // Met de telefoon zijn eigen "vandaag" expliciet meegegeven: de
+      // toewijzing wordt wél gevonden.
+      const usingPhoneClock = await service.listForEmployee('emp-peter', 1, phoneToday);
+      expect(usingPhoneClock).toHaveLength(1);
+      expect(usingPhoneClock[0]?.projectId).toBe('proj-janssens');
+    });
   });
 
   describe('generateSeriesDates (MVP-veiligheidsgrens)', () => {

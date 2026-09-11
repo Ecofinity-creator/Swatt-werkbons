@@ -643,6 +643,15 @@ export const planningApi = {
     stopSeries: (seriesId: string) =>
       request<void>(`/admin/planning/series/${seriesId}/stop`, { method: 'POST' }),
   },
-  mine: (days?: number) =>
-    request<ListMyPlanningResponseBody>(`/planning/mine${days ? `?days=${days}` : ''}`, { method: 'GET' }),
+  // `today`: klantvraag 11/9/2026 — de telefoon geeft zijn eigen lokale
+  // kalenderdag mee i.p.v. te vertrouwen op de systeemklok van de server,
+  // die rond middernacht een andere dag kan aanwijzen (zie
+  // useTodayPlannedProject.ts/EmployeeProjectsPage.tsx's `todayIsoLocal()`).
+  mine: (days?: number, today?: string) => {
+    const params = new URLSearchParams();
+    if (days) params.set('days', String(days));
+    if (today) params.set('today', today);
+    const qs = params.toString();
+    return request<ListMyPlanningResponseBody>(`/planning/mine${qs ? `?${qs}` : ''}`, { method: 'GET' });
+  },
 };

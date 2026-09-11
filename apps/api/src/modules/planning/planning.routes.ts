@@ -23,7 +23,7 @@ import {
   planningSeriesIdParamsSchema,
   planningWeekQuerySchema,
 } from './planning.schemas';
-import { formatDateOnly, PlanningService } from './planning.service';
+import { formatDateOnly, parseDateOnly, PlanningService } from './planning.service';
 import type { PlanningAssignmentRecord, PlanningEmployeeRecord, PlanningSeriesRecord } from './planning.service';
 
 /**
@@ -122,7 +122,12 @@ export default async function planningRoutes(app: FastifyInstance): Promise<void
       throw AuthErrors.notAuthenticated();
     }
     const query = planningMineQuerySchema.parse(request.query);
-    const assignments = await service.listForEmployee(employeeId, query.days);
+    // Klantvraag 11/9/2026: bij voorkeur de telefoon zijn eigen lokale
+    // "vandaag" laten meesturen i.p.v. hier de systeemklok van de server
+    // (UTC) te gebruiken — zie de toelichting bij `today` in
+    // planning.schemas.ts en `listForEmployee` in planning.service.ts.
+    const referenceDate = query.today ? parseDateOnly(query.today) : undefined;
+    const assignments = await service.listForEmployee(employeeId, query.days, referenceDate);
     return { assignments: assignments.map(toAssignmentSummary) };
   });
 }

@@ -51,10 +51,15 @@ export function EmployeeProjectsPage() {
     // Stille best-effort ophaling — geen planning voor vandaag is een normale
     // situatie (geen foutmelding tonen), de bestaande projectenlijst blijft
     // sowieso het vangnet.
+    //
+    // Klantvraag 11/9/2026: `today` stuurt expliciet de lokale kalenderdag
+    // van de telefoon mee i.p.v. te vertrouwen op de systeemklok van de
+    // server — zie useTodayPlannedProject.ts voor de volledige toelichting
+    // (dezelfde dag-mismatch, dezelfde fix).
+    const todayIso = todayIsoLocal();
     planningApi
-      .mine(1)
+      .mine(1, todayIso)
       .then((response) => {
-        const todayIso = todayIsoLocal();
         setTodayAssignment(response.assignments.find((a) => a.date === todayIso) ?? null);
       })
       .catch(() => setTodayAssignment(null));

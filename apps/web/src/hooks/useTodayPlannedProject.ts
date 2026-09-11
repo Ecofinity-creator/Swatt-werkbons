@@ -69,10 +69,19 @@ export function useTodayPlannedProject(enabled: boolean): TodayPlannedProjectSta
     // Stille best-effort ophaling — geen planning voor vandaag is een
     // normale situatie, geen foutmelding tonen; de gewone projectkeuze
     // blijft sowieso het vangnet.
+    //
+    // Klantvraag 11/9/2026: "ik kan nog steeds kiezen tussen de 2 projecten,
+    // niet wat er op de planning staat" — bleek geen caching-probleem
+    // (overleefde herinstalleren), maar een dag-mismatch: de server bepaalde
+    // "vandaag" voorheen uit zijn eigen systeemklok (UTC), die rond
+    // middernacht een andere kalenderdag kan aanwijzen dan de telefoon
+    // (lokale tijd, bv. UTC+1/+2 in België). `today` stuurt nu expliciet de
+    // lokale kalenderdag van de telefoon mee, zodat beide kanten altijd
+    // dezelfde dag bedoelen.
+    const todayIso = todayIsoLocal();
     planningApi
-      .mine(1)
+      .mine(1, todayIso)
       .then((response) => {
-        const todayIso = todayIsoLocal();
         setTodayProjectId(response.assignments.find((a) => a.date === todayIso)?.projectId ?? null);
       })
       .catch(() => setTodayProjectId(null))
