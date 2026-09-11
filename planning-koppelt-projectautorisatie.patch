@@ -1,0 +1,322 @@
+From b84b890681434f131241b84d226a2b1b6d7f6675 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 11 Sep 2026 06:05:25 +0000
+Subject: [PATCH] Planningtoewijzing koppelt automatisch de echte
+ projectautorisatie
+
+Klantvraag 11/9/2026: "ik krijg nog steeds de keuze uit de projecten
+waaraan ik toegewezen ben en niet wat er in de planning staat."
+
+Oorzaak gevonden: een planningtoewijzing (Fase 13, PlanningAssignment)
+gaf nooit automatisch een ProjectAssignment -- en dat laatste is de
+ECHTE autorisatie om een project te mogen starten (TimeEntryService
+.start()/.addManual() weigert hard met ProjectErrors.notAssigned()
+zonder zo'n rij). Stond een medewerker dus niet apart gekoppeld aan
+het project via "Projecten aan medewerker koppelen", dan viel de
+vorige patch (HomePage.tsx se Start-kaart) stil terug op de gewone
+keuzelijst -- precies het gerapporteerde gedrag -- en had de
+medewerker het project sowieso niet kunnen starten, ook niet via die
+lijst.
+
+Oplossing: PlanningService.setAssignment()/createSeries() koppelen nu
+via een nieuwe ensureProjectAssignment()-helper meteen ook de
+ProjectAssignment, binnen dezelfde transactie. Bewust enkel TOEVOEGEN,
+nooit automatisch verwijderen bij clearAssignment()/stopSeries() --
+een planningdag wissen mag een mogelijk voor andere dagen gebruikte
+koppeling niet intrekken (zelfde voorzichtigheidsprincipe als business
+rules 8/9). Expliciet loskoppelen blijft mogelijk via de bestaande
+beheerpagina.
+
+- planning.service.ts: ensureProjectAssignment() (upsert, idempotent)
+  + aanroep in setAssignment() en createSeries() (1x voor de hele
+  reeks, niet per gegenereerde dag).
+- planning.service.test.ts: fake ProjectAssignment-tabel + 4 nieuwe
+  tests (auto-koppelen, geen duplicaten, 1x per reeks, niet verwijderd
+  bij clearAssignment).
+
+Geverifieerd: 19/19 planning-tests slagen (15 bestaand + 4 nieuw).
+Volledige testsuite: 246/251 -- de 5 falende zijn exact de al
+gedocumenteerde, voorbestaande sandboxbeperking (stale Prisma-stub,
+instanceof-check op PrismaClientKnownRequestError), ongerelateerd aan
+dit werk. typecheck: baseline ongewijzigd (36 fouten voor en na, via
+git stash-vergelijking). lint: schoon. Geen schema-/migratiewijziging
+-- ProjectAssignment bestond al.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01K682qexDdBu1y2TDUscPeY
+---
+ .../src/modules/planning/planning.service.ts  |  74 ++++++++---
+ apps/api/test/planning.service.test.ts        | 115 +++++++++++++++++-
+ 2 files changed, 172 insertions(+), 17 deletions(-)
+
+diff --git a/apps/api/src/modules/planning/planning.service.ts b/apps/api/src/modules/planning/planning.service.ts
+index 34d00f0..56749cd 100644
+--- a/apps/api/src/modules/planning/planning.service.ts
++++ b/apps/api/src/modules/planning/planning.service.ts
+@@ -65,23 +65,26 @@ export class PlanningService {
+     await this.assertProjectExists(input.projectId);
+     const date = parseDateOnly(input.date);
+ 
+-    const assignment = await this.prisma.planningAssignment.upsert({
+-      where: { employeeId_date: { employeeId: input.employeeId, date } },
+-      create: {
+-        employeeId: input.employeeId,
+-        projectId: input.projectId,
+-        date,
+-        seriesId: null,
+-        createdById: input.createdById,
+-      },
+-      update: {
+-        projectId: input.projectId,
+-        seriesId: null,
+-        createdById: input.createdById,
+-      },
+-      include: { employee: true, project: { include: { customer: true } } },
++    return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
++      await this.ensureProjectAssignment(tx, input.employeeId, input.projectId, input.createdById);
++
++      return tx.planningAssignment.upsert({
++        where: { employeeId_date: { employeeId: input.employeeId, date } },
++        create: {
++          employeeId: input.employeeId,
++          projectId: input.projectId,
++          date,
++          seriesId: null,
++          createdById: input.createdById,
++        },
++        update: {
++          projectId: input.projectId,
++          seriesId: null,
++          createdById: input.createdById,
++        },
++        include: { employee: true, project: { include: { customer: true } } },
++      });
+     });
+-    return assignment;
+   }
+ 
+   /** Wist enkel deze ene dag — een eventuele reeks blijft voor de overige dagen gewoon bestaan. */
+@@ -135,6 +138,8 @@ export class PlanningService {
+     // helaas terug op `any`, maar dat is de library's eigen typedefinitie,
+     // geen losse `any` van onzentwege.
+     const series = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
++      await this.ensureProjectAssignment(tx, input.employeeId, input.projectId, input.createdById);
++
+       const createdSeries = await tx.planningSeries.create({
+         data: {
+           employeeId: input.employeeId,
+@@ -216,6 +221,43 @@ export class PlanningService {
+       throw PlanningErrors.projectNotFound();
+     }
+   }
++
++  /**
++   * Klantvraag 11/9/2026: "ik krijg nog steeds de keuze uit de projecten
++   * waaraan ik toegewezen ben en niet wat er in de planning staat." Oorzaak:
++   * een planningtoewijzing (dit bestand) gaf voorheen GEEN automatische
++   * `ProjectAssignment` (Fase 3 — de eigenlijke autorisatie om een timer te
++   * starten, zie `TimeEntryService.start()`/`addManual()`, die zonder een
++   * `ProjectAssignment`-rij hard weigert met `ProjectErrors.notAssigned()`).
++   * Stond een medewerker dus nog niet apart gekoppeld aan het project via
++   * "Projecten aan medewerker koppelen", dan verscheen de ingeplande opdracht
++   * op de app nergens (de rule-12-veiligheidscheck op HomePage.tsx/
++   * EmployeeProjectsPage.tsx viel stil terug op de gewone lijst) én kon de
++   * medewerker hem sowieso niet starten, ook niet via die gewone lijst.
++   *
++   * Een planningtoewijzing impliceert dus voortaan meteen ook de
++   * `ProjectAssignment` — de supervisor plant het werk één keer, op het
++   * planningsbord, en dat volstaat. Bewust enkel TOEVOEGEN, nooit
++   * automatisch verwijderen: een dag uit de planning wissen of een reeks
++   * stopzetten mag een bestaande, mogelijk voor andere dagen/doeleinden
++   * gebruikte projectkoppeling niet stilzwijgend intrekken (zelfde
++   * voorzichtigheidsprincipe als business rules 8/9 — wijzigingen mogen
++   * afgeleide/lokale autorisatie nooit ongevraagd beschadigen). Expliciet
++   * loskoppelen blijft mogelijk via de bestaande "Projecten aan medewerker
++   * koppelen"-beheerpagina.
++   */
++  private async ensureProjectAssignment(
++    tx: Prisma.TransactionClient,
++    employeeId: string,
++    projectId: string,
++    assignedByUserId: string,
++  ): Promise<void> {
++    await tx.projectAssignment.upsert({
++      where: { projectId_employeeId: { projectId, employeeId } },
++      create: { projectId, employeeId, assignedByUserId },
++      update: {},
++    });
++  }
+ }
+ 
+ // ---- Structurele record-types (zelfde patroon als elders, bv. project.routes.ts's toProjectSummary) ----
+diff --git a/apps/api/test/planning.service.test.ts b/apps/api/test/planning.service.test.ts
+index cc3ca85..8f58d28 100644
+--- a/apps/api/test/planning.service.test.ts
++++ b/apps/api/test/planning.service.test.ts
+@@ -56,6 +56,14 @@ interface FakeSeries {
+   active: boolean;
+ }
+ 
++/** Klantvraag 11/9/2026 — de ProjectAssignment die een planningtoewijzing voortaan automatisch meekoppelt. */
++interface FakeProjectAssignment {
++  id: string;
++  projectId: string;
++  employeeId: string;
++  assignedByUserId: string;
++}
++
+ function inDateRange(date: Date, where: { gte?: Date; lte?: Date } | Date | undefined): boolean {
+   if (where === undefined) return true;
+   if (where instanceof Date) return date.getTime() === where.getTime();
+@@ -77,6 +85,7 @@ function createFakePrisma() {
+   ];
+   const assignments: FakeAssignment[] = [];
+   const series: FakeSeries[] = [];
++  const projectAssignments: FakeProjectAssignment[] = [];
+   let nextId = 1;
+   const genId = (prefix: string) => `${prefix}-${nextId++}`;
+ 
+@@ -114,6 +123,24 @@ function createFakePrisma() {
+     project: {
+       findUnique: async ({ where }: { where: { id: string } }) => projects.find((p) => p.id === where.id) ?? null,
+     },
++    projectAssignment: {
++      upsert: async ({
++        where,
++        create,
++      }: {
++        where: { projectId_employeeId: { projectId: string; employeeId: string } };
++        create: Omit<FakeProjectAssignment, 'id'>;
++        update: Record<string, never>;
++      }) => {
++        const existing = projectAssignments.find(
++          (a) => a.projectId === where.projectId_employeeId.projectId && a.employeeId === where.projectId_employeeId.employeeId,
++        );
++        if (existing) return existing;
++        const created: FakeProjectAssignment = { id: genId('assign'), ...create };
++        projectAssignments.push(created);
++        return created;
++      },
++    },
+     planningAssignment: {
+       findMany: async ({ where }: { where: { employeeId?: string; seriesId?: string; date?: { gte?: Date; lte?: Date } } }) => {
+         return assignments
+@@ -183,7 +210,7 @@ function createFakePrisma() {
+     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fake),
+   };
+ 
+-  return { prisma: fake as unknown as PrismaClient, assignments, series };
++  return { prisma: fake as unknown as PrismaClient, assignments, series, projectAssignments };
+ }
+ 
+ describe('PlanningService', () => {
+@@ -257,6 +284,55 @@ describe('PlanningService', () => {
+         service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-archived', date: today, createdById: 'u1' }),
+       ).rejects.toMatchObject({ code: 'PLANNING_PROJECT_NOT_FOUND' });
+     });
++
++    // Klantvraag 11/9/2026: "ik krijg nog steeds de keuze uit de projecten
++    // waaraan ik toegewezen ben en niet wat er in de planning staat" — een
++    // planningtoewijzing moet voortaan meteen ook de echte autorisatie
++    // (ProjectAssignment) meekoppelen, anders blijft de app stil terugvallen
++    // op de gewone keuzelijst (en kan de medewerker sowieso niet starten).
++    it('koppelt automatisch een ProjectAssignment (autorisatie) wanneer die nog ontbreekt', async () => {
++      const { prisma, projectAssignments } = createFakePrisma();
++      const service = new PlanningService(prisma);
++      const today = formatDateOnly(todayDateOnly());
++
++      expect(projectAssignments).toHaveLength(0);
++
++      await service.setAssignment({
++        employeeId: 'emp-peter',
++        projectId: 'proj-janssens',
++        date: today,
++        createdById: 'user-supervisor',
++      });
++
++      expect(projectAssignments).toHaveLength(1);
++      expect(projectAssignments[0]).toMatchObject({
++        employeeId: 'emp-peter',
++        projectId: 'proj-janssens',
++        assignedByUserId: 'user-supervisor',
++      });
++    });
++
++    it('dupliceert géén ProjectAssignment die al bestaat', async () => {
++      const { prisma, projectAssignments } = createFakePrisma();
++      const service = new PlanningService(prisma);
++      const today = todayDateOnly();
++
++      await service.setAssignment({
++        employeeId: 'emp-peter',
++        projectId: 'proj-janssens',
++        date: formatDateOnly(today),
++        createdById: 'u1',
++      });
++      // Zelfde medewerker/project, andere dag — mag geen tweede rij geven.
++      await service.setAssignment({
++        employeeId: 'emp-peter',
++        projectId: 'proj-janssens',
++        date: formatDateOnly(addDaysUtc(today, 1)),
++        createdById: 'u1',
++      });
++
++      expect(projectAssignments.filter((a) => a.employeeId === 'emp-peter' && a.projectId === 'proj-janssens')).toHaveLength(1);
++    });
+   });
+ 
+   describe('clearAssignment', () => {
+@@ -280,6 +356,24 @@ describe('PlanningService', () => {
+       expect(assignments).toHaveLength(4);
+       expect(assignments.some((a) => a.date.getTime() === today.getTime())).toBe(false);
+     });
++
++    it('trekt de automatisch gekoppelde ProjectAssignment NIET in — enkel de planningdag zelf verdwijnt', async () => {
++      const { prisma, projectAssignments } = createFakePrisma();
++      const service = new PlanningService(prisma);
++      const today = todayDateOnly();
++
++      await service.setAssignment({
++        employeeId: 'emp-peter',
++        projectId: 'proj-janssens',
++        date: formatDateOnly(today),
++        createdById: 'u1',
++      });
++      expect(projectAssignments).toHaveLength(1);
++
++      await service.clearAssignment({ employeeId: 'emp-peter', date: formatDateOnly(today) });
++
++      expect(projectAssignments).toHaveLength(1); // ongewijzigd — expliciet loskoppelen blijft een aparte actie
++    });
+   });
+ 
+   describe('createSeries', () => {
+@@ -305,6 +399,25 @@ describe('PlanningService', () => {
+       expect(series.weekdays).toEqual([0, 4]);
+     });
+ 
++    it('koppelt automatisch één ProjectAssignment voor de hele reeks (niet één per gegenereerde dag)', async () => {
++      const { prisma, projectAssignments } = createFakePrisma();
++      const service = new PlanningService(prisma);
++      const today = todayDateOnly();
++
++      await service.createSeries({
++        employeeId: 'emp-sofie',
++        projectId: 'proj-janssens',
++        weekdays: [0, 1, 2, 3, 4, 5, 6],
++        startDate: formatDateOnly(today),
++        endDate: formatDateOnly(addDaysUtc(today, 13)),
++        createdById: 'user-supervisor',
++      });
++
++      const forSofie = projectAssignments.filter((a) => a.employeeId === 'emp-sofie' && a.projectId === 'proj-janssens');
++      expect(forSofie).toHaveLength(1);
++      expect(forSofie[0]?.assignedByUserId).toBe('user-supervisor');
++    });
++
+     it('weigert een lege dagselectie', async () => {
+       const { prisma } = createFakePrisma();
+       const service = new PlanningService(prisma);
+-- 
+2.43.0
+

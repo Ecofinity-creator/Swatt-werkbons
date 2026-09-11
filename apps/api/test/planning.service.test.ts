@@ -56,6 +56,14 @@ interface FakeSeries {
   active: boolean;
 }
 
+/** Klantvraag 11/9/2026 — de ProjectAssignment die een planningtoewijzing voortaan automatisch meekoppelt. */
+interface FakeProjectAssignment {
+  id: string;
+  projectId: string;
+  employeeId: string;
+  assignedByUserId: string;
+}
+
 function inDateRange(date: Date, where: { gte?: Date; lte?: Date } | Date | undefined): boolean {
   if (where === undefined) return true;
   if (where instanceof Date) return date.getTime() === where.getTime();
@@ -77,6 +85,7 @@ function createFakePrisma() {
   ];
   const assignments: FakeAssignment[] = [];
   const series: FakeSeries[] = [];
+  const projectAssignments: FakeProjectAssignment[] = [];
   let nextId = 1;
   const genId = (prefix: string) => `${prefix}-${nextId++}`;
 
@@ -113,6 +122,24 @@ function createFakePrisma() {
     },
     project: {
       findUnique: async ({ where }: { where: { id: string } }) => projects.find((p) => p.id === where.id) ?? null,
+    },
+    projectAssignment: {
+      upsert: async ({
+        where,
+        create,
+      }: {
+        where: { projectId_employeeId: { projectId: string; employeeId: string } };
+        create: Omit<FakeProjectAssignment, 'id'>;
+        update: Record<string, never>;
+      }) => {
+        const existing = projectAssignments.find(
+          (a) => a.projectId === where.projectId_employeeId.projectId && a.employeeId === where.projectId_employeeId.employeeId,
+        );
+        if (existing) return existing;
+        const created: FakeProjectAssignment = { id: genId('assign'), ...create };
+        projectAssignments.push(created);
+        return created;
+      },
     },
     planningAssignment: {
       findMany: async ({ where }: { where: { employeeId?: string; seriesId?: string; date?: { gte?: Date; lte?: Date } } }) => {
@@ -183,7 +210,7 @@ function createFakePrisma() {
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fake),
   };
 
-  return { prisma: fake as unknown as PrismaClient, assignments, series };
+  return { prisma: fake as unknown as PrismaClient, assignments, series, projectAssignments };
 }
 
 describe('PlanningService', () => {
@@ -257,6 +284,55 @@ describe('PlanningService', () => {
         service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-archived', date: today, createdById: 'u1' }),
       ).rejects.toMatchObject({ code: 'PLANNING_PROJECT_NOT_FOUND' });
     });
+
+    // Klantvraag 11/9/2026: "ik krijg nog steeds de keuze uit de projecten
+    // waaraan ik toegewezen ben en niet wat er in de planning staat" — een
+    // planningtoewijzing moet voortaan meteen ook de echte autorisatie
+    // (ProjectAssignment) meekoppelen, anders blijft de app stil terugvallen
+    // op de gewone keuzelijst (en kan de medewerker sowieso niet starten).
+    it('koppelt automatisch een ProjectAssignment (autorisatie) wanneer die nog ontbreekt', async () => {
+      const { prisma, projectAssignments } = createFakePrisma();
+      const service = new PlanningService(prisma);
+      const today = formatDateOnly(todayDateOnly());
+
+      expect(projectAssignments).toHaveLength(0);
+
+      await service.setAssignment({
+        employeeId: 'emp-peter',
+        projectId: 'proj-janssens',
+        date: today,
+        createdById: 'user-supervisor',
+      });
+
+      expect(projectAssignments).toHaveLength(1);
+      expect(projectAssignments[0]).toMatchObject({
+        employeeId: 'emp-peter',
+        projectId: 'proj-janssens',
+        assignedByUserId: 'user-supervisor',
+      });
+    });
+
+    it('dupliceert géén ProjectAssignment die al bestaat', async () => {
+      const { prisma, projectAssignments } = createFakePrisma();
+      const service = new PlanningService(prisma);
+      const today = todayDateOnly();
+
+      await service.setAssignment({
+        employeeId: 'emp-peter',
+        projectId: 'proj-janssens',
+        date: formatDateOnly(today),
+        createdById: 'u1',
+      });
+      // Zelfde medewerker/project, andere dag — mag geen tweede rij geven.
+      await service.setAssignment({
+        employeeId: 'emp-peter',
+        projectId: 'proj-janssens',
+        date: formatDateOnly(addDaysUtc(today, 1)),
+        createdById: 'u1',
+      });
+
+      expect(projectAssignments.filter((a) => a.employeeId === 'emp-peter' && a.projectId === 'proj-janssens')).toHaveLength(1);
+    });
   });
 
   describe('clearAssignment', () => {
@@ -279,6 +355,24 @@ describe('PlanningService', () => {
 
       expect(assignments).toHaveLength(4);
       expect(assignments.some((a) => a.date.getTime() === today.getTime())).toBe(false);
+    });
+
+    it('trekt de automatisch gekoppelde ProjectAssignment NIET in — enkel de planningdag zelf verdwijnt', async () => {
+      const { prisma, projectAssignments } = createFakePrisma();
+      const service = new PlanningService(prisma);
+      const today = todayDateOnly();
+
+      await service.setAssignment({
+        employeeId: 'emp-peter',
+        projectId: 'proj-janssens',
+        date: formatDateOnly(today),
+        createdById: 'u1',
+      });
+      expect(projectAssignments).toHaveLength(1);
+
+      await service.clearAssignment({ employeeId: 'emp-peter', date: formatDateOnly(today) });
+
+      expect(projectAssignments).toHaveLength(1); // ongewijzigd — expliciet loskoppelen blijft een aparte actie
     });
   });
 
@@ -303,6 +397,25 @@ describe('PlanningService', () => {
         expect([0, 4]).toContain(weekday);
       }
       expect(series.weekdays).toEqual([0, 4]);
+    });
+
+    it('koppelt automatisch één ProjectAssignment voor de hele reeks (niet één per gegenereerde dag)', async () => {
+      const { prisma, projectAssignments } = createFakePrisma();
+      const service = new PlanningService(prisma);
+      const today = todayDateOnly();
+
+      await service.createSeries({
+        employeeId: 'emp-sofie',
+        projectId: 'proj-janssens',
+        weekdays: [0, 1, 2, 3, 4, 5, 6],
+        startDate: formatDateOnly(today),
+        endDate: formatDateOnly(addDaysUtc(today, 13)),
+        createdById: 'user-supervisor',
+      });
+
+      const forSofie = projectAssignments.filter((a) => a.employeeId === 'emp-sofie' && a.projectId === 'proj-janssens');
+      expect(forSofie).toHaveLength(1);
+      expect(forSofie[0]?.assignedByUserId).toBe('user-supervisor');
     });
 
     it('weigert een lege dagselectie', async () => {

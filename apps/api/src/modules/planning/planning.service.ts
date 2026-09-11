@@ -65,23 +65,26 @@ export class PlanningService {
     await this.assertProjectExists(input.projectId);
     const date = parseDateOnly(input.date);
 
-    const assignment = await this.prisma.planningAssignment.upsert({
-      where: { employeeId_date: { employeeId: input.employeeId, date } },
-      create: {
-        employeeId: input.employeeId,
-        projectId: input.projectId,
-        date,
-        seriesId: null,
-        createdById: input.createdById,
-      },
-      update: {
-        projectId: input.projectId,
-        seriesId: null,
-        createdById: input.createdById,
-      },
-      include: { employee: true, project: { include: { customer: true } } },
+    return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.ensureProjectAssignment(tx, input.employeeId, input.projectId, input.createdById);
+
+      return tx.planningAssignment.upsert({
+        where: { employeeId_date: { employeeId: input.employeeId, date } },
+        create: {
+          employeeId: input.employeeId,
+          projectId: input.projectId,
+          date,
+          seriesId: null,
+          createdById: input.createdById,
+        },
+        update: {
+          projectId: input.projectId,
+          seriesId: null,
+          createdById: input.createdById,
+        },
+        include: { employee: true, project: { include: { customer: true } } },
+      });
     });
-    return assignment;
   }
 
   /** Wist enkel deze ene dag — een eventuele reeks blijft voor de overige dagen gewoon bestaan. */
@@ -135,6 +138,8 @@ export class PlanningService {
     // helaas terug op `any`, maar dat is de library's eigen typedefinitie,
     // geen losse `any` van onzentwege.
     const series = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      await this.ensureProjectAssignment(tx, input.employeeId, input.projectId, input.createdById);
+
       const createdSeries = await tx.planningSeries.create({
         data: {
           employeeId: input.employeeId,
@@ -215,6 +220,43 @@ export class PlanningService {
     if (!project || project.isArchivedInTl) {
       throw PlanningErrors.projectNotFound();
     }
+  }
+
+  /**
+   * Klantvraag 11/9/2026: "ik krijg nog steeds de keuze uit de projecten
+   * waaraan ik toegewezen ben en niet wat er in de planning staat." Oorzaak:
+   * een planningtoewijzing (dit bestand) gaf voorheen GEEN automatische
+   * `ProjectAssignment` (Fase 3 — de eigenlijke autorisatie om een timer te
+   * starten, zie `TimeEntryService.start()`/`addManual()`, die zonder een
+   * `ProjectAssignment`-rij hard weigert met `ProjectErrors.notAssigned()`).
+   * Stond een medewerker dus nog niet apart gekoppeld aan het project via
+   * "Projecten aan medewerker koppelen", dan verscheen de ingeplande opdracht
+   * op de app nergens (de rule-12-veiligheidscheck op HomePage.tsx/
+   * EmployeeProjectsPage.tsx viel stil terug op de gewone lijst) én kon de
+   * medewerker hem sowieso niet starten, ook niet via die gewone lijst.
+   *
+   * Een planningtoewijzing impliceert dus voortaan meteen ook de
+   * `ProjectAssignment` — de supervisor plant het werk één keer, op het
+   * planningsbord, en dat volstaat. Bewust enkel TOEVOEGEN, nooit
+   * automatisch verwijderen: een dag uit de planning wissen of een reeks
+   * stopzetten mag een bestaande, mogelijk voor andere dagen/doeleinden
+   * gebruikte projectkoppeling niet stilzwijgend intrekken (zelfde
+   * voorzichtigheidsprincipe als business rules 8/9 — wijzigingen mogen
+   * afgeleide/lokale autorisatie nooit ongevraagd beschadigen). Expliciet
+   * loskoppelen blijft mogelijk via de bestaande "Projecten aan medewerker
+   * koppelen"-beheerpagina.
+   */
+  private async ensureProjectAssignment(
+    tx: Prisma.TransactionClient,
+    employeeId: string,
+    projectId: string,
+    assignedByUserId: string,
+  ): Promise<void> {
+    await tx.projectAssignment.upsert({
+      where: { projectId_employeeId: { projectId, employeeId } },
+      create: { projectId, employeeId, assignedByUserId },
+      update: {},
+    });
   }
 }
 
