@@ -7,6 +7,7 @@ import { DatabaseStorageService, type StorageService } from '../storage/storage.
 import { buildEmployeeHoursWorkbook } from './employee-hours-workbook';
 import { hoursExportEmployeeParamsSchema, hoursExportPeriodQuerySchema, markHoursExportedBodySchema } from './hours-export.schemas';
 import { HoursExportService } from './hours-export.service';
+import { PersonalTimesheetService } from './personal-timesheet.service';
 import { buildSubcontractorHoursWorkbook } from './subcontractor-hours-workbook';
 import { renderSubcontractorStatementPdf } from './subcontractor-statement-document';
 
@@ -19,6 +20,7 @@ import { renderSubcontractorStatementPdf } from './subcontractor-statement-docum
  */
 export default async function hoursExportRoutes(app: FastifyInstance): Promise<void> {
   const service = new HoursExportService(app.prisma);
+  const personalTimesheetService = new PersonalTimesheetService(app.prisma);
   const auditLogService = new AuditLogService(app.prisma);
   const storage: StorageService = new DatabaseStorageService(app.prisma);
   const companySettings = new CompanySettingsService(app.prisma);
@@ -125,6 +127,26 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
       const buffer = await buildSubcontractorHoursWorkbook(detail);
       reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       reply.header('Content-Disposition', `attachment; filename="urenoverzicht-${slugify(detail.displayName)}-${query.period}.xlsx"`);
+      return reply.send(buffer);
+    },
+  );
+
+  // Klantvraag 10/9/2026 — export naar het door de klant aangeleverde
+  // persoonlijke jaaroverzicht-sjabloon (zie personal-timesheet.service.ts +
+  // -workbook.ts). Eén werknemer, heel jaar 2026 in één keer (alle 12
+  // maandtabbladen), i.p.v. de bestaande periodegebonden exports hierboven.
+  app.get(
+    '/admin/hours-export/personal-timesheet/:employeeId/excel',
+    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    async (request, reply) => {
+      const params = hoursExportEmployeeParamsSchema.parse(request.params);
+      const { buffer, displayName } = await personalTimesheetService.buildWorkbookForEmployee(params.employeeId);
+
+      reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      reply.header(
+        'Content-Disposition',
+        `attachment; filename="uren-registratie-2026-${slugify(displayName)}.xlsx"`,
+      );
       return reply.send(buffer);
     },
   );

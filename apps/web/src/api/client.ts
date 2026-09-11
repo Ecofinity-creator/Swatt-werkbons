@@ -490,6 +490,14 @@ export const hoursExportApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /**
+   * Klantvraag 10/9/2026 — export naar het door de klant aangeleverde
+   * persoonlijke jaaroverzicht-sjabloon (zie personal-timesheet.service.ts).
+   * Binaire download, dus een kale URL i.p.v. een `request()`-aanroep —
+   * zelfde patroon als invoiceBatchesApi.workOrderPdfBundleUrl hierboven.
+   */
+  personalTimesheetUrl: (employeeId: string) =>
+    `${API_BASE_URL}/admin/hours-export/personal-timesheet/${employeeId}/excel`,
 };
 
 /**

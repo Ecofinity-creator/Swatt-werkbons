@@ -1,7 +1,7 @@
-import type { HoursExportEmployeeSummary } from '@swatt/shared-types';
+import type { AdminUserSummary, HoursExportEmployeeSummary } from '@swatt/shared-types';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { hoursExportApi } from '../../api/client';
+import { hoursExportApi, usersApi } from '../../api/client';
 import { ApiRequestError } from '../../auth/AuthContext';
 
 function currentPeriodLabel(): string {
@@ -44,6 +44,13 @@ export function HoursExportPage() {
   // hoursExportApi.markExported()).
   const [markingEmployeeId, setMarkingEmployeeId] = useState<string | null>(null);
 
+  // Klantvraag 10/9/2026 — persoonlijk jaaroverzicht (Excel-sjabloon): een
+  // eigen, periode-onafhankelijke medewerkerslijst (alle medewerkers, niet
+  // enkel wie deze maand ondertekende uren heeft — het gaat hier om het
+  // volledige jaar 2026 in één keer).
+  const [allUsers, setAllUsers] = useState<AdminUserSummary[] | null>(null);
+  const [personalTimesheetEmployeeId, setPersonalTimesheetEmployeeId] = useState('');
+
   const load = useCallback(async (period: string) => {
     setErrorMessage(null);
     try {
@@ -58,6 +65,13 @@ export function HoursExportPage() {
   useEffect(() => {
     void load(periodLabel);
   }, [periodLabel, load]);
+
+  useEffect(() => {
+    usersApi
+      .list()
+      .then((response) => setAllUsers(response.users))
+      .catch(() => setAllUsers(null));
+  }, []);
 
   async function handleMarkExported(employee: HoursExportEmployeeSummary) {
     // eslint-disable-next-line no-alert
@@ -80,6 +94,9 @@ export function HoursExportPage() {
 
   const werknemers = employees?.filter((e) => e.employmentType === 'EMPLOYEE') ?? [];
   const onderaannemers = employees?.filter((e) => e.employmentType === 'SUBCONTRACTOR') ?? [];
+  const medewerkersMetAccount = (allUsers ?? [])
+    .filter((u): u is AdminUserSummary & { employee: NonNullable<AdminUserSummary['employee']> } => u.employee !== null)
+    .sort((a, b) => a.employee.displayName.localeCompare(b.employee.displayName));
 
   return (
     <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
@@ -202,6 +219,51 @@ export function HoursExportPage() {
               </li>
             ))}
           </ul>
+        )}
+      </section>
+
+      {/* Klantvraag 10/9/2026 — export naar het persoonlijke
+          jaaroverzicht-sjabloon (het bijgevoegde "Uren registratie 2026"-
+          bestand). Bewust los van de periodekiezer hierboven: dit vult
+          altijd het volledige jaar 2026 (alle 12 maandtabbladen) voor één
+          gekozen medewerker — zie personal-timesheet.service.ts. */}
+      <section className="mt-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+        <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">
+          Persoonlijk jaaroverzicht (Excel-sjabloon)
+        </h2>
+        <p className="mb-3 text-sm text-neutral-500">
+          Vult het volledige jaar 2026 van één medewerker in op het bestaande Excel-sjabloon (start/einde, pauze,
+          km, project en opmerkingen) — verlof- en afwezigheidsdagen blijven leeg, die vul je zelf manueel aan.
+        </p>
+        {allUsers === null && <p className="text-sm text-neutral-500">Laden...</p>}
+        {allUsers !== null && (
+          <div className="flex flex-wrap items-center gap-3">
+            <select
+              value={personalTimesheetEmployeeId}
+              onChange={(e) => setPersonalTimesheetEmployeeId(e.target.value)}
+              className="rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+            >
+              <option value="">Kies een medewerker...</option>
+              {medewerkersMetAccount.map((user) => (
+                <option key={user.employee.id} value={user.employee.id}>
+                  {user.employee.displayName}
+                </option>
+              ))}
+            </select>
+            {personalTimesheetEmployeeId ? (
+              <a
+                href={hoursExportApi.personalTimesheetUrl(personalTimesheetEmployeeId)}
+                download
+                className="rounded-lg bg-swatt-gold-dark px-4 py-2 text-sm font-semibold text-white"
+              >
+                Download Excel (jaar 2026)
+              </a>
+            ) : (
+              <span className="rounded-lg bg-neutral-100 px-4 py-2 text-sm font-semibold text-neutral-400">
+                Download Excel (jaar 2026)
+              </span>
+            )}
+          </div>
         )}
       </section>
     </main>
