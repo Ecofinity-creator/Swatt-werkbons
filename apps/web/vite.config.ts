@@ -30,6 +30,18 @@ export default defineConfig({
       devOptions: { enabled: false },
       workbox: {
         globPatterns: ['**/*.{js,css,html,png,svg,ico,webmanifest}'],
+        // Bugfix 13/9/2026 ("download Excel/PDF geeft html terug"): zonder
+        // deze denylist behandelt vite-plugin-pwa/workbox STANDAARD élke
+        // navigatie-achtige GET (ook een klik op <a download href="/admin/...">)
+        // als SPA-navigatie en geeft dan de gecachte index.html terug i.p.v.
+        // de request naar de backend door te laten — een klassieke
+        // navigateFallback-valstrik, want dat geldt ook voor downloadlinks,
+        // niet enkel voor echte paginanavigatie. Hou deze lijst gelijk aan de
+        // backend-prefixen in vercel.json's `rewrites` (alles wat daar naar
+        // swatt-api.onrender.com gaat, mag hier nooit naar index.html vallen).
+        navigateFallbackDenylist: [
+          /^\/(health|auth|admin|public|projects|planning|weekly-approvals|teamleader|time-entries|work-orders|portal)(\/|$|\?)/,
+        ],
         // GET-only (POST/PUT laat Workbox hier sowieso ongemoeid) —
         // NetworkFirst: probeer altijd eerst een verse server-respons (max.
         // 4s), val pas terug op de laatst gekende cache als er geen bereik
