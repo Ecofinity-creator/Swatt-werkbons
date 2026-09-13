@@ -283,21 +283,6 @@ export function PlanningBoardPage() {
               ))}
             </tbody>
           </table>
-
-          {projects.length > 0 && (
-            <div className="flex flex-wrap gap-2 border-t border-neutral-100 px-4 py-3">
-              {projects.map((project) => {
-                const color = projectColor.get(project.id);
-                if (!color) return null;
-                return (
-                  <span key={project.id} className="flex items-center gap-1.5 text-xs text-neutral-500">
-                    <span className={`h-2.5 w-2.5 rounded-sm ${color.dot}`} />
-                    {project.customerName} — {project.name}
-                  </span>
-                );
-              })}
-            </div>
-          )}
         </div>
       )}
 
