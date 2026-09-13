@@ -25,16 +25,21 @@ function createFakePrisma() {
         async ({
           where,
           take,
+          orderBy,
         }: {
-          where: { entityType?: string; actorUserId?: string; createdAt?: { gte?: Date; lte?: Date } };
+          where: { entityType?: string; actorUserId?: string; action?: string; createdAt?: { gte?: Date; lte?: Date; lt?: Date } };
           take: number;
+          orderBy: { createdAt: 'asc' | 'desc' };
         }) => {
+          const direction = orderBy.createdAt === 'asc' ? 1 : -1;
           return rows
             .filter((row) => (where.entityType ? row.entityType === where.entityType : true))
             .filter((row) => (where.actorUserId ? row.actorUserId === where.actorUserId : true))
+            .filter((row) => (where.action ? row.action === where.action : true))
             .filter((row) => (where.createdAt?.gte ? row.createdAt >= where.createdAt.gte : true))
             .filter((row) => (where.createdAt?.lte ? row.createdAt <= where.createdAt.lte : true))
-            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+            .filter((row) => (where.createdAt?.lt ? row.createdAt < where.createdAt.lt : true))
+            .sort((a, b) => (a.createdAt.getTime() - b.createdAt.getTime()) * direction)
             .slice(0, take)
             .map((row) => ({ ...row, actorUser: row.actorUserId ? { email: 'admin@ecofinity.eu', employee: null } : null }));
         },
@@ -96,5 +101,47 @@ describe('AuditLogService', () => {
     const logs = await service.list();
     expect(logs[0]?.action).toBe('LAATST');
     expect(logs[1]?.action).toBe('EERST');
+  });
+
+  /**
+   * Klantvraag 13/9/2026 — "een doorzoekbare auditlog-UI": Actie-filter
+   * (dropdown op AuditLogPage.tsx) en `before`-cursor ("Meer laden",
+   * werkt samen met from/to — zie de toelichting bij `list()`).
+   */
+  it('list() filtert correct op action', async () => {
+    const { prisma } = createFakePrisma();
+    const service = new AuditLogService(prisma);
+    await service.record({ actorUserId: 'user-1', action: 'WORK_ORDER_SIGNED', entityType: 'WorkOrder', entityId: '1' });
+    await service.record({ actorUserId: 'user-1', action: 'USER_CREATED', entityType: 'User', entityId: '2' });
+
+    const signedLogs = await service.list({ action: 'WORK_ORDER_SIGNED' });
+    expect(signedLogs).toHaveLength(1);
+    expect(signedLogs[0]?.entityType).toBe('WorkOrder');
+  });
+
+  it('list() met `before` geeft enkel rijen strikt vóór dat tijdstip ("Meer laden")', async () => {
+    const { prisma } = createFakePrisma();
+    const service = new AuditLogService(prisma);
+    await service.record({ actorUserId: 'user-1', action: 'OUD', entityType: 'X', entityId: '1' });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const cursorMoment = new Date();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await service.record({ actorUserId: 'user-1', action: 'NIEUW', entityType: 'X', entityId: '2' });
+
+    const olderPage = await service.list({ before: cursorMoment });
+    expect(olderPage).toHaveLength(1);
+    expect(olderPage[0]?.action).toBe('OUD');
+  });
+
+  it('list() met order "asc" geeft chronologisch oplopend (export)', async () => {
+    const { prisma } = createFakePrisma();
+    const service = new AuditLogService(prisma);
+    await service.record({ actorUserId: 'user-1', action: 'EERST', entityType: 'X', entityId: '1' });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await service.record({ actorUserId: 'user-1', action: 'LAATST', entityType: 'X', entityId: '2' });
+
+    const logs = await service.list({ order: 'asc' });
+    expect(logs[0]?.action).toBe('EERST');
+    expect(logs[1]?.action).toBe('LAATST');
   });
 });

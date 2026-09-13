@@ -5,6 +5,7 @@ import {
   AlertTriangleIcon,
   BuildingIcon,
   CalendarIcon,
+  ChartBarIcon,
   ClipboardCheckIcon,
   DownloadIcon,
   EuroIcon,
@@ -94,6 +95,7 @@ export function getMenuSections(role: UserRole): MenuSectionConfig[] {
       icon: EuroIcon,
       items: isAdmin
         ? [
+            { to: '/backoffice/dashboard', label: 'Vandaag', icon: ChartBarIcon },
             { to: '/backoffice/facturatie', label: 'Facturatie', icon: EuroIcon },
             { to: '/backoffice/uren-export', label: 'Uren-export', icon: DownloadIcon },
             { to: '/backoffice/personeelsuitbetaling', label: 'Personeelsuitbetaling', icon: WalletIcon },

@@ -257,3 +257,28 @@ export function MicrophoneIcon(props: IconProps) {
     </>,
   );
 }
+
+/** Zoekbalk — o.a. AuditLogPage.tsx. */
+export function SearchIcon(props: IconProps) {
+  return base(
+    props,
+    <>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="M20 20l-4.8-4.8" />
+    </>,
+  );
+}
+
+/** "Vandaag"-dashboard (sectie 19) — DashboardPage.tsx. */
+export function ChartBarIcon(props: IconProps) {
+  return base(
+    props,
+    <>
+      <path d="M4 20V4" />
+      <path d="M4 20h16" />
+      <path d="M8 20v-6" />
+      <path d="M13 20v-9" />
+      <path d="M18 20V7" />
+    </>,
+  );
+}

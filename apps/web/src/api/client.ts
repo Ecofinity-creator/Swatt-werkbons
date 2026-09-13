@@ -12,6 +12,7 @@ import type {
   CreateTeamleaderDraftInvoiceResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
+  DashboardTodayResponseBody,
   HoursExportOverviewResponseBody,
   MarkHoursExportedBody,
   MarkHoursExportedResponseBody,
@@ -381,15 +382,62 @@ export const workOrdersApi = {
     request<SendWorkOrderPdfResponseBody>(`/work-orders/${workOrderId}/send-to-customer`, { method: 'POST' }),
 };
 
-/** Op vraag (3/9/2026): "auditlog-scherm". ADMIN-only, zie AuditLogPage.tsx. */
+/**
+ * Klantvraag 13/9/2026 — sectie 19 "Administrator dashboard", nooit
+ * gebouwd. `from`/`to`: ISO-tijdstippen van de lokale kalenderdag, hier
+ * client-side berekend (zie `todayLocalRange()` in DashboardPage.tsx) —
+ * NIET op de server afgeleid, zelfde les als Fase 19. ADMIN-only.
+ */
+export const dashboardApi = {
+  today: (from: string, to: string) =>
+    request<DashboardTodayResponseBody>(`/admin/dashboard/today?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
+      method: 'GET',
+    }),
+};
+
+/**
+ * Op vraag (3/9/2026): "auditlog-scherm". Uitgebreid 13/9/2026 — "een
+ * doorzoekbare auditlog-UI" — `action`/`actorUserId`/`before` (paginering)
+ * op `list()`, plus `exportUrl()` voor de Excel-export. ADMIN-only, zie
+ * AuditLogPage.tsx.
+ */
+export interface AuditLogFilters {
+  entityType?: string;
+  actorUserId?: string;
+  action?: string;
+  from?: string;
+  to?: string;
+}
+
+function auditLogFilterParams(filters: AuditLogFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.entityType) params.set('entityType', filters.entityType);
+  if (filters.actorUserId) params.set('actorUserId', filters.actorUserId);
+  if (filters.action) params.set('action', filters.action);
+  if (filters.from) params.set('from', filters.from);
+  if (filters.to) params.set('to', filters.to);
+  return params;
+}
+
 export const auditLogApi = {
-  list: (filters: { entityType?: string; from?: string; to?: string } = {}) => {
-    const params = new URLSearchParams();
-    if (filters.entityType) params.set('entityType', filters.entityType);
-    if (filters.from) params.set('from', filters.from);
-    if (filters.to) params.set('to', filters.to);
+  /** `before`: cursor voor "Meer laden" (ISO-tijdstip van de laatst geladen rij) — zie AuditLogPage.tsx. */
+  list: (filters: AuditLogFilters & { before?: string; limit?: number } = {}) => {
+    const params = auditLogFilterParams(filters);
+    if (filters.before) params.set('before', filters.before);
+    if (filters.limit) params.set('limit', String(filters.limit));
     const query = params.toString();
     return request<ListAuditLogResponseBody>(`/admin/audit-log${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
+  /**
+   * Binaire Excel-download, dus een kale URL i.p.v. een `request()`-aanroep
+   * — zelfde patroon als hoursExportApi.personalTimesheetUrl hierboven.
+   * Volgt bewust dezelfde structurele filters als het scherm, maar NIET de
+   * vrije zoekbalk daar (die filtert enkel client-side op de al-geladen
+   * pagina) — zie de toelichting bij de exportknop op AuditLogPage.tsx.
+   */
+  exportUrl: (filters: AuditLogFilters) => {
+    const query = auditLogFilterParams(filters).toString();
+    return `${API_BASE_URL}/admin/audit-log/export${query ? `?${query}` : ''}`;
   },
 };
 
