@@ -535,7 +535,48 @@ model Customer {
   /// Facturatiebatches voor deze klant (Phase 10 — zie InvoiceBatch hieronder).
   invoiceBatches InvoiceBatch[]
 
+  /// Klantportaal (sectie 30) — magic-link-tokens en actieve sessies, zie
+  /// CustomerLoginToken/CustomerSession hieronder.
+  loginTokens CustomerLoginToken[]
+  sessions    CustomerSession[]
+
   @@map("customer")
+}
+
+/// Klantportaal (sectie 30, "eindklant logt in om eigen werkbonnen/status te
+/// volgen") — magic-link-login per e-mailadres, geen wachtwoord. Zelfde
+/// eenmalig-bruikbaar-tokenpatroon als PasswordSetupToken (zie hieronder),
+/// maar bewust een apart model: dit hoort bij Customer, niet bij User/
+/// Employee — een klant-token mag nooit, via welke bug dan ook, een
+/// medewerker-sessie kunnen openen of omgekeerd.
+model CustomerLoginToken {
+  id         String    @id @db.VarChar(64)
+  customerId String    @map("customer_id") @db.Uuid
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz
+  usedAt     DateTime? @map("used_at") @db.Timestamptz
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([expiresAt])
+  @@map("customer_login_token")
+}
+
+/// Server-side sessie voor het klantportaal — zelfde filosofie als Session
+/// (hieronder): intrekbaar op elk moment, bewust géén JWT-in-cookie. Volledig
+/// losstaand van Session/User: een klantsessie kent enkel een Customer.
+model CustomerSession {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId String   @map("customer_id") @db.Uuid
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([expiresAt])
+  @@map("customer_session")
 }
 
 model Project {

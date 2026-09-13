@@ -58,6 +58,7 @@ export default defineConfig({
       // Lokaal: frontend op :5173, backend op :3000 — geen CORS-gedoe tijdens dev.
       '/auth': 'http://localhost:3000',
       '/health': 'http://localhost:3000',
+      '/portal': 'http://localhost:3000',
     },
   },
   build: {

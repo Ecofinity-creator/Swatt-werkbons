@@ -12,6 +12,7 @@ import type {
   CreateTeamleaderDraftInvoiceResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
+  CustomerPortalMeResponseBody,
   DashboardTodayResponseBody,
   HoursExportOverviewResponseBody,
   MarkHoursExportedBody,
@@ -20,6 +21,7 @@ import type {
   ListPayrollBatchesResponseBody,
   CreatePayrollBatchBody,
   CreatePayrollBatchResponseBody,
+  ListCustomerPortalWorkOrdersResponseBody,
   ListInvoiceBatchesResponseBody,
   ListInvoiceableWorkOrdersResponseBody,
   ListProjectAssignmentsResponseBody,
@@ -66,6 +68,7 @@ import type {
   UpdateTeamleaderSettingsBody,
   UpdateUserBody,
   UpdateUserResponseBody,
+  VerifyCustomerPortalLinkResponseBody,
   WorkOrderResponseBody,
   ListPlanningEmployeesResponseBody,
   ListPlanningWeekResponseBody,
@@ -196,6 +199,26 @@ export const authApi = {
   /** `token` komt uit de link in de uitnodigings-/reset-e-mail (querystring). */
   resetPassword: (token: string, password: string) =>
     request<void>('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) }),
+};
+
+/**
+ * Klantportaal (sectie 30) — volledig los van authApi hierboven: een eigen
+ * sessiecookie (zie customer-portal-session.service.ts), geen wachtwoord.
+ */
+export const portalApi = {
+  /** Antwoord is altijd 204, ook als het e-mailadres geen klant is (zelfde anti-enumeratie-redenering als authApi.forgotPassword). */
+  requestLink: (email: string) =>
+    request<void>('/portal/auth/request-link', { method: 'POST', body: JSON.stringify({ email }) }),
+  /** `token` komt uit de link in de inlog-e-mail (querystring). */
+  verify: (token: string) =>
+    request<VerifyCustomerPortalLinkResponseBody>(`/portal/auth/verify?token=${encodeURIComponent(token)}`, {
+      method: 'GET',
+    }),
+  logout: () => request<void>('/portal/auth/logout', { method: 'POST' }),
+  me: () => request<CustomerPortalMeResponseBody>('/portal/me', { method: 'GET' }),
+  workOrders: () => request<ListCustomerPortalWorkOrdersResponseBody>('/portal/work-orders', { method: 'GET' }),
+  /** Geen JSON-response — een gewone `<a href={...}>`-download-link, zelfde patroon als workOrdersApi.pdfUrl(). */
+  pdfUrl: (workOrderId: string) => `${API_BASE_URL}/portal/work-orders/${workOrderId}/pdf`,
 };
 
 export const teamleaderApi = {

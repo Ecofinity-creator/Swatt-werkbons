@@ -478,3 +478,20 @@ export const PlanningErrors = {
       'Dit project is nog niet gekoppeld aan deze medewerker. Koppel het project eerst via "Projecten aan medewerker koppelen" in het medewerkersprofiel voordat je het inplant — zo staan de juiste prijsinstellingen al vast.',
     ),
 };
+
+/** Klantportaal (sectie 30) — zie modules/customer-portal/. */
+export const CustomerPortalErrors = {
+  notAuthenticated: () =>
+    new ApiError(401, 'CUSTOMER_PORTAL_NOT_AUTHENTICATED', 'Je bent niet (meer) ingelogd. Vraag een nieuwe inloglink aan.'),
+  invalidOrExpiredToken: () =>
+    new ApiError(
+      400,
+      'CUSTOMER_PORTAL_INVALID_OR_EXPIRED_TOKEN',
+      'Deze link is ongeldig, al gebruikt, of verlopen. Vraag een nieuwe inloglink aan.',
+    ),
+  /** Bewust dezelfde melding voor "bestaat niet" als "is niet van jou" — nooit laten blijken of een work-order-ID van een andere klant wél bestaat. */
+  workOrderNotFound: () =>
+    new ApiError(404, 'CUSTOMER_PORTAL_WORK_ORDER_NOT_FOUND', 'Deze werkbon bestaat niet of is niet beschikbaar.'),
+  pdfNotReady: () =>
+    new ApiError(409, 'CUSTOMER_PORTAL_PDF_NOT_READY', 'De PDF van deze werkbon is nog niet klaar. Probeer het later opnieuw.'),
+};

@@ -892,6 +892,8 @@ export const AUDIT_LOG_ACTION_LABELS: Record<string, string> = {
   USER_DELETED: 'Gebruiker verwijderd',
   /** Nieuw — het exporteren van de auditlog zelf is voor aanbestedingen/verzekeraars net zo relevant om te kunnen aantonen als de onderliggende acties. */
   AUDIT_LOG_EXPORTED: 'Auditlog geëxporteerd naar Excel',
+  /** Klantportaal (sectie 30) — een klant heeft succesvol ingelogd via de magic-link. */
+  CUSTOMER_PORTAL_LOGIN: 'Klant ingelogd op klantportaal',
 };
 
 /**
@@ -1380,4 +1382,59 @@ export interface DashboardActiveEmployeeSummary {
   pausedSeconds: number;
   /** Enkel gezet wanneer status = PAUSED. */
   currentPauseStartedAt: string | null;
+}
+
+/**
+ * Klantportaal (sectie 30, 13/9/2026) — "eindklant logt in om eigen
+ * werkbonnen/status te volgen". Magic-link-login per e-mailadres (geen
+ * wachtwoord), volledig los van de medewerker-auth hierboven. Zie
+ * apps/api/src/modules/customer-portal/.
+ */
+export interface RequestCustomerPortalLinkBody {
+  email: string;
+}
+
+export interface CustomerPortalMeResponseBody {
+  customer: CustomerPortalIdentity;
+}
+
+export interface CustomerPortalIdentity {
+  id: string;
+  name: string;
+}
+
+export interface VerifyCustomerPortalLinkResponseBody {
+  customer: CustomerPortalIdentity;
+}
+
+/**
+ * Eén werkbon zoals de klant die te zien krijgt — bewust een kleinere,
+ * eigen vorm dan WorkOrderOverviewItemSummary: geen interne details
+ * (Teamleader-sync-status, welke medewerker, ...), enkel wat voor de klant
+ * relevant is. Enkel getekende (SIGNED of later) werkbonnen komen hierin
+ * voor — zie CustomerPortalService.listWorkOrders().
+ */
+export interface CustomerPortalWorkOrderSummary {
+  id: string;
+  workOrderNumber: string;
+  projectName: string;
+  description: string | null;
+  signedAt: string;
+  totalSeconds: number;
+  /**
+   * Facturatiestatus, rechtstreeks afgeleid van WorkOrderStatus (geen aparte
+   * Teamleader-factuur-opzoeking nodig): READY_FOR_INVOICING = "wordt nog
+   * gefactureerd", INVOICED = "gefactureerd" (met evt. periode/referentie
+   * hieronder), elke andere status (SIGNED/SYNC_PENDING/SYNC_FAILED) = "in
+   * verwerking" voor de klant, de interne syncdetails tonen we niet.
+   */
+  invoicingStatus: 'IN_PROGRESS' | 'READY_FOR_INVOICING' | 'INVOICED';
+  /** Enkel gezet wanneer invoicingStatus = 'INVOICED' — de maand/week-periode van de betreffende facturatiebatch. */
+  invoicedPeriodLabel: string | null;
+  /** true zodra de PDF gedownload kan worden (pdfStatus = PDF_READY) — bij een (zeldzame) PDF-fout blijft dit false, de werkbon zelf blijft gewoon zichtbaar. */
+  pdfAvailable: boolean;
+}
+
+export interface ListCustomerPortalWorkOrdersResponseBody {
+  workOrders: CustomerPortalWorkOrderSummary[];
 }
