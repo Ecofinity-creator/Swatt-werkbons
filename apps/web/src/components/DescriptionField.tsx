@@ -6,17 +6,17 @@ import { MicrophoneIcon } from './icons';
  * spraak-naar-tekst (sectie 7 + backlog-extra 11/9/2026 — "precies waarom
  * techniekers een tijdregistratie-app haten" was het typen op de werf).
  *
- * Gewone <textarea> blijft altijd gewoon werken (typen kan nog steeds,
- * ook tijdens/na het gebruik van de microfoon). De microfoonknop verschijnt
- * enkel als de browser dit ondersteunt (`isSupported`) — progressive
- * enhancement, geen kapotte knop op niet-ondersteunde browsers.
+ * Gewone <textarea> blijft altijd gewoon werken (typen kan nog steeds, ook
+ * vóór/na het gebruik van de microfoon — zie de bugfix-toelichting in
+ * useSpeechToText.ts voor de beperking TIJDENS het luisteren). De
+ * microfoonknop verschijnt enkel als de browser dit ondersteunt
+ * (`isSupported`) — progressive enhancement, geen kapotte knop op
+ * niet-ondersteunde browsers.
+ *
+ * `useSpeechToText` geeft sinds de bugfix van 13/9/2026 al de volledige,
+ * kant-en-klare veldtekst terug — hier dus geen eigen samenvoeg-logica meer
+ * (dat was net de oorzaak van "bij elk woord herbegint hij met de zin").
  */
-function appendSpeechText(current: string, addition: string): string {
-  const trimmedCurrent = current.replace(/\s+$/, '');
-  if (!trimmedCurrent) return addition;
-  return `${trimmedCurrent} ${addition}`;
-}
-
 interface DescriptionFieldProps {
   id: string;
   label: string;
@@ -36,9 +36,7 @@ export function DescriptionField({
   rows = 4,
   disabled = false,
 }: DescriptionFieldProps) {
-  const { isSupported, isListening, interimText, error, start, stop } = useSpeechToText((finalText) => {
-    onChange(appendSpeechText(value, finalText));
-  });
+  const { isSupported, isListening, interimText, error, start, stop } = useSpeechToText(onChange);
 
   return (
     <div className="flex w-full flex-col gap-2">
@@ -49,7 +47,7 @@ export function DescriptionField({
         {isSupported && (
           <button
             type="button"
-            onClick={() => (isListening ? stop() : start())}
+            onClick={() => (isListening ? stop() : start(value))}
             disabled={disabled}
             aria-pressed={isListening}
             aria-label={isListening ? 'Stop spraakherkenning' : 'Start spraakherkenning'}
