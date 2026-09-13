@@ -20,6 +20,7 @@ import { PlanningBoardPage } from './pages/admin/PlanningBoardPage';
 import { ProjectMilestonesPage } from './pages/admin/ProjectMilestonesPage';
 import { SyncIssuesPage } from './pages/admin/SyncIssuesPage';
 import { AuditLogPage } from './pages/admin/AuditLogPage';
+import { DashboardPage } from './pages/admin/DashboardPage';
 import { WorkOrdersOverviewPage } from './pages/admin/WorkOrdersOverviewPage';
 import { MyWorkOrdersPage } from './pages/MyWorkOrdersPage';
 import { GeneralTimeEntryPage } from './pages/GeneralTimeEntryPage';
@@ -164,6 +165,14 @@ export function App() {
         element={
           <RequireAuth minimumRole="ADMIN">
             <AuditLogPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/backoffice/dashboard"
+        element={
+          <RequireAuth minimumRole="ADMIN">
+            <DashboardPage />
           </RequireAuth>
         }
       />

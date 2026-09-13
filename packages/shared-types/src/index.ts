@@ -1342,3 +1342,42 @@ export interface CreatePlanningSeriesResponseBody {
   /** Aantal dagrijen dat effectief gegenereerd werd (zie MAX_SERIES_ROWS in planning.service.ts). */
   generatedCount: number;
 }
+
+/**
+ * Sectie 19 — "Administrator dashboard", nooit gebouwd vóór 13/9/2026.
+ * Response van GET /admin/dashboard/today. Bewust een aggregatie van al
+ * bestaande data (geen nieuwe business rules) — zie dashboard.service.ts.
+ */
+export interface DashboardTodayResponseBody {
+  /** Alle werknemers met een RUNNING/PAUSED tijdsregistratie, over de hele organisatie — "wie is er nu actief aan het werk". */
+  activeEmployees: DashboardActiveEmployeeSummary[];
+  /** Som van alle gewerkte tijd (alle activiteitstypes) waarvan de registratie vandaag startte — een nog lopende registratie telt mee tot het opvraagmoment. */
+  todayTotalSeconds: number;
+  todayEntryCount: number;
+  /** Alle 7 statussen altijd aanwezig (0 waar niets van toepassing is) — zie WorkOrderStatus/sectie 20. */
+  workOrderStatusCounts: Record<WorkOrderStatus, number>;
+  /**
+   * Zelfde onderliggende selectie als het facturatie-overzicht
+   * (InvoiceBatchService.listInvoiceable(), ongefilterd): status
+   * READY_FOR_INVOICING, project.invoicingEnabled, nog niet aan een
+   * bestaande InvoiceBatchLine gekoppeld.
+   */
+  invoiceableSeconds: number;
+  invoiceableWorkOrderCount: number;
+}
+
+/** Eén actieve (RUNNING/PAUSED) tijdsregistratie op het dashboard. */
+export interface DashboardActiveEmployeeSummary {
+  /** TimeEntry-ID — enkel voor een stabiele React-key, geen navigatiedoel. */
+  id: string;
+  employeeDisplayName: string;
+  /** `null` bij een niet-projectgebonden registratie (activityType != PROJECT_WORK). */
+  projectName: string | null;
+  customerName: string | null;
+  activityType: TimeEntryActivityType;
+  status: Extract<TimeEntryStatus, 'RUNNING' | 'PAUSED'>;
+  startedAt: string;
+  pausedSeconds: number;
+  /** Enkel gezet wanneer status = PAUSED. */
+  currentPauseStartedAt: string | null;
+}

@@ -12,6 +12,7 @@ import type {
   CreateTeamleaderDraftInvoiceResponseBody,
   CreateUserBody,
   CreateUserResponseBody,
+  DashboardTodayResponseBody,
   HoursExportOverviewResponseBody,
   MarkHoursExportedBody,
   MarkHoursExportedResponseBody,
@@ -379,6 +380,19 @@ export const workOrdersApi = {
   /** Op vraag (3/9/2026): "PDF via een knop naar de klant sturen". */
   sendToCustomer: (workOrderId: string) =>
     request<SendWorkOrderPdfResponseBody>(`/work-orders/${workOrderId}/send-to-customer`, { method: 'POST' }),
+};
+
+/**
+ * Klantvraag 13/9/2026 — sectie 19 "Administrator dashboard", nooit
+ * gebouwd. `from`/`to`: ISO-tijdstippen van de lokale kalenderdag, hier
+ * client-side berekend (zie `todayLocalRange()` in DashboardPage.tsx) —
+ * NIET op de server afgeleid, zelfde les als Fase 19. ADMIN-only.
+ */
+export const dashboardApi = {
+  today: (from: string, to: string) =>
+    request<DashboardTodayResponseBody>(`/admin/dashboard/today?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
+      method: 'GET',
+    }),
 };
 
 /**
