@@ -1,7 +1,8 @@
 import type { UserRole } from '@swatt/shared-types';
 import { roleAtLeast } from '@swatt/shared-types';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
+import { PortalAuthProvider, usePortalAuth } from './auth/PortalAuthContext';
 import { AppAccessPage } from './pages/AppAccessPage';
 import { EmployeeProjectsPage } from './pages/EmployeeProjectsPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
@@ -24,6 +25,9 @@ import { DashboardPage } from './pages/admin/DashboardPage';
 import { WorkOrdersOverviewPage } from './pages/admin/WorkOrdersOverviewPage';
 import { MyWorkOrdersPage } from './pages/MyWorkOrdersPage';
 import { GeneralTimeEntryPage } from './pages/GeneralTimeEntryPage';
+import { PortalLoginPage } from './pages/portal/PortalLoginPage';
+import { PortalVerifyPage } from './pages/portal/PortalVerifyPage';
+import { PortalWorkOrdersPage } from './pages/portal/PortalWorkOrdersPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { UsersPage } from './pages/admin/UsersPage';
 
@@ -48,6 +52,27 @@ function RequireAuth({
   if (!user) return <Navigate to="/login" replace />;
   if (minimumRole && !roleAtLeast(user.role, minimumRole)) return <Navigate to="/" replace />;
   return children;
+}
+
+/**
+ * Klantportaal (sectie 30) — eigen gate, los van RequireAuth hierboven: die
+ * checkt een medewerker-/adminsessie (AuthContext), dit checkt een
+ * klantsessie (PortalAuthContext). Nooit door elkaar gebruiken.
+ */
+function RequirePortalAuth({ children }: { children: React.ReactElement }) {
+  const { customer, isLoading } = usePortalAuth();
+  if (isLoading) return <LoadingScreen />;
+  if (!customer) return <Navigate to="/klantportaal" replace />;
+  return children;
+}
+
+/** Mount <PortalAuthProvider> enkel voor de /klantportaal/*-routes (zie PortalAuthContext.tsx). */
+function PortalLayout() {
+  return (
+    <PortalAuthProvider>
+      <Outlet />
+    </PortalAuthProvider>
+  );
 }
 
 export function App() {
@@ -224,6 +249,18 @@ export function App() {
           </RequireAuth>
         }
       />
+      <Route element={<PortalLayout />}>
+        <Route path="/klantportaal" element={<PortalLoginPage />} />
+        <Route path="/klantportaal/verify" element={<PortalVerifyPage />} />
+        <Route
+          path="/klantportaal/werkbonnen"
+          element={
+            <RequirePortalAuth>
+              <PortalWorkOrdersPage />
+            </RequirePortalAuth>
+          }
+        />
+      </Route>
     </Routes>
   );
 }
