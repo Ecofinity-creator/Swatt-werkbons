@@ -864,6 +864,37 @@ export interface ListAuditLogResponseBody {
 }
 
 /**
+ * Klantvraag 13/9/2026 — "een doorzoekbare auditlog-UI". Nederlandse labels
+ * per actiecode, één plaats zodat AuditLogPage.tsx (scherm) en
+ * audit-log-workbook.ts (Excel-export) niet uit de pas kunnen lopen.
+ * Bewust geen enum op `AuditLog.action` zelf (zie schema.prisma) — een
+ * onbekende/nieuwe actiecode valt hier gewoon terug op de rauwe code
+ * (zie ACTION_LABELS-fallback in AuditLogPage.tsx), dus deze lijst mag
+ * achterlopen zonder dat het scherm breekt.
+ */
+export const AUDIT_LOG_ACTION_LABELS: Record<string, string> = {
+  TIME_ENTRY_CORRECTED: 'Tijd manueel gecorrigeerd',
+  WORK_ORDER_SIGNED: 'Werkbon ondertekend',
+  WORK_ORDER_SENT_TO_CUSTOMER: 'Werkbon-PDF naar klant gestuurd',
+  WORK_ORDER_REMINDER_SENT: 'Herinnering verstuurd',
+  WEEKLY_APPROVAL_SIGNED: 'Week ondertekend',
+  WEEKLY_APPROVAL_REOPENED: 'Week heropend',
+  PAYROLL_BATCH_CREATED: 'Personeelsuitbetaling aangemaakt',
+  PAYROLL_BATCH_REMOVED: 'Personeelsuitbetaling verwijderd',
+  INVOICE_BATCH_CREATED: 'Facturatiebatch aangemaakt',
+  INVOICE_BATCH_REMOVED: 'Facturatiebatch verwijderd',
+  INVOICE_BATCH_TEAMLEADER_DRAFT_CREATED: 'Conceptfactuur aangemaakt in Teamleader',
+  HOURS_EXPORT_MARKED_EXPORTED: 'Uren als geëxporteerd gemarkeerd',
+  USER_CREATED: 'Gebruiker aangemaakt',
+  USER_DEACTIVATED: 'Gebruiker gedeactiveerd',
+  USER_ACTIVATED: 'Gebruiker geactiveerd',
+  USER_ROLE_CHANGED: 'Rol gewijzigd',
+  USER_DELETED: 'Gebruiker verwijderd',
+  /** Nieuw — het exporteren van de auditlog zelf is voor aanbestedingen/verzekeraars net zo relevant om te kunnen aantonen als de onderliggende acties. */
+  AUDIT_LOG_EXPORTED: 'Auditlog geëxporteerd naar Excel',
+};
+
+/**
  * Op vraag (3/9/2026): "hoe kan de installateur naar de niet-getekende
  * werkbonnen van zijn klant gaan zonder een nieuwe aan te maken" — lichtgewicht
  * lijst-item, zie WorkOrderService.listDraftsForEmployeeOnProject().

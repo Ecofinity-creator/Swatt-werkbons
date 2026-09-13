@@ -257,3 +257,14 @@ export function MicrophoneIcon(props: IconProps) {
     </>,
   );
 }
+
+/** Zoekbalk — o.a. AuditLogPage.tsx. */
+export function SearchIcon(props: IconProps) {
+  return base(
+    props,
+    <>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="M20 20l-4.8-4.8" />
+    </>,
+  );
+}

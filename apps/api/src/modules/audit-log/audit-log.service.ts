@@ -52,23 +52,49 @@ export class AuditLogService {
     }
   }
 
+  /**
+   * Doorzoekbare auditlog (klantvraag 13/9/2026 — "een doorzoekbare
+   * auditlog-UI... sterk richting bedrijven die met aanbestedingen of
+   * verzekeringsvereisten werken"). `action` en `before` zijn nieuw t.o.v.
+   * de oorspronkelijke versie:
+   * - `action`: exacte match op de actiecode (zie AUDIT_LOG_ACTION_LABELS
+   *   in shared-types), voor het "Actie"-filter op AuditLogPage.tsx.
+   * - `before`: cursor voor "Meer laden" — enkel rijen strikt vóór dit
+   *   tijdstip. Werkt samen met `from`/`to` (allebei mogen tegelijk gezet
+   *   zijn, Prisma combineert meerdere operatoren op hetzelfde veld
+   *   probleemloos in één `createdAt`-object).
+   * - `order`: 'desc' (standaard, voor het scherm zelf — nieuwste eerst)
+   *   of 'asc' (voor de Excel-export hieronder — chronologisch leesbaar
+   *   voor een auditor/verzekeraar).
+   */
   async list(filters: {
     entityType?: string | undefined;
     actorUserId?: string | undefined;
+    action?: string | undefined;
     from?: Date | undefined;
     to?: Date | undefined;
+    before?: Date | undefined;
     limit?: number | undefined;
+    order?: 'asc' | 'desc' | undefined;
   } = {}): Promise<AuditLogRecord[]> {
+    const hasDateFilter = Boolean(filters.from || filters.to || filters.before);
     return this.prisma.auditLog.findMany({
       where: {
         ...(filters.entityType ? { entityType: filters.entityType } : {}),
         ...(filters.actorUserId ? { actorUserId: filters.actorUserId } : {}),
-        ...(filters.from || filters.to
-          ? { createdAt: { ...(filters.from ? { gte: filters.from } : {}), ...(filters.to ? { lte: filters.to } : {}) } }
+        ...(filters.action ? { action: filters.action } : {}),
+        ...(hasDateFilter
+          ? {
+              createdAt: {
+                ...(filters.from ? { gte: filters.from } : {}),
+                ...(filters.to ? { lte: filters.to } : {}),
+                ...(filters.before ? { lt: filters.before } : {}),
+              },
+            }
           : {}),
       },
       include: { actorUser: { select: { email: true, employee: { select: { displayName: true } } } } },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: filters.order ?? 'desc' },
       take: filters.limit ?? 200,
     }) as unknown as Promise<AuditLogRecord[]>;
   }
