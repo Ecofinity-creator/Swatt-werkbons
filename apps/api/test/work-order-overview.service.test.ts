@@ -72,7 +72,17 @@ function createFakePrisma(rows: FakeRow[]) {
             project: { name: r.projectName, projectNumber: 'P-1', customer: { name: r.customerName } },
             createdByEmployee: { displayName: `Medewerker ${r.createdByEmployeeId}` },
             signature: r.signedAt ? { signedAt: r.signedAt } : null,
-            timeEntries: [{ timeEntry: { startedAt: new Date('2026-08-15T08:00:00Z'), endedAt: new Date('2026-08-15T10:00:00Z'), pausedSeconds: 0 } }],
+            // Klantvraag 14/9/2026 — één tijdregistratie per betrokken medewerker
+            // (aanmaker + eventuele participanten), zodat employeeDisplayNames
+            // getest kan worden.
+            timeEntries: [r.createdByEmployeeId, ...r.participantEmployeeIds].map((employeeId) => ({
+              timeEntry: {
+                startedAt: new Date('2026-08-15T08:00:00Z'),
+                endedAt: new Date('2026-08-15T10:00:00Z'),
+                pausedSeconds: 0,
+                employee: { displayName: `Medewerker ${employeeId}` },
+              },
+            })),
           }));
       },
     },
@@ -142,9 +152,22 @@ describe('WorkOrderService.listForAdmin() — sectie 20: "Werkbonnenoverzicht"',
       projectName: 'Interventie CV-ketel',
       customerName: 'De Smet NV',
       createdByEmployeeDisplayName: 'Medewerker emp-peter',
+      employeeDisplayNames: ['Medewerker emp-peter'], // enkel de aanmaker, geen andere technici op deze werkbon
       totalSeconds: 7200,
       signedAt: new Date('2026-08-15T16:00:00Z'),
     });
+  });
+
+  it('klantvraag 14/9/2026 — employeeDisplayNames bevat de aanmaker én elke andere technicus op de werkbon (uniek, alfabetisch na de aanmaker)', async () => {
+    const prisma = createFakePrisma([
+      row({ id: 'wo-1', createdByEmployeeId: 'emp-zeno', participantEmployeeIds: ['emp-anna', 'emp-bert', 'emp-zeno'] }), // dubbele/eigen id genegeerd
+    ]);
+    const service = new WorkOrderService(prisma);
+
+    const [result] = await service.listForAdmin({});
+
+    // Aanmaker (Zeno) eerst, ondanks dat "Anna"/"Bert" alfabetisch vóór hem komen — daarna de rest alfabetisch, geen duplicaten.
+    expect(result?.employeeDisplayNames).toEqual(['Medewerker emp-zeno', 'Medewerker emp-anna', 'Medewerker emp-bert']);
   });
 });
 

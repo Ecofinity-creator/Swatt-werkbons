@@ -34,7 +34,13 @@ const LIST_ITEM_SELECT = {
   project: { select: { name: true, projectNumber: true, customer: { select: { name: true } } } },
   createdByEmployee: { select: { displayName: true } },
   signature: { select: { signedAt: true } },
-  timeEntries: { select: { timeEntry: { select: { startedAt: true, endedAt: true, pausedSeconds: true } } } },
+  // Klantvraag 14/9/2026 — "wie waar gewerkt heeft op welke dag": naast de
+  // aanmaker (createdByEmployee) ook de naam van elke medewerker met een
+  // gekoppelde tijdregistratie meesturen (sectie 8: meerdere technici kunnen
+  // op dezelfde werkbon staan), zie employeeDisplayNames hieronder.
+  timeEntries: {
+    select: { timeEntry: { select: { startedAt: true, endedAt: true, pausedSeconds: true, employee: { select: { displayName: true } } } } },
+  },
 } as const;
 
 interface WorkOrderOverviewItemRow {
@@ -47,10 +53,17 @@ interface WorkOrderOverviewItemRow {
   project: { name: string; projectNumber: string | null; customer: { name: string } };
   createdByEmployee: { displayName: string };
   signature: { signedAt: Date } | null;
-  timeEntries: Array<{ timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number } }>;
+  timeEntries: Array<{ timeEntry: { startedAt: Date; endedAt: Date | null; pausedSeconds: number; employee: { displayName: string } } }>;
 }
 
 function toOverviewItemRecord(row: WorkOrderOverviewItemRow): WorkOrderOverviewItemRecord {
+  // Klantvraag 14/9/2026 — aanmaker eerst (vertrouwd, was al zo), daarna elke
+  // andere betrokken medewerker (uit de tijdregistraties) uniek en
+  // alfabetisch — zodat een werkbon met meerdere technici (sectie 8) ze allemaal
+  // toont, niet enkel de aanmaker.
+  const otherNames = Array.from(new Set(row.timeEntries.map((link) => link.timeEntry.employee.displayName)))
+    .filter((name) => name !== row.createdByEmployee.displayName)
+    .sort((a, b) => a.localeCompare(b));
   return {
     id: row.id,
     workOrderNumber: row.workOrderNumber,
@@ -61,6 +74,7 @@ function toOverviewItemRecord(row: WorkOrderOverviewItemRow): WorkOrderOverviewI
     projectNumber: row.project.projectNumber,
     customerName: row.project.customer.name,
     createdByEmployeeDisplayName: row.createdByEmployee.displayName,
+    employeeDisplayNames: [row.createdByEmployee.displayName, ...otherNames],
     totalSeconds: row.timeEntries.reduce((sum, link) => sum + computeWorkedSeconds(link.timeEntry), 0),
     signedAt: row.signature?.signedAt ?? null,
     teamleaderUploadStatus: row.teamleaderUploadStatus,
@@ -200,6 +214,8 @@ export interface WorkOrderOverviewItemRecord {
   projectNumber: string | null;
   customerName: string;
   createdByEmployeeDisplayName: string;
+  /** Klantvraag 14/9/2026 — alle betrokken medewerkers (aanmaker eerst, dan uniek/alfabetisch de overige technici met een tijdregistratie op deze werkbon), zie toOverviewItemRecord hierboven. */
+  employeeDisplayNames: string[];
   totalSeconds: number;
   signedAt: Date | null;
   teamleaderUploadStatus: 'TEAMLEADER_UPLOAD_PENDING' | 'TEAMLEADER_UPLOADED' | 'TEAMLEADER_UPLOAD_FAILED';

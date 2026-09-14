@@ -924,6 +924,8 @@ export interface WorkOrderOverviewItemSummary {
   projectNumber: string | null;
   customerName: string;
   createdByEmployeeDisplayName: string;
+  /** Klantvraag 14/9/2026 — alle betrokken medewerkers (aanmaker eerst, dan uniek/alfabetisch de overige technici met een tijdregistratie op deze werkbon, zie sectie 8). */
+  employeeDisplayNames: string[];
   totalSeconds: number;
   /** `null` zolang niet ondertekend (status DRAFT). */
   signedAt: string | null;

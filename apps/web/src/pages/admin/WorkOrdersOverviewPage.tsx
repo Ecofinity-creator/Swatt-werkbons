@@ -1,16 +1,19 @@
-import type { WorkOrderOverviewItemSummary, WorkOrderStatus, WorkOrderTeamleaderUploadStatus } from '@swatt/shared-types';
+import type { PlanningEmployeeSummary, WorkOrderOverviewItemSummary, WorkOrderStatus, WorkOrderTeamleaderUploadStatus } from '@swatt/shared-types';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { workOrdersApi } from '../../api/client';
+import { planningApi, workOrdersApi } from '../../api/client';
 import { ApiRequestError } from '../../auth/AuthContext';
 
 /**
  * Sectie 20 uit de oorspronkelijke projectbrief: "Werkbonnenoverzicht" —
  * SUPERVISOR+. Filters: status, ondertekend ja/nee, project, Teamleader-
- * sync (datum/werknemer via de Van/Tot-velden en dropdown hieronder; klant
- * zit vervat in het project, facturatiestatus in status zelf —
- * READY_FOR_INVOICING/INVOICED zijn WorkOrderStatus-waarden, zie
- * WorkOrderService.listForAdmin() voor de volledige toelichting).
+ * sync, datum (Van/Tot) en medewerker (klantvraag 14/9/2026 — "hoe kan een
+ * supervisor opzoeken wie waar gewerkt heeft op welke dag": de backend
+ * ondersteunde `employeeId` al langer, zie WorkOrderService.listForAdmin(),
+ * enkel dit scherm had er nog geen dropdown voor). De medewerkerslijst voor
+ * die dropdown wordt hergebruikt van de planningmodule
+ * (`planningApi.admin.employees()`, zelfde SUPERVISOR+-rechtenniveau, geen
+ * nieuw endpoint nodig).
  */
 const STATUS_LABELS: Record<WorkOrderStatus, string> = {
   DRAFT: 'Concept',
@@ -30,20 +33,23 @@ const TEAMLEADER_UPLOAD_STATUS_LABELS: Record<WorkOrderTeamleaderUploadStatus, s
 
 export function WorkOrdersOverviewPage() {
   const [workOrders, setWorkOrders] = useState<WorkOrderOverviewItemSummary[] | null>(null);
+  const [employees, setEmployees] = useState<PlanningEmployeeSummary[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [signed, setSigned] = useState('');
   const [teamleaderUploadStatus, setTeamleaderUploadStatus] = useState('');
+  const [employeeId, setEmployeeId] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
 
   const load = useCallback(
-    async (filters: { status: string; signed: string; teamleaderUploadStatus: string; from: string; to: string }) => {
+    async (filters: { status: string; signed: string; teamleaderUploadStatus: string; employeeId: string; from: string; to: string }) => {
       try {
         const response = await workOrdersApi.listOverview({
           status: filters.status || undefined,
           signed: filters.signed === '' ? undefined : filters.signed === 'true',
           teamleaderUploadStatus: filters.teamleaderUploadStatus || undefined,
+          employeeId: filters.employeeId || undefined,
           from: filters.from ? new Date(filters.from).toISOString() : undefined,
           to: filters.to || undefined,
         });
@@ -57,8 +63,18 @@ export function WorkOrdersOverviewPage() {
   );
 
   useEffect(() => {
-    void load({ status, signed, teamleaderUploadStatus, from: fromDate, to: toDate });
-  }, [status, signed, teamleaderUploadStatus, fromDate, toDate, load]);
+    void load({ status, signed, teamleaderUploadStatus, employeeId, from: fromDate, to: toDate });
+  }, [status, signed, teamleaderUploadStatus, employeeId, fromDate, toDate, load]);
+
+  // Medewerkerslijst voor de dropdown hieronder — eenmalig opgehaald, wijzigt niet tijdens deze sessie.
+  useEffect(() => {
+    void planningApi.admin
+      .employees()
+      .then((response) => setEmployees([...response.employees].sort((a, b) => a.displayName.localeCompare(b.displayName))))
+      .catch(() => {
+        /* Niet-kritiek: bij een fout blijft de dropdown gewoon leeg (enkel "Alle medewerkers"), de rest van het scherm werkt door. */
+      });
+  }, []);
 
   return (
     <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
@@ -116,6 +132,21 @@ export function WorkOrdersOverviewPage() {
           </select>
         </label>
         <label className="text-sm text-neutral-600">
+          Medewerker
+          <select
+            value={employeeId}
+            onChange={(e) => setEmployeeId(e.target.value)}
+            className="mt-1 block rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+          >
+            <option value="">Alle medewerkers</option>
+            {employees.map((employee) => (
+              <option key={employee.employeeId} value={employee.employeeId}>
+                {employee.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm text-neutral-600">
           Van
           <input
             type="date"
@@ -164,7 +195,7 @@ export function WorkOrdersOverviewPage() {
                   <td className="px-4 py-3 text-neutral-600">
                     {workOrder.customerName} — {workOrder.projectName}
                   </td>
-                  <td className="px-4 py-3 text-neutral-600">{workOrder.createdByEmployeeDisplayName}</td>
+                  <td className="px-4 py-3 text-neutral-600">{workOrder.employeeDisplayNames.join(', ')}</td>
                   <td className="whitespace-nowrap px-4 py-3 text-neutral-500">{formatDate(workOrder.createdAt)}</td>
                   <td className="px-4 py-3 text-neutral-600">{formatHm(workOrder.totalSeconds)}</td>
                   <td className="px-4 py-3">{STATUS_LABELS[workOrder.status]}</td>

@@ -371,6 +371,7 @@ function toOverviewSummary(record: WorkOrderOverviewItemRecord): WorkOrderOvervi
     projectNumber: record.projectNumber,
     customerName: record.customerName,
     createdByEmployeeDisplayName: record.createdByEmployeeDisplayName,
+    employeeDisplayNames: record.employeeDisplayNames,
     totalSeconds: record.totalSeconds,
     signedAt: record.signedAt ? record.signedAt.toISOString() : null,
     teamleaderUploadStatus: record.teamleaderUploadStatus,
