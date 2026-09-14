@@ -367,8 +367,9 @@ describe('TeamleaderInvoiceService', () => {
       const lineItems = groups[0]?.line_items ?? [];
       expect(lineItems).toHaveLength(2); // samengevoegd tot 1 normale + 1 overuren-regel
 
-      const normal = lineItems.find((item) => (item.description as string).includes('Werkuren'));
-      const overtime = lineItems.find((item) => (item.description as string).includes('Overuren'));
+      // Klantvraag 14/9/2026: op een NIGHT_WORK-project heten de regels "Nachturen"/"Nacht overuren".
+      const normal = lineItems.find((item) => (item.description as string).includes('Nachturen'));
+      const overtime = lineItems.find((item) => (item.description as string).includes('Nacht overuren'));
       expect(normal?.quantity).toBeCloseTo(39, 2);
       expect(normal?.unit_price).toEqual({ amount: 97.5, tax: 'excluding' }); // 150% (nachtwerk) van 6500
       expect(overtime?.quantity).toBeCloseTo(3, 2);
@@ -377,6 +378,79 @@ describe('TeamleaderInvoiceService', () => {
       expect(normal?.description).toContain('WB-1');
       expect(normal?.description).toContain('WB-2');
       expect(normal?.description).toContain('WB-3');
+    });
+
+    it('SHIFT_WORK-project: uren-regels heten "Ploeguren"/"Ploeg overuren" i.p.v. "Werkuren"/"Overuren" (klantvraag 14/9/2026)', async () => {
+      const project = { ...project1, overtimeApplies: true, premiumType: 'SHIFT_WORK' as const };
+      const line = {
+        ...baseLine,
+        workOrder: {
+          ...baseLine.workOrder,
+          project,
+          timeEntries: [
+            {
+              timeEntry: {
+                startedAt: new Date('2026-08-20T07:00:00Z'),
+                endedAt: new Date('2026-08-20T16:30:00Z'), // 9u30 ⇒ 8u normaal + 1u30 overuren (DAILY-drempel)
+                pausedSeconds: 0,
+                employee: peter,
+              },
+            },
+          ],
+        },
+      };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = allLineItems(payload);
+      expect(lineItems).toHaveLength(2);
+
+      const ploeguren = lineItems.find((item) => (item.description as string).includes('Ploeguren'));
+      const ploegOveruren = lineItems.find((item) => (item.description as string).includes('Ploeg overuren'));
+      expect(ploeguren).toBeDefined();
+      expect(ploegOveruren).toBeDefined();
+      expect(ploeguren?.quantity).toBeCloseTo(8, 2);
+      expect(ploeguren?.unit_price).toEqual({ amount: 78, tax: 'excluding' }); // 120% (ploegentoeslag) van 6500
+      expect(ploegOveruren?.quantity).toBeCloseTo(1.5, 2);
+      expect(ploegOveruren?.unit_price).toEqual({ amount: 110.5, tax: 'excluding' }); // 120% (ploegentoeslag) + 50% (overuren) = 170% van 6500
+      // Geen "gewone" Werkuren/Overuren-tekst meer op een ploegenproject.
+      expect(lineItems.some((item) => (item.description as string).includes('— Werkuren'))).toBe(false);
+      expect(lineItems.some((item) => (item.description as string).includes('— Overuren'))).toBe(false);
+    });
+
+    it('NONE-toeslag met overuren: blijft gewoon "Werkuren"/"Overuren" heten (geen regressie)', async () => {
+      const project = { ...project1, overtimeApplies: true, premiumType: 'NONE' as const };
+      const line = {
+        ...baseLine,
+        workOrder: {
+          ...baseLine.workOrder,
+          project,
+          timeEntries: [
+            {
+              timeEntry: {
+                startedAt: new Date('2026-08-20T07:00:00Z'),
+                endedAt: new Date('2026-08-20T16:30:00Z'), // 9u30
+                pausedSeconds: 0,
+                employee: peter,
+              },
+            },
+          ],
+        },
+      };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const lineItems = allLineItems(payload);
+      expect(lineItems.some((item) => (item.description as string).includes('— Werkuren'))).toBe(true);
+      expect(lineItems.some((item) => (item.description as string).includes('— Overuren'))).toBe(true);
     });
   });
 

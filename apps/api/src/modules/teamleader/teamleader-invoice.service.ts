@@ -139,6 +139,18 @@ interface TeamleaderConnectionInvoiceSettings {
  *    week, zie splitEffectiveHours hieronder), enkel de FACTUURWEERGAVE
  *    groepeert altijd per kalenderweek.
  *
+ * Klantvraag 14/9/2026 — "normale uren, ploeguren en overuren uit elkaar
+ * halen": de regelomschrijving van de uren-regels volgt nu Project.premiumType
+ * (zie hoursLineLabels hieronder) i.p.v. altijd "Werkuren"/"Overuren" te
+ * gebruiken. Op een project met ploegentoeslag (SHIFT_WORK) heten de regels
+ * dus "Ploeguren"/"Ploeg overuren", op een project met nachttoeslag
+ * (NIGHT_WORK) "Nachturen"/"Nacht overuren" (zelfde patroon, symmetrisch
+ * doorgetrokken al was dit niet expliciet gevraagd) — bevestigd met Steven
+ * aan de hand van zijn voorbeeldfactuur (Factuur_403.pdf, met o.a. "Ploeg
+ * overuren Matthias Vanwymelbeke - week 31"). De berekening zelf (welk
+ * percentage van het basistarief, welke uren normaal vs. overuren zijn)
+ * verandert hier niet — enkel de tekst op de factuurregel.
+ *
  *    LET OP — de exacte vorm van Teamleader's `section`-veld op
  *    `grouped_lines` kon (nog) niet rechtstreeks tegen de actuele, live
  *    OpenAPI-spec geverifieerd worden (het gearchiveerde `apiary.apib` is
@@ -431,19 +443,38 @@ function buildGroupedLinesForBatch(
       const { normalPercent, overtimePercent } = computeRatePercent(group.project);
       const workOrderRefs = Array.from(group.workOrderNumbers).sort().join(', ');
 
+      const { normalLabel, overtimeLabel } = hoursLineLabels(group.project.premiumType);
       const items: LineItem[] = [];
       const normalHours = Math.round(group.normalHours * 100) / 100;
       const overtimeHours = Math.round(group.overtimeHours * 100) / 100;
       if (normalHours > 0) {
-        items.push(buildLineItem(normalHours, rate.rateCents!, normalPercent, taxRateId, `${workOrderRefs} — Werkuren`));
+        items.push(buildLineItem(normalHours, rate.rateCents!, normalPercent, taxRateId, `${workOrderRefs} — ${normalLabel}`));
       }
       if (overtimeHours > 0) {
-        items.push(buildLineItem(overtimeHours, rate.rateCents!, overtimePercent, taxRateId, `${workOrderRefs} — Overuren`));
+        items.push(buildLineItem(overtimeHours, rate.rateCents!, overtimePercent, taxRateId, `${workOrderRefs} — ${overtimeLabel}`));
       }
       items.push(...group.kmItems);
 
       return { section: buildSection(sectionTitle(group)), line_items: items };
     });
+}
+
+/**
+ * Klantvraag 14/9/2026 — "normale uren, ploeguren en overuren uit elkaar
+ * halen": welke tekst de uren-regels op de factuur krijgen, afhankelijk van
+ * Project.premiumType. Bewust in één functie geïsoleerd (zelfde reden als
+ * buildSection hieronder) zodat de exacte bewoording later op één plek
+ * bijgesteld kan worden.
+ */
+function hoursLineLabels(premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK'): { normalLabel: string; overtimeLabel: string } {
+  switch (premiumType) {
+    case 'SHIFT_WORK':
+      return { normalLabel: 'Ploeguren', overtimeLabel: 'Ploeg overuren' };
+    case 'NIGHT_WORK':
+      return { normalLabel: 'Nachturen', overtimeLabel: 'Nacht overuren' };
+    default:
+      return { normalLabel: 'Werkuren', overtimeLabel: 'Overuren' };
+  }
 }
 
 /** "Week 32 - Peter Janssens" — klantvraag 10/9/2026: "een hoofding in het vet per week met daarin de week en de naam van de technieker." */
