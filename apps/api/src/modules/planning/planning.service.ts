@@ -33,6 +33,21 @@ export class PlanningService {
     return this.findAssignments({ date: { gte: weekStart, lte: weekEnd } });
   }
 
+  /**
+   * Klantvraag 14/9/2026: maandoverzicht naast het bestaande weekoverzicht,
+   * zodat meteen duidelijk wordt wie er die maand nog niet (volledig)
+   * ingepland is (zie PlanningBoardPage.tsx — "Nog niet volledig ingepland").
+   * `monthIso`: "JJJJ-MM" (al gevalideerd door planningMonthQuerySchema).
+   */
+  async listMonth(monthIso: string): Promise<PlanningAssignmentRecord[]> {
+    const year = Number(monthIso.slice(0, 4));
+    const month = Number(monthIso.slice(5, 7));
+    const monthStart = new Date(Date.UTC(year, month - 1, 1));
+    // Dag 0 van de volgende maand = de laatste dag van deze maand (JS-Date-truc).
+    const monthEnd = new Date(Date.UTC(year, month, 0));
+    return this.findAssignments({ date: { gte: monthStart, lte: monthEnd } });
+  }
+
   /** Enkel actieve, nog niet-verstreken reeksen — zie ListPlanningSeriesResponseBody. */
   async listActiveSeries(): Promise<PlanningSeriesRecord[]> {
     const today = todayDateOnly();

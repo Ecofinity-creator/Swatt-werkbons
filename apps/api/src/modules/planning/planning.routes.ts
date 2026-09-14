@@ -6,6 +6,7 @@ import type {
   CreatePlanningSeriesResponseBody,
   ListMyPlanningResponseBody,
   ListPlanningEmployeesResponseBody,
+  ListPlanningMonthResponseBody,
   ListPlanningSeriesResponseBody,
   ListPlanningWeekResponseBody,
   PlanningAssignmentSummary,
@@ -20,6 +21,7 @@ import {
   createPlanningAssignmentBodySchema,
   createPlanningSeriesBodySchema,
   planningMineQuerySchema,
+  planningMonthQuerySchema,
   planningSeriesIdParamsSchema,
   planningWeekQuerySchema,
 } from './planning.schemas';
@@ -56,6 +58,16 @@ export default async function planningRoutes(app: FastifyInstance): Promise<void
     async (request): Promise<ListPlanningWeekResponseBody> => {
       const query = planningWeekQuerySchema.parse(request.query);
       const assignments = await service.listWeek(query.weekStart);
+      return { assignments: assignments.map(toAssignmentSummary) };
+    },
+  );
+
+  app.get(
+    '/admin/planning/month',
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+    async (request): Promise<ListPlanningMonthResponseBody> => {
+      const query = planningMonthQuerySchema.parse(request.query);
+      const assignments = await service.listMonth(query.month);
       return { assignments: assignments.map(toAssignmentSummary) };
     },
   );

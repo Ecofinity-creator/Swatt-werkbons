@@ -60,6 +60,30 @@ function weekDates(weekStart: Date): Date[] {
   return Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
 }
 
+/**
+ * Klantvraag 14/9/2026: maandoverzicht naast het bestaande weekoverzicht
+ * ("meteen duidelijk wie nog niet ingepland is") — zelfde bord, enkel de
+ * kolomreeks en de databron (`planningApi.admin.month` i.p.v. `.week`)
+ * verschillen. Zie ook PlanningService.listMonth op de backend.
+ */
+function firstOfMonth(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function addMonths(date: Date, months: number): Date {
+  return new Date(date.getFullYear(), date.getMonth() + months, 1);
+}
+
+function monthDates(monthStart: Date): Date[] {
+  const daysInMonth = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getDate();
+  return Array.from({ length: daysInMonth }, (_, i) => new Date(monthStart.getFullYear(), monthStart.getMonth(), i + 1));
+}
+
+/** "JJJJ-MM" — verwacht formaat van planningMonthQuerySchema op de backend. */
+function monthIso(date: Date): string {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+}
+
 function formatWeekdays(weekdays: number[]): string {
   const sorted = [...weekdays].sort((a, b) => a - b);
   if (sorted.length === 7) return 'Elke dag';
@@ -69,6 +93,22 @@ function formatWeekdays(weekdays: number[]): string {
 }
 
 const MONTHS = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+const MONTHS_FULL = [
+  'januari',
+  'februari',
+  'maart',
+  'april',
+  'mei',
+  'juni',
+  'juli',
+  'augustus',
+  'september',
+  'oktober',
+  'november',
+  'december',
+];
+
+type ViewMode = 'week' | 'month';
 
 interface ModalContext {
   employeeId: string;
@@ -78,7 +118,9 @@ interface ModalContext {
 }
 
 export function PlanningBoardPage() {
+  const [viewMode, setViewMode] = useState<ViewMode>('week');
   const [weekStart, setWeekStart] = useState<Date>(() => mondayOf(new Date()));
+  const [monthStart, setMonthStart] = useState<Date>(() => firstOfMonth(new Date()));
   const [employees, setEmployees] = useState<PlanningEmployeeSummary[] | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [assignments, setAssignments] = useState<PlanningAssignmentSummary[] | null>(null);
@@ -86,17 +128,19 @@ export function PlanningBoardPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [modalCtx, setModalCtx] = useState<ModalContext | null>(null);
 
-  const load = useCallback(async (currentWeekStart: Date) => {
+  const load = useCallback(async (mode: ViewMode, currentWeekStart: Date, currentMonthStart: Date) => {
     try {
-      const [employeesRes, projectsRes, weekRes, seriesRes] = await Promise.all([
+      const [employeesRes, projectsRes, rangeRes, seriesRes] = await Promise.all([
         planningApi.admin.employees(),
         projectsApi.list(),
-        planningApi.admin.week(isoLocal(currentWeekStart)),
+        mode === 'week'
+          ? planningApi.admin.week(isoLocal(currentWeekStart))
+          : planningApi.admin.month(monthIso(currentMonthStart)),
         planningApi.admin.series(),
       ]);
       setEmployees(employeesRes.employees);
       setProjects(projectsRes.projects);
-      setAssignments(weekRes.assignments);
+      setAssignments(rangeRes.assignments);
       setSeries(seriesRes.series);
       setErrorMessage(null);
     } catch (err) {
@@ -105,9 +149,9 @@ export function PlanningBoardPage() {
   }, []);
 
   useEffect(() => {
-    void load(weekStart);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` is stabiel (useCallback zonder deps), enkel weekStart moet een herlaad triggeren.
-  }, [weekStart]);
+    void load(viewMode, weekStart, monthStart);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` is stabiel (useCallback zonder deps); enkel een gewijzigde weergave/periode moet een herlaad triggeren.
+  }, [viewMode, weekStart, monthStart]);
 
   const projectColor = useMemo(() => {
     const map = new Map<string, (typeof PALETTE)[number]>();
@@ -123,31 +167,46 @@ export function PlanningBoardPage() {
     return map;
   }, [assignments]);
 
-  const dates = weekDates(weekStart);
+  const dates = viewMode === 'week' ? weekDates(weekStart) : monthDates(monthStart);
   const todayIso = isoLocal(new Date());
 
   const weekLabel = (() => {
-    const first = dates[0]!;
-    const last = dates[6]!;
+    const weekDatesForLabel = weekDates(weekStart);
+    const first = weekDatesForLabel[0]!;
+    const last = weekDatesForLabel[6]!;
     const sameMonth = first.getMonth() === last.getMonth();
     return sameMonth
       ? `${first.getDate()}–${last.getDate()} ${MONTHS[first.getMonth()] ?? ''} ${first.getFullYear()}`
       : `${first.getDate()} ${MONTHS[first.getMonth()] ?? ''} – ${last.getDate()} ${MONTHS[last.getMonth()] ?? ''} ${last.getFullYear()}`;
   })();
 
+  const monthLabel = `${MONTHS_FULL[monthStart.getMonth()] ?? ''} ${monthStart.getFullYear()}`;
+
   const openModalFor = (employeeId: string, employeeDisplayName: string, date: string) => {
     const existing = assignmentByKey.get(`${employeeId}_${date}`);
     setModalCtx({ employeeId, employeeDisplayName, date, currentProjectId: existing?.projectId ?? null });
   };
 
-  const openWeekdayCount = dates.filter((d) => d.getDay() !== 0 && d.getDay() !== 6).length;
+  const weekdayDates = dates.filter((d) => d.getDay() !== 0 && d.getDay() !== 6);
+  const openWeekdayCount = weekdayDates.length;
   const filledWeekdaySlots = (employees ?? []).reduce((total, emp) => {
-    return (
-      total +
-      dates.filter((d) => d.getDay() !== 0 && d.getDay() !== 6 && assignmentByKey.has(`${emp.employeeId}_${isoLocal(d)}`)).length
-    );
+    return total + weekdayDates.filter((d) => assignmentByKey.has(`${emp.employeeId}_${isoLocal(d)}`)).length;
   }, 0);
   const totalWeekdaySlots = (employees?.length ?? 0) * openWeekdayCount;
+
+  // Klantvraag 14/9/2026: "meteen duidelijk wie nog niet ingepland is" —
+  // enkel zinvol/geladen in de maandweergave (assignments dekken dan ook
+  // effectief de hele maand, niet enkel de actieve week).
+  const notFullyPlanned =
+    viewMode === 'month' && employees
+      ? employees
+          .map((emp) => ({
+            employee: emp,
+            filled: weekdayDates.filter((d) => assignmentByKey.has(`${emp.employeeId}_${isoLocal(d)}`)).length,
+          }))
+          .filter((row) => row.filled < weekdayDates.length)
+          .sort((a, b) => a.filled - b.filled)
+      : [];
 
   return (
     <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
@@ -166,28 +225,72 @@ export function PlanningBoardPage() {
       </header>
 
       <div className="mb-6 flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2 py-1.5 shadow-sm">
+        <div className="flex items-center gap-1 rounded-lg border border-neutral-200 bg-white p-1 shadow-sm">
           <button
             type="button"
-            onClick={() => setWeekStart((w) => addDays(w, -7))}
-            className="rounded-md px-2 py-1 text-sm text-neutral-600 hover:bg-neutral-100"
-            aria-label="Vorige week"
+            onClick={() => setViewMode('week')}
+            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+              viewMode === 'week' ? 'bg-swatt-gold text-swatt-black' : 'text-neutral-500 hover:bg-neutral-100'
+            }`}
           >
-            ‹
+            Week
           </button>
-          <span className="min-w-[14ch] text-center text-sm font-semibold">Week {weekLabel}</span>
           <button
             type="button"
-            onClick={() => setWeekStart((w) => addDays(w, 7))}
-            className="rounded-md px-2 py-1 text-sm text-neutral-600 hover:bg-neutral-100"
-            aria-label="Volgende week"
+            onClick={() => setViewMode('month')}
+            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+              viewMode === 'month' ? 'bg-swatt-gold text-swatt-black' : 'text-neutral-500 hover:bg-neutral-100'
+            }`}
           >
-            ›
+            Maand
           </button>
         </div>
+
+        {viewMode === 'week' ? (
+          <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2 py-1.5 shadow-sm">
+            <button
+              type="button"
+              onClick={() => setWeekStart((w) => addDays(w, -7))}
+              className="rounded-md px-2 py-1 text-sm text-neutral-600 hover:bg-neutral-100"
+              aria-label="Vorige week"
+            >
+              ‹
+            </button>
+            <span className="min-w-[14ch] text-center text-sm font-semibold">Week {weekLabel}</span>
+            <button
+              type="button"
+              onClick={() => setWeekStart((w) => addDays(w, 7))}
+              className="rounded-md px-2 py-1 text-sm text-neutral-600 hover:bg-neutral-100"
+              aria-label="Volgende week"
+            >
+              ›
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-2 py-1.5 shadow-sm">
+            <button
+              type="button"
+              onClick={() => setMonthStart((m) => addMonths(m, -1))}
+              className="rounded-md px-2 py-1 text-sm text-neutral-600 hover:bg-neutral-100"
+              aria-label="Vorige maand"
+            >
+              ‹
+            </button>
+            <span className="min-w-[14ch] text-center text-sm font-semibold capitalize">{monthLabel}</span>
+            <button
+              type="button"
+              onClick={() => setMonthStart((m) => addMonths(m, 1))}
+              className="rounded-md px-2 py-1 text-sm text-neutral-600 hover:bg-neutral-100"
+              aria-label="Volgende maand"
+            >
+              ›
+            </button>
+          </div>
+        )}
+
         <button
           type="button"
-          onClick={() => setWeekStart(mondayOf(new Date()))}
+          onClick={() => (viewMode === 'week' ? setWeekStart(mondayOf(new Date())) : setMonthStart(firstOfMonth(new Date())))}
           className="text-sm font-semibold text-swatt-gold-dark hover:underline"
         >
           Vandaag
@@ -198,6 +301,37 @@ export function PlanningBoardPage() {
           </span>
         )}
       </div>
+
+      {viewMode === 'month' && employees && employees.length > 0 && assignments && (
+        <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-500">Nog niet volledig ingepland</h2>
+          <p className="mb-3 mt-1 text-sm text-neutral-500">
+            Medewerkers met minstens één nog niet ingeplande werkdag in {monthLabel} — bovenaan wie nog helemaal niets
+            ingepland heeft.
+          </p>
+          {notFullyPlanned.length === 0 ? (
+            <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+              Iedereen is deze maand op elke werkdag ingepland.
+            </p>
+          ) : (
+            <ul className="flex flex-wrap gap-2">
+              {notFullyPlanned.map(({ employee, filled }) => (
+                <li
+                  key={employee.employeeId}
+                  className={`rounded-lg border px-3 py-1.5 text-sm ${
+                    filled === 0 ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-900'
+                  }`}
+                >
+                  <span className="font-medium">{employee.displayName}</span>
+                  <span className="ml-1.5 opacity-80">
+                    {filled} / {weekdayDates.length} werkdagen
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       {errorMessage && (
         <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -213,7 +347,7 @@ export function PlanningBoardPage() {
         </p>
       )}
 
-      {employees && employees.length > 0 && projects && assignments && (
+      {employees && employees.length > 0 && projects && assignments && viewMode === 'week' && (
         <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
           <table className="w-full min-w-[880px] border-collapse text-left text-sm">
             <thead className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
@@ -286,6 +420,83 @@ export function PlanningBoardPage() {
         </div>
       )}
 
+      {/*
+        Klantvraag 14/9/2026 — maandoverzicht: dezelfde interactie (klik op
+        een cel = toewijzen/wijzigen via AssignmentModal) maar compacte
+        cellen i.p.v. de volledige klant/project-kaart uit de weekweergave,
+        want tot 31 dagkolommen naast elkaar laten geen ruimte voor tekst.
+        Klant/projectnaam blijft wel beschikbaar via de title-tooltip.
+      */}
+      {employees && employees.length > 0 && projects && assignments && viewMode === 'month' && (
+        <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white shadow-sm">
+          <table className="border-collapse text-left text-sm" style={{ minWidth: `${192 + dates.length * 32}px` }}>
+            <thead className="border-b border-neutral-200 text-xs uppercase tracking-wide text-neutral-500">
+              <tr>
+                <th className="w-48 px-4 py-3">Medewerker</th>
+                {dates.map((date) => {
+                  const iso = isoLocal(date);
+                  const isToday = iso === todayIso;
+                  const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                  return (
+                    <th
+                      key={iso}
+                      title={`${DAY_LABELS_FULL[(date.getDay() + 6) % 7] ?? ''} ${date.getDate()} ${MONTHS[date.getMonth()] ?? ''}`}
+                      className={`w-8 px-0.5 py-3 text-center text-[11px] font-semibold normal-case ${
+                        isWeekend ? 'bg-neutral-50 text-neutral-400' : 'text-neutral-600'
+                      } ${isToday ? 'text-swatt-gold-dark' : ''}`}
+                    >
+                      {date.getDate()}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {employees.map((employee) => (
+                <tr key={employee.employeeId} className="border-b border-neutral-100 last:border-b-0">
+                  <td className="px-4 py-2 align-middle">
+                    <p className="font-medium">{employee.displayName}</p>
+                    <p className="text-xs text-neutral-400">
+                      {employee.employmentType === 'SUBCONTRACTOR' ? 'Onderaannemer' : 'Werknemer'}
+                    </p>
+                  </td>
+                  {dates.map((date) => {
+                    const iso = isoLocal(date);
+                    const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                    const assignment = assignmentByKey.get(`${employee.employeeId}_${iso}`);
+                    const color = assignment ? projectColor.get(assignment.projectId) : undefined;
+                    return (
+                      <td key={iso} className={`px-0.5 py-1 text-center align-middle ${isWeekend ? 'bg-neutral-50' : ''}`}>
+                        {assignment && color ? (
+                          <button
+                            type="button"
+                            onClick={() => openModalFor(employee.employeeId, employee.displayName, iso)}
+                            title={`${assignment.customerName} — ${assignment.projectName}${assignment.seriesId ? ' (herhaling)' : ''}`}
+                            className={`mx-auto flex h-6 w-6 items-center justify-center rounded border ${color.bg} ${color.border} hover:brightness-95`}
+                          >
+                            <span className={`h-2.5 w-2.5 rounded-full ${color.dot}`} />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openModalFor(employee.employeeId, employee.displayName, iso)}
+                            title="Nog niet ingepland — klik om toe te wijzen"
+                            aria-label={`${employee.displayName}: nog niet ingepland op ${date.getDate()} ${MONTHS[date.getMonth()] ?? ''}`}
+                            className="mx-auto flex h-6 w-6 items-center justify-center rounded border border-dashed border-neutral-300 text-xs text-neutral-300 hover:border-swatt-gold hover:text-swatt-gold-dark"
+                          >
+                            +
+                          </button>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {series && series.length > 0 && (
         <section className="mt-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-500">Actieve herhalingen</h2>
@@ -320,7 +531,7 @@ export function PlanningBoardPage() {
           onClose={() => setModalCtx(null)}
           onSaved={() => {
             setModalCtx(null);
-            void load(weekStart);
+            void load(viewMode, weekStart, monthStart);
           }}
         />
       )}
@@ -330,7 +541,7 @@ export function PlanningBoardPage() {
   async function stopSeries(seriesId: string) {
     try {
       await planningApi.admin.stopSeries(seriesId);
-      await load(weekStart);
+      await load(viewMode, weekStart, monthStart);
     } catch (err) {
       setErrorMessage(err instanceof ApiRequestError ? err.message : 'Kon deze herhaling niet stopzetten.');
     }

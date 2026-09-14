@@ -72,6 +72,7 @@ import type {
   WorkOrderResponseBody,
   ListPlanningEmployeesResponseBody,
   ListPlanningWeekResponseBody,
+  ListPlanningMonthResponseBody,
   ListPlanningSeriesResponseBody,
   ListMyPlanningResponseBody,
   CreatePlanningAssignmentBody,
@@ -696,6 +697,11 @@ export const planningApi = {
     employees: () => request<ListPlanningEmployeesResponseBody>('/admin/planning/employees', { method: 'GET' }),
     week: (weekStart: string) =>
       request<ListPlanningWeekResponseBody>(`/admin/planning/week?weekStart=${encodeURIComponent(weekStart)}`, {
+        method: 'GET',
+      }),
+    /** Klantvraag 14/9/2026: maandoverzicht. `month`: "JJJJ-MM". */
+    month: (month: string) =>
+      request<ListPlanningMonthResponseBody>(`/admin/planning/month?month=${encodeURIComponent(month)}`, {
         method: 'GET',
       }),
     series: () => request<ListPlanningSeriesResponseBody>('/admin/planning/series', { method: 'GET' }),

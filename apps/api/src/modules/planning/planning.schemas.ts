@@ -17,6 +17,11 @@ export const planningWeekQuerySchema = z.object({
   weekStart: dateOnlySchema,
 });
 
+/** Klantvraag 14/9/2026: maandoverzicht ("meteen duidelijk wie nog niet ingepland is"), zie PlanningBoardPage.tsx. */
+export const planningMonthQuerySchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/, { message: 'Ongeldige maand (verwacht: JJJJ-MM).' }),
+});
+
 export const planningMineQuerySchema = z.object({
   /** Aantal dagen vooruit (incl. vandaag) — default 14, zie EmployeeProjectsPage.tsx ("Mijn planning"). */
   days: z.coerce.number().int().min(1).max(60).optional().default(14),

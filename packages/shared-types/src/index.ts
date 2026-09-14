@@ -1303,6 +1303,11 @@ export interface ListPlanningWeekResponseBody {
   assignments: PlanningAssignmentSummary[];
 }
 
+/** Klantvraag 14/9/2026 — maandoverzicht, zelfde vorm als het weekoverzicht. */
+export interface ListPlanningMonthResponseBody {
+  assignments: PlanningAssignmentSummary[];
+}
+
 export interface ListPlanningSeriesResponseBody {
   series: PlanningSeriesSummary[];
 }

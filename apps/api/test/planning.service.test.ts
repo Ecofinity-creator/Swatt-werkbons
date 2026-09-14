@@ -543,6 +543,34 @@ describe('PlanningService', () => {
     });
   });
 
+  describe('listMonth (klantvraag 14/9/2026 — maandoverzicht)', () => {
+    it('geeft enkel toewijzingen binnen de opgegeven kalendermaand terug, incl. de eerste en laatste dag', async () => {
+      const { prisma, linkProject } = createFakePrisma();
+      const service = new PlanningService(prisma);
+      linkProject('emp-peter', 'proj-janssens');
+
+      // 2028 is een schrikkeljaar (deelbaar door 4, niet door 100) — februari
+      // heeft dus 29 dagen; meteen ook een test dat die laatste dag correct
+      // meegenomen wordt.
+      await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-janssens', date: '2028-01-31', createdById: 'u1' }); // net vóór de maand
+      await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-janssens', date: '2028-02-01', createdById: 'u1' }); // eerste dag
+      await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-janssens', date: '2028-02-15', createdById: 'u1' }); // ergens midden in de maand
+      await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-janssens', date: '2028-02-29', createdById: 'u1' }); // laatste dag (schrikkeljaar)
+      await service.setAssignment({ employeeId: 'emp-peter', projectId: 'proj-janssens', date: '2028-03-01', createdById: 'u1' }); // net ná de maand
+
+      const february = await service.listMonth('2028-02');
+
+      expect(february.map((a) => formatDateOnly(a.date)).sort()).toEqual(['2028-02-01', '2028-02-15', '2028-02-29']);
+    });
+
+    it('geeft een lege lijst terug voor een maand zonder toewijzingen', async () => {
+      const { prisma } = createFakePrisma();
+      const service = new PlanningService(prisma);
+
+      expect(await service.listMonth('2027-06')).toEqual([]);
+    });
+  });
+
   describe('listActiveSeries', () => {
     it('toont enkel actieve reeksen die nog niet volledig verstreken zijn', async () => {
       const { prisma, linkProject } = createFakePrisma();
