@@ -1264,6 +1264,8 @@ export interface MarkHoursExportedResponseBody {
  */
 export interface PlanningEmployeeSummary {
   employeeId: string;
+  /** Klantvraag 15/9/2026 — voor de "project koppelen"-doorlink vanuit het Planningsbord naar /backoffice/medewerkers/:userId. */
+  userId: string;
   displayName: string;
   employmentType: EmploymentType;
 }

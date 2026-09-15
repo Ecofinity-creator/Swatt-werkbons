@@ -112,6 +112,7 @@ type ViewMode = 'week' | 'month';
 
 interface ModalContext {
   employeeId: string;
+  employeeUserId: string;
   employeeDisplayName: string;
   date: string;
   currentProjectId: string | null;
@@ -182,9 +183,9 @@ export function PlanningBoardPage() {
 
   const monthLabel = `${MONTHS_FULL[monthStart.getMonth()] ?? ''} ${monthStart.getFullYear()}`;
 
-  const openModalFor = (employeeId: string, employeeDisplayName: string, date: string) => {
+  const openModalFor = (employeeId: string, employeeUserId: string, employeeDisplayName: string, date: string) => {
     const existing = assignmentByKey.get(`${employeeId}_${date}`);
-    setModalCtx({ employeeId, employeeDisplayName, date, currentProjectId: existing?.projectId ?? null });
+    setModalCtx({ employeeId, employeeUserId, employeeDisplayName, date, currentProjectId: existing?.projectId ?? null });
   };
 
   const weekdayDates = dates.filter((d) => d.getDay() !== 0 && d.getDay() !== 6);
@@ -392,7 +393,7 @@ export function PlanningBoardPage() {
                         {assignment && color ? (
                           <button
                             type="button"
-                            onClick={() => openModalFor(employee.employeeId, employee.displayName, iso)}
+                            onClick={() => openModalFor(employee.employeeId, employee.userId, employee.displayName, iso)}
                             className={`w-full rounded-lg border px-2 py-2 text-left text-xs leading-tight ${color.bg} ${color.text} ${color.border} hover:brightness-95`}
                           >
                             <span className="flex items-center gap-1 font-semibold">
@@ -404,7 +405,7 @@ export function PlanningBoardPage() {
                         ) : (
                           <button
                             type="button"
-                            onClick={() => openModalFor(employee.employeeId, employee.displayName, iso)}
+                            onClick={() => openModalFor(employee.employeeId, employee.userId, employee.displayName, iso)}
                             className="w-full rounded-lg border border-dashed border-neutral-300 px-2 py-2 text-xs text-neutral-400 hover:border-swatt-gold hover:text-swatt-gold-dark"
                           >
                             + Toewijzen
@@ -470,7 +471,7 @@ export function PlanningBoardPage() {
                         {assignment && color ? (
                           <button
                             type="button"
-                            onClick={() => openModalFor(employee.employeeId, employee.displayName, iso)}
+                            onClick={() => openModalFor(employee.employeeId, employee.userId, employee.displayName, iso)}
                             title={`${assignment.customerName} — ${assignment.projectName}${assignment.seriesId ? ' (herhaling)' : ''}`}
                             className={`mx-auto flex h-6 w-6 items-center justify-center rounded border ${color.bg} ${color.border} hover:brightness-95`}
                           >
@@ -479,7 +480,7 @@ export function PlanningBoardPage() {
                         ) : (
                           <button
                             type="button"
-                            onClick={() => openModalFor(employee.employeeId, employee.displayName, iso)}
+                            onClick={() => openModalFor(employee.employeeId, employee.userId, employee.displayName, iso)}
                             title="Nog niet ingepland — klik om toe te wijzen"
                             aria-label={`${employee.displayName}: nog niet ingepland op ${date.getDate()} ${MONTHS[date.getMonth()] ?? ''}`}
                             className="mx-auto flex h-6 w-6 items-center justify-center rounded border border-dashed border-neutral-300 text-xs text-neutral-300 hover:border-swatt-gold hover:text-swatt-gold-dark"
@@ -603,11 +604,29 @@ function AssignmentModal({
     (p) => linkedProjectIds?.has(p.id) || p.id === context.currentProjectId,
   );
 
-  const filteredProjects = availableProjects.filter((p) => {
+  const matchesSearch = (p: ProjectSummary) => {
     if (!search.trim()) return true;
     const haystack = `${p.customerName} ${p.name} ${p.address ?? ''}`.toLowerCase();
     return haystack.includes(search.trim().toLowerCase());
-  });
+  };
+
+  const filteredProjects = availableProjects.filter(matchesSearch);
+
+  // Klantvraag 15/9/2026: "een waarschuwing met een link om meteen het
+  // project te koppelen" — wanneer iemand zoekt naar een project dat wél
+  // bestaat maar (nog) niet aan deze medewerker gekoppeld is, verscheen dat
+  // project voorheen gewoon niet in de lijst, zonder enige verklaring ("Geen
+  // project gevonden"). Toon het nu apart, herkenbaar, met een rechtstreekse
+  // link naar de koppelpagina — enkel zinvol zodra de gekoppelde-projecten-
+  // lijst geladen is én er effectief gezocht wordt (anders zou dit bij het
+  // openen van de modal meteen de volledige, mogelijk lange projectenlijst
+  // tonen).
+  const unlinkedMatches =
+    linkedProjectIds && search.trim()
+      ? projects.filter((p) => !linkedProjectIds.has(p.id) && p.id !== context.currentProjectId && matchesSearch(p))
+      : [];
+
+  const linkEmployeeHref = `/backoffice/medewerkers/${context.employeeUserId}?koppel_project=${encodeURIComponent(search.trim())}`;
 
   const toggleDay = (day: number) => {
     setSelectedDays((current) => {
@@ -693,12 +712,48 @@ function AssignmentModal({
             <li className="mx-2 mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
               <p className="font-semibold">Deze medewerker heeft nog geen gekoppelde projecten.</p>
               <p className="mt-1 text-amber-800">
-                Koppel eerst minstens één project via <span className="font-medium">Medewerkers → {context.employeeDisplayName} → Gekoppelde projecten</span> — zo staan de prijsinstellingen vast vóór je dit inplant.
+                Koppel eerst minstens één project via{' '}
+                <Link
+                  to={`/backoffice/medewerkers/${context.employeeUserId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium underline hover:text-amber-950"
+                >
+                  Medewerkers → {context.employeeDisplayName} → Gekoppelde projecten
+                </Link>{' '}
+                (opent in een nieuw tabblad) — zo staan de prijsinstellingen vast vóór je dit inplant.
               </p>
             </li>
           )}
-          {linkedProjectIds && linkedProjectIds.size > 0 && filteredProjects.length === 0 && (
+          {linkedProjectIds && linkedProjectIds.size > 0 && filteredProjects.length === 0 && unlinkedMatches.length === 0 && (
             <li className="px-2 py-3 text-sm text-neutral-400">Geen project gevonden.</li>
+          )}
+          {unlinkedMatches.length > 0 && (
+            <li className="mx-2 mt-2 flex flex-col gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+              <p className="font-semibold">
+                {unlinkedMatches.length === 1 ? 'Dit project bestaat, maar is' : 'Deze projecten bestaan, maar zijn'} nog
+                niet gekoppeld aan {context.employeeDisplayName}:
+              </p>
+              <ul className="flex flex-col gap-1">
+                {unlinkedMatches.map((p) => (
+                  <li key={p.id} className="text-amber-800">
+                    <span className="font-medium">{p.customerName}</span> — {p.name}
+                  </li>
+                ))}
+              </ul>
+              <Link
+                to={linkEmployeeHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="self-start rounded-md border border-amber-300 bg-white px-3 py-1.5 font-semibold text-amber-900 underline hover:bg-amber-100"
+              >
+                Project koppelen + facturatiegegevens instellen →
+              </Link>
+              <p className="text-xs text-amber-700">
+                Opent in een nieuw tabblad, zonder deze toewijzing te verliezen. Nadien hier opnieuw zoeken om in te
+                plannen.
+              </p>
+            </li>
           )}
           {filteredProjects.map((project) => {
             const isSelected = project.id === selectedProjectId;

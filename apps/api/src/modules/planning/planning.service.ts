@@ -22,7 +22,12 @@ export class PlanningService {
   async listEmployees(): Promise<PlanningEmployeeRecord[]> {
     return this.prisma.employee.findMany({
       where: { user: { isActive: true } },
-      select: { id: true, displayName: true, employmentType: true },
+      // `userId` erbij (klantvraag 15/9/2026): de frontend heeft dit nodig om
+      // vanuit het Planningsbord rechtstreeks naar Backoffice → Medewerkers →
+      // {userId} te kunnen doorlinken (zie AssignmentModal in
+      // PlanningBoardPage.tsx — "project koppelen"-link), zonder een aparte
+      // opzoekronde.
+      select: { id: true, userId: true, displayName: true, employmentType: true },
       orderBy: { displayName: 'asc' },
     });
   }
@@ -278,6 +283,7 @@ export class PlanningService {
 
 export interface PlanningEmployeeRecord {
   id: string;
+  userId: string;
   displayName: string;
   employmentType: 'EMPLOYEE' | 'SUBCONTRACTOR';
 }

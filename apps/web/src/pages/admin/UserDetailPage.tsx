@@ -1,7 +1,7 @@
 import type { AdminUserSummary, EmploymentType, ProjectSummary, TeamleaderUserOption, UserRole } from '@swatt/shared-types';
 import { EMPLOYMENT_TYPES, USER_ROLES } from '@swatt/shared-types';
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { projectsApi, usersApi } from '../../api/client';
 import { ApiRequestError } from '../../auth/AuthContext';
 import { EMPLOYMENT_TYPE_LABELS, ROLE_LABELS } from '../../constants';
@@ -24,9 +24,17 @@ export function UserDetailPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSavingUser, setIsSavingUser] = useState(false);
 
+  // Klantvraag 15/9/2026: doorlink vanuit het Planningsbord ("dit project is
+  // nog niet gekoppeld") — `koppel_project` bevat dan de zoekterm die daar al
+  // ingetikt stond, zodat deze pagina meteen naar het juiste project
+  // scrollt/filtert i.p.v. de supervisor opnieuw te laten zoeken.
+  const [searchParams] = useSearchParams();
+  const koppelProjectHint = searchParams.get('koppel_project');
+  const linkedProjectsSectionRef = useRef<HTMLElement | null>(null);
+
   const [allProjects, setAllProjects] = useState<ProjectSummary[] | null>(null);
   const [assignedProjectIds, setAssignedProjectIds] = useState<Set<string>>(new Set());
-  const [projectSearch, setProjectSearch] = useState('');
+  const [projectSearch, setProjectSearch] = useState(koppelProjectHint ?? '');
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
 
   // Opnieuw uitnodigen / volledig verwijderen — zie usersApi.resendInvite/remove.
@@ -84,6 +92,17 @@ export function UserDetailPage() {
   useEffect(() => {
     if (user?.employee) void loadAssignments(user.employee.id);
   }, [user?.employee, loadAssignments]);
+
+  // Zodra de medewerker geladen is (en dus de "Gekoppelde projecten"-sectie
+  // effectief bestaat), meteen daarheen scrollen als we vanuit het
+  // Planningsbord kwamen — anders staat die sectie onderaan een lange pagina,
+  // buiten beeld.
+  useEffect(() => {
+    if (koppelProjectHint !== null && user?.employee) {
+      linkedProjectsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- enkel bij het verschijnen van de sectie moet dit vuren, niet bij elke render.
+  }, [user?.employee, koppelProjectHint]);
 
   useEffect(() => {
     projectsApi
@@ -411,13 +430,21 @@ export function UserDetailPage() {
           )}
 
           {user.employee && (
-            <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+            <section ref={linkedProjectsSectionRef} className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
               <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">
                 Gekoppelde projecten
               </h2>
               <p className="mb-4 text-sm text-neutral-500">
                 Enkel aangevinkte projecten kan {user.employee.displayName} selecteren om uren op te boeken.
               </p>
+
+              {koppelProjectHint !== null && (
+                <p className="mb-4 rounded-lg border border-swatt-gold/40 bg-swatt-gold/10 px-3 py-2 text-sm text-swatt-black">
+                  Je komt van het Planningsbord: koppel hieronder het project{koppelProjectHint ? ` "${koppelProjectHint}"` : ''} aan{' '}
+                  {user.employee.displayName} en controleer meteen het facturatietarief (Backoffice → Projecten) vóór
+                  je terugkeert om in te plannen.
+                </p>
+              )}
 
               <input
                 type="text"

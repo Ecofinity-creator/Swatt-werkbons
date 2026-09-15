@@ -155,6 +155,7 @@ function requireCurrentUser(request: FastifyRequest): NonNullable<FastifyRequest
 function toEmployeeSummary(employee: PlanningEmployeeRecord): PlanningEmployeeSummary {
   return {
     employeeId: employee.id,
+    userId: employee.userId,
     displayName: employee.displayName,
     employmentType: employee.employmentType,
   };
