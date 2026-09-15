@@ -687,8 +687,27 @@ function AssignmentModal({
     <div className="fixed inset-0 z-20 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-5">
       <div className="flex max-h-[85vh] w-full max-w-md flex-col rounded-t-2xl border border-neutral-200 bg-white shadow-xl sm:rounded-2xl">
         <div className="border-b border-neutral-100 px-5 py-4">
-          <p className="text-lg font-semibold">{context.employeeDisplayName}</p>
-          <p className="text-sm text-neutral-500">{dateLabel}</p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-lg font-semibold">{context.employeeDisplayName}</p>
+              <p className="text-sm text-neutral-500">{dateLabel}</p>
+            </div>
+            {/*
+              Klantvraag 15/9/2026 (vervolg): niet enkel een link tonen
+              wanneer een gezocht project toevallig niet gekoppeld blijkt,
+              maar altijd meteen in deze popup — een supervisor moet niet
+              eerst het "mislukte" zoekpad doorlopen om te ontdekken dat die
+              link bestaat.
+            */}
+            <Link
+              to={`/backoffice/medewerkers/${context.employeeUserId}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 whitespace-nowrap rounded-md border border-neutral-300 px-2.5 py-1.5 text-xs font-semibold text-neutral-600 hover:border-swatt-gold hover:text-swatt-gold-dark"
+            >
+              Projecten koppelen ↗
+            </Link>
+          </div>
         </div>
 
         {linkedProjectIds && linkedProjectIds.size > 0 && (
