@@ -114,6 +114,24 @@ services:
         # Render genereert deze zelf, base64-encoded — exact het formaat dat
         # config/env.ts verwacht (32 bytes na decodering).
         generateValue: true
+      # Kilometervergoeding (klantvraag 15/9/2026 — "verplaatsing manueel
+      # kunnen ingeven" testen: het veld toonde enkel de placeholder
+      # "Automatisch berekend" zonder effectieve waarde). Root cause: noch
+      # OPENROUTESERVICE_API_KEY noch HERE_API_KEY stond hier in render.yaml
+      # — dus ook niet in het Render-dashboard — waardoor `isDistanceServiceConfigured()`
+      # (config/env.ts) overal `false` teruggeeft en de km-afstand/vergoeding
+      # stil uitgeschakeld blijft, ook al staan bedrijfsadres en het
+      # km-tarief per project wél correct ingesteld (zie de expliciete
+      # waarschuwing hiervoor in teamleader.plugin.ts). Eén van de twee
+      # volstaat (HERE heeft voorrang als beide gezet zijn, zie
+      # getDistanceServiceProvider() in config/env.ts) — sync: false: zelf
+      # invullen in het Render-dashboard, zie apps/api/.env.example voor de
+      # toelichting en waar je een gratis API-key aanmaakt (openrouteservice.org
+      # resp. developer.here.com).
+      - key: OPENROUTESERVICE_API_KEY
+        sync: false
+      - key: HERE_API_KEY
+        sync: false
       # Phase 9 — zie de swatt-redis Key Value-instance hierboven.
       - key: REDIS_URL
         fromService:
