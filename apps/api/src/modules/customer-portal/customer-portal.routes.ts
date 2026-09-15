@@ -22,6 +22,14 @@ const CUSTOMER_PORTAL_COOKIE_SAME_SITE = env.COOKIE_SECURE ? 'none' : 'lax';
 const CUSTOMER_PORTAL_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // 30 dagen, zie CustomerPortalSessionService
 
 /**
+ * Fase 32 (klantvraag 15/9/2026 — rate limiting): zelfde risicoklasse als
+ * /auth/forgot-password (mail-bombing/enumeratie) resp. /auth/reset-password
+ * (token-giswerk) — zie de toelichting in auth.routes.ts.
+ */
+const REQUEST_LINK_RATE_LIMIT = { max: 5, timeWindow: '15 minutes' };
+const VERIFY_LINK_RATE_LIMIT = { max: 8, timeWindow: '15 minutes' };
+
+/**
  * Klantportaal (sectie 30, 13/9/2026): "eindklant logt in om eigen
  * werkbonnen/status te volgen". Magic-link-login, geen wachtwoord — zelfde
  * anti-enumeratie-filosofie als /auth/forgot-password (altijd hetzelfde
@@ -31,7 +39,7 @@ export default async function customerPortalRoutes(app: FastifyInstance): Promis
   const storage: StorageService = new DatabaseStorageService(app.prisma);
   const auditLogService = new AuditLogService(app.prisma);
 
-  app.post('/portal/auth/request-link', async (request, reply) => {
+  app.post('/portal/auth/request-link', { config: { rateLimit: REQUEST_LINK_RATE_LIMIT } }, async (request, reply) => {
     const body = requestCustomerPortalLinkBodySchema.parse(request.body);
 
     const customer = await app.customerPortalAuthService.findCustomerByEmail(body.email);
@@ -49,7 +57,7 @@ export default async function customerPortalRoutes(app: FastifyInstance): Promis
     return null;
   });
 
-  app.get('/portal/auth/verify', async (request, reply): Promise<VerifyCustomerPortalLinkResponseBody> => {
+  app.get('/portal/auth/verify', { config: { rateLimit: VERIFY_LINK_RATE_LIMIT } }, async (request, reply): Promise<VerifyCustomerPortalLinkResponseBody> => {
     const query = verifyCustomerPortalLinkQuerySchema.parse(request.query);
     const customer = await app.customerPortalAuthService.consumeLoginToken(query.token);
     const session = await app.customerPortalSessionService.createSession(customer.id);

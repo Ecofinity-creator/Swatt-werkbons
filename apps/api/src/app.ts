@@ -27,6 +27,7 @@ import userRoutes from './modules/users/user.routes';
 import workOrderRoutes from './modules/work-orders/work-order.routes';
 import { requireRole } from './modules/rbac/rbac.middleware';
 import prismaPlugin from './plugins/prisma';
+import rateLimitPlugin from './plugins/rate-limit';
 
 export async function buildApp(): Promise<FastifyInstance> {
   // Nooit gevoelige velden (wachtwoorden, cookies) mee-loggen — `redact` is een
@@ -43,6 +44,18 @@ export async function buildApp(): Promise<FastifyInstance> {
         : env.NODE_ENV === 'development'
           ? { level: 'info', redact, transport: { target: 'pino-pretty' } }
           : { level: 'info', redact },
+    // Fase 32 — productie draait altijd achter Render's edge/routing-laag
+    // (zie de CORS-preflight-toelichting hierboven), dus zonder dit zou
+    // `request.ip` overal de interne proxy-IP teruggeven i.p.v. het echte
+    // bezoekersadres. Dat had twee gevolgen: de nieuwe rate-limiter (per IP)
+    // zou per ongeluk voor IEDEREEN samen één emmer gebruiken i.p.v. per
+    // bezoeker, én — bijvangst, ontdekt tijdens deze wijziging — het
+    // IP-adres dat nu al bij elke klanthandtekening/weekgoedkeuring bewaard
+    // wordt (sectie 10/25, `ipAddress` op WorkOrderSignature/WeeklyApproval)
+    // stond hierdoor altijd op datzelfde interne proxy-adres, dus feitelijk
+    // waardeloos voor het beoogde juridische/audit-doel. Lokaal (geen
+    // proxy) blijft dit gewoon het echte socket-adres.
+    trustProxy: true,
   });
 
   // Render's edge/routing geeft (bevestigd via uitgebreid onderzoek — lokale
@@ -128,6 +141,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     credentials: true,
   });
   await app.register(cookie);
+  await app.register(rateLimitPlugin);
   await app.register(prismaPlugin);
   await app.register(authPlugin);
   await app.register(customerPortalPlugin);

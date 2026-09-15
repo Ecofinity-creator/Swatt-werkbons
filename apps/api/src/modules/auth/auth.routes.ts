@@ -20,8 +20,20 @@ import { SESSION_COOKIE_NAME } from './session.service';
  */
 const SESSION_COOKIE_SAME_SITE = env.COOKIE_SECURE ? 'none' : 'lax';
 
+/**
+ * Fase 32 — striktere rate-limit-drempels specifiek voor deze drie
+ * ongeauthenticeerde routes (brute-force-/account-enumeratie-/
+ * token-giswerk-bescherming), bovenop de royale globale limiet uit
+ * plugins/rate-limit.ts. Login iets ruimer dan de andere twee: een
+ * legitieme gebruiker die een paar keer zijn wachtwoord verkeerd typt, mag
+ * niet meteen buitengesloten worden.
+ */
+const LOGIN_RATE_LIMIT = { max: 8, timeWindow: '5 minutes' };
+const FORGOT_PASSWORD_RATE_LIMIT = { max: 5, timeWindow: '15 minutes' };
+const RESET_PASSWORD_RATE_LIMIT = { max: 8, timeWindow: '15 minutes' };
+
 export default async function authRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/auth/login', async (request, reply) => {
+  app.post('/auth/login', { config: { rateLimit: LOGIN_RATE_LIMIT } }, async (request, reply) => {
     const body = loginBodySchema.parse(request.body);
 
     const { sessionId, user, expiresAt } = await app.authService.login(body.email, body.password, body.rememberMe);
@@ -66,7 +78,7 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
     return { user: request.currentUser };
   });
 
-  app.post('/auth/forgot-password', async (request, reply) => {
+  app.post('/auth/forgot-password', { config: { rateLimit: FORGOT_PASSWORD_RATE_LIMIT } }, async (request, reply) => {
     const body = forgotPasswordBodySchema.parse(request.body);
 
     const user = await app.prisma.user.findUnique({ where: { email: body.email } });
@@ -90,7 +102,7 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
     return null;
   });
 
-  app.post('/auth/reset-password', async (request, reply) => {
+  app.post('/auth/reset-password', { config: { rateLimit: RESET_PASSWORD_RATE_LIMIT } }, async (request, reply) => {
     const body = resetPasswordBodySchema.parse(request.body);
     await app.passwordResetService.consumeToken(body.token, body.password);
     reply.code(204);

@@ -479,6 +479,23 @@ export const PlanningErrors = {
     ),
 };
 
+/**
+ * Fase 32 (klantvraag 15/9/2026 — rate limiting, sectie 25 van de
+ * oorspronkelijke projectbrief). Gebruikt door de `errorResponseBuilder`
+ * van `plugins/rate-limit.ts`, zodat een rate-limit-overschrijding hetzelfde
+ * `{ error: { code, message } }`-formaat krijgt als elke andere fout i.p.v.
+ * de kale default-body van `@fastify/rate-limit` (sectie 27: nooit een kale
+ * technische foutmelding tonen).
+ */
+export const RateLimitErrors = {
+  tooManyRequests: (retryAfterSeconds: number) =>
+    new ApiError(
+      429,
+      'RATE_LIMITED',
+      `Te veel pogingen. Probeer het opnieuw over ${retryAfterSeconds < 60 ? `${retryAfterSeconds} seconden` : `${Math.ceil(retryAfterSeconds / 60)} minuten`}.`,
+    ),
+};
+
 /** Klantportaal (sectie 30) — zie modules/customer-portal/. */
 export const CustomerPortalErrors = {
   notAuthenticated: () =>
