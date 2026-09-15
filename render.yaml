@@ -53,7 +53,20 @@ services:
     # daardoor gewoon niet, en `tsc` viel terug op een andere, niet-lokale
     # versie (vandaar de eerdere, verwarrende TS5108-fout). `--include=dev`
     # forceert installatie van devDependencies ongeacht NODE_ENV.
-    buildCommand: npm ci --include=dev && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
+    # `npm run prisma:generate` expliciet vóór de build (klantvraag 15/9/2026
+    # — buildfout "Exited with status 2" met tientallen TS-fouten als
+    # `Prisma.PrismaClientKnownRequestError does not exist`/`InputJsonValue`/
+    # `Decimal` niet bestaat, `WorkOrderPhotoCategory` ontbreekt in
+    # `@prisma/client`): `tsc` heeft de effectief gegenereerde Prisma Client
+    # (met de actuele enums/types uit ons schema) nodig, niet de kale
+    # placeholder-client die vóór een `prisma generate` in het pakket zit.
+    # Dit liep tot nu toe stilzwijgend mee via `@prisma/client`'s eigen
+    # postinstall-hook tijdens `npm ci` — kennelijk niet (meer) betrouwbaar
+    # genoeg om zonder expliciete stap op te vertrouwen. `ci.yml` (GitHub
+    # Actions) deed dit al langer wél expliciet als aparte stap; deze
+    # wijziging brengt de Render-build in lijn met diezelfde, al bewezen
+    # aanpak.
+    buildCommand: npm ci --include=dev && npm run prisma:generate --workspace=apps/api && npm run build --workspace=packages/shared-types && npm run build --workspace=apps/api
     startCommand: npm run prisma:migrate:deploy --workspace=apps/api && npm start --workspace=apps/api
     healthCheckPath: /health
     envVars:
