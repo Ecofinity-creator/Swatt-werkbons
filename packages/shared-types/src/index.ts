@@ -680,6 +680,26 @@ export interface WorkOrderSummary {
     projectKmFlatFeeThresholdKm: number;
     projectKmFlatFeeCents: number | null;
     projectKmRateAboveCentsPerKm: number;
+    /**
+     * Klantvraag 15-16/9/2026 (2e ronde van hetzelfde km-diagnose-traject):
+     * het adres dat effectief lokaal opgeslagen staat voor dit project (komt
+     * van de gekoppelde Teamleader-klant, zie ProjectSyncService), zodat
+     * meteen zichtbaar is of de sync het adres al heeft overgenomen —
+     * zonder dit moest telkens apart nagevraagd worden of "afstand =
+     * onbekend" kwam door een ontbrekend adres dan wel een mislukte
+     * geocoding-aanroep. `null` = nog geen adres bekend voor dit project.
+     */
+    projectAddress: string | null;
+    /**
+     * Klantvraag 15-16/9/2026: de foutmelding van de laatste on-demand
+     * geocoding-poging bij het openen van deze werkbon (zie work-order.routes.ts),
+     * indien die poging mislukte — normaal enkel in de Render-logs zichtbaar,
+     * nu ook hier zodat een HERE/OpenRouteService-fout (ongeldige key,
+     * quota, onvindbaar adres, ...) meteen op het scherm te zien is.
+     * `null` = geen poging nodig geweest, of de laatste poging (indien van
+     * toepassing) slaagde.
+     */
+    distanceComputeError: string | null;
   };
   createdByEmployeeDisplayName: string;
   createdAt: string;

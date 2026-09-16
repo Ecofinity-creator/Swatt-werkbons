@@ -958,10 +958,11 @@ function WorkOrderSummaryCard({ workOrder, showKmDebug }: { workOrder: WorkOrder
       {/* Op vraag (7/9/2026, na een lang debug-traject rond een externe OpenRouteService-storing, uiteindelijk opgelost via HERE als alternatieve provider) — enkel zichtbaar voor Supervisor+ én enkel wanneer de km-vergoeding zelf leeg blijft, als hulpmiddel om een toekomstig, gelijkaardig probleem sneller te kunnen diagnosticeren. */}
       {showKmDebug && (workOrder.kmAmountCents === null || workOrder.kmAmountCents === 0) && (
         <p className="mt-1 text-right text-[11px] text-neutral-500">
-          (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, afstand ={' '}
-          {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, drempel = {workOrder.kmDebug.projectKmFlatFeeThresholdKm}km h/t,
-          vaste prijs = {workOrder.kmDebug.projectKmFlatFeeCents ?? 'niet ingesteld'} cent, tarief boven = {workOrder.kmDebug.projectKmRateAboveCentsPerKm}{' '}
-          cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'})
+          (km-diagnose: projectId={workOrder.kmDebug.projectTeamleaderId}, klant={workOrder.kmDebug.customerName}, projectadres ={' '}
+          {workOrder.kmDebug.projectAddress ?? 'onbekend'}, afstand = {workOrder.kmDebug.projectKmDistanceOneWayMeters ?? 'onbekend'}m, drempel ={' '}
+          {workOrder.kmDebug.projectKmFlatFeeThresholdKm}km h/t, vaste prijs = {workOrder.kmDebug.projectKmFlatFeeCents ?? 'niet ingesteld'} cent,
+          tarief boven = {workOrder.kmDebug.projectKmRateAboveCentsPerKm} cent/km, kmAmountCents = {workOrder.kmAmountCents ?? 'null'}
+          {workOrder.kmDebug.distanceComputeError && <>, fout = &quot;{workOrder.kmDebug.distanceComputeError}&quot;</>})
         </p>
       )}
     </div>

@@ -470,6 +470,10 @@ async function toSummary(
   // op een toevallige bulk-beurt. Faalt bewust stil richting de gebruiker
   // (enkel loggen): de rest van het werkbon-scherm mag hier nooit door
   // vastlopen.
+  // Klantvraag 15-16/9/2026 (2e ronde): blootgesteld via kmDebug.distanceComputeError
+  // hieronder, zodat een mislukte on-demand-poging niet enkel in de Render-logs
+  // zichtbaar is — zie de toelichting bij WorkOrderSummary.kmDebug in shared-types.
+  let distanceComputeError: string | null = null;
   if (projectKmDistanceOneWayMeters === null && distanceService && companySettingsForKm.addressLine && workOrder.project.address) {
     try {
       const meters = await distanceService.getDrivingDistanceMetersOneWay(companySettingsForKm.addressLine, workOrder.project.address);
@@ -478,9 +482,16 @@ async function toSummary(
       // eslint-disable-next-line no-console
       console.log(`Km-afstand on-demand berekend bij het openen van werkbon ${workOrder.workOrderNumber} (project ${workOrder.projectId}): ${meters}m enkele rit.`);
     } catch (err) {
+      distanceComputeError = err instanceof Error ? err.message : String(err);
       // eslint-disable-next-line no-console
       console.error(`Km-afstand on-demand berekenen mislukt voor project ${workOrder.projectId} (adres "${workOrder.project.address}"):`, err);
     }
+  } else if (projectKmDistanceOneWayMeters === null && !distanceService) {
+    distanceComputeError = 'Geen afstandsprovider geconfigureerd (HERE_API_KEY of OPENROUTESERVICE_API_KEY ontbreekt).';
+  } else if (projectKmDistanceOneWayMeters === null && !companySettingsForKm.addressLine) {
+    distanceComputeError = 'Geen bedrijfsadres ingesteld in Bedrijfsgegevens.';
+  } else if (projectKmDistanceOneWayMeters === null && !workOrder.project.address) {
+    distanceComputeError = 'Geen adres gekend voor dit project (klant heeft geen (volledig) adres in Teamleader, of nog niet gesynchroniseerd).';
   }
 
   // Klantvraag 10/9/2026 — "verplaatsing manueel kunnen ingeven": vóór
@@ -519,6 +530,8 @@ async function toSummary(
       projectKmFlatFeeThresholdKm: kmPricing.flatFeeThresholdKm,
       projectKmFlatFeeCents: kmPricing.flatFeeCents,
       projectKmRateAboveCentsPerKm: kmPricing.rateAboveCentsPerKm,
+      projectAddress: workOrder.project.address,
+      distanceComputeError,
     },
     createdByEmployeeDisplayName: workOrder.createdByEmployee.displayName,
     createdAt: workOrder.createdAt.toISOString(),
