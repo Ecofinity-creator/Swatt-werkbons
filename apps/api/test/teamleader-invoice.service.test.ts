@@ -42,6 +42,9 @@ interface FakeProject {
   shiftWorkRatePercent: number;
   nightWorkRatePercent: number;
   hourlyRateCents: number | null;
+  /** Klantvraag 20/9/2026 — plaats van tewerkstelling op de factuurhoofding, zie sectionTitle() in teamleader-invoice.service.ts. */
+  address: string | null;
+  workLocationAddress: string | null;
 }
 
 interface FakeBatch {
@@ -120,6 +123,11 @@ const project1: FakeProject = {
   overtimeThresholdType: 'DAILY',
   overtimeWeeklyThresholdHours: null,
   hourlyRateCents: 6500,
+  // Bewust null/null: bestaande tests hieronder verwachten de hoofding
+  // zonder plaats-suffix ("Week 34 - Peter Janssens") — de klantvraag
+  // 20/9/2026-tests overschrijven dit expliciet per test.
+  address: null,
+  workLocationAddress: null,
   ...NO_PREMIUM,
 };
 
@@ -237,6 +245,50 @@ describe('TeamleaderInvoiceService', () => {
     expect(peterGroup.line_items[0]?.quantity).toBeCloseTo(2.28, 2);
     expect(wannesGroup.line_items[0]?.unit_price).toEqual({ amount: 65, tax: 'excluding' });
     expect(wannesGroup.line_items[0]?.quantity).toBeCloseTo(7.75, 2); // 8u15 - 0u30 pauze = 7u45
+  });
+
+  describe('klantvraag 20/9/2026 — plaats van tewerkstelling op de weekhoofding', () => {
+    it('valt terug op het klantadres wanneer geen supervisor-override is ingesteld', async () => {
+      const project = { ...project1, address: 'Kerkstraat 12, 9000 Gent', workLocationAddress: null };
+      const line = { ...baseLine, workOrder: { ...baseLine.workOrder, project } };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const groups = payload.grouped_lines as Array<{ section: { title: string } }>;
+      expect(groups[0]?.section).toEqual({ title: 'Week 34 - Peter Janssens - Kerkstraat 12, 9000 Gent' });
+    });
+
+    it('gebruikt de supervisor-override in plaats van het klantadres wanneer beide ingesteld zijn', async () => {
+      const project = { ...project1, address: 'Kerkstraat 12, 9000 Gent', workLocationAddress: 'Werf Industrielaan 8, 9000 Gent' };
+      const line = { ...baseLine, workOrder: { ...baseLine.workOrder, project } };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const groups = payload.grouped_lines as Array<{ section: { title: string } }>;
+      expect(groups[0]?.section).toEqual({ title: 'Week 34 - Peter Janssens - Werf Industrielaan 8, 9000 Gent' });
+    });
+
+    it('laat de hoofding ongewijzigd wanneer noch een override, noch een klantadres bekend is', async () => {
+      const project = { ...project1, address: null, workLocationAddress: null };
+      const line = { ...baseLine, workOrder: { ...baseLine.workOrder, project } };
+      const { prisma } = createFakePrisma(baseBatch({ lines: [line] }), validSettings);
+      const client = fakeClient(async () => ({ data: { id: 'tl-invoice-1' } }));
+      const service = new TeamleaderInvoiceService(prisma, client);
+
+      await service.createDraftInvoice('batch-1');
+
+      const [, payload] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+      const groups = payload.grouped_lines as Array<{ section: { title: string } }>;
+      expect(groups[0]?.section).toEqual({ title: 'Week 34 - Peter Janssens' });
+    });
   });
 
   it('gebruikt de eenmalige batch-override wanneer het project geen standaardtarief heeft', async () => {

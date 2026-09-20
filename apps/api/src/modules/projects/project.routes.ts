@@ -12,6 +12,7 @@ import type {
   UpdateProjectKmSettingsResponseBody,
   UpdateProjectOvertimeSettingsResponseBody,
   UpdateProjectSigningModeResponseBody,
+  UpdateProjectWorkLocationResponseBody,
 } from '@swatt/shared-types';
 import { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
@@ -28,6 +29,7 @@ import {
   updateProjectKmSettingsBodySchema,
   updateProjectOvertimeSettingsBodySchema,
   updateProjectSigningModeBodySchema,
+  updateProjectWorkLocationBodySchema,
 } from './project.schemas';
 
 /**
@@ -356,6 +358,34 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
       return { hourlyRateCents: project.hourlyRateCents };
     },
   );
+
+  /**
+   * Klantvraag 20/9/2026 — "de plaats van tewerkstelling ontbreekt nog op de
+   * hoofding van elke week [...] moet kunnen ingesteld worden in het project
+   * door de supervisor. default wordt door de app al het klantadres
+   * ingevuld wat meestal ook juist is." Bewust SUPERVISOR (niet ADMIN-only
+   * zoals km-settings/hourly-rate hierboven): dit raakt geen bedrag, enkel
+   * een adresvermelding op de factuur (zie sectionTitle() in
+   * teamleader-invoice.service.ts) — zelfde permissieniveau als de
+   * milestone-routes en signing-mode hierboven. `workLocationAddress: null`
+   * wist de override weer, waarna de factuurhoofding terugvalt op
+   * `project.address` (het gesynchroniseerde klantadres).
+   */
+  app.post(
+    '/admin/projects/:id/work-location',
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+    async (request): Promise<UpdateProjectWorkLocationResponseBody> => {
+      const params = projectIdParamsSchema.parse(request.params);
+      const body = updateProjectWorkLocationBodySchema.parse(request.body);
+      await assertProjectExists(app, params.id);
+
+      const project = await app.prisma.project.update({
+        where: { id: params.id },
+        data: { workLocationAddress: body.workLocationAddress },
+      });
+      return { workLocationAddress: project.workLocationAddress };
+    },
+  );
 }
 
 function toMilestoneSummary(milestone: {
@@ -420,6 +450,8 @@ function toProjectSummary(project: {
   kmRateAboveCentsPerKm: number;
   /** Klantvraag 10/9/2026 — verkoopprijs per uur, `null` zolang nog niet ingesteld. */
   hourlyRateCents: number | null;
+  /** Klantvraag 20/9/2026 — plaats van tewerkstelling op de factuurhoofding, `null` = valt terug op `address` hierboven. */
+  workLocationAddress: string | null;
   customer: { name: string };
 }): ProjectSummary {
   return {
@@ -449,5 +481,6 @@ function toProjectSummary(project: {
     kmFlatFeeCents: project.kmFlatFeeCents,
     kmRateAboveCentsPerKm: project.kmRateAboveCentsPerKm,
     hourlyRateCents: project.hourlyRateCents,
+    workLocationAddress: project.workLocationAddress,
   };
 }

@@ -62,6 +62,9 @@ interface DraftBatchLineRow {
       nightWorkRatePercent: number;
       /** Klantvraag 10/9/2026 — verkoopprijs per uur, `null` zolang nog niet ingesteld. */
       hourlyRateCents: number | null;
+      /** Klantvraag 20/9/2026 — plaats van tewerkstelling op de factuurhoofding, zie sectionTitle() hieronder. `workLocationAddress` (supervisor-override) heeft voorrang op `address` (gesynchroniseerd klantadres). */
+      address: string | null;
+      workLocationAddress: string | null;
     };
     timeEntries: Array<{
       timeEntry: {
@@ -477,10 +480,20 @@ function hoursLineLabels(premiumType: 'NONE' | 'SHIFT_WORK' | 'NIGHT_WORK'): { n
   }
 }
 
-/** "Week 32 - Peter Janssens" — klantvraag 10/9/2026: "een hoofding in het vet per week met daarin de week en de naam van de technieker." */
+/**
+ * "Week 32 - Peter Janssens" — klantvraag 10/9/2026: "een hoofding in het vet
+ * per week met daarin de week en de naam van de technieker." Uitgebreid op
+ * klantvraag 20/9/2026 met de plaats van tewerkstelling: "Week 32 - Peter
+ * Janssens - Kerkstraat 12, 9000 Gent". `workLocationAddress` (supervisor-
+ * override, zie project.routes.ts) heeft voorrang op `address` (het
+ * gesynchroniseerde klantadres, de default); ontbreken beide (bv. project
+ * zonder adres in Teamleader), dan blijft de hoofding zoals voorheen zonder
+ * plaats-suffix — nooit een lege/rare toevoeging tonen.
+ */
 function sectionTitle(group: WeekGroup): string {
   const weekNumber = Number(group.weekKey.split('-W')[1]);
-  return `Week ${weekNumber} - ${group.displayName}`;
+  const location = group.project.workLocationAddress ?? group.project.address;
+  return location ? `Week ${weekNumber} - ${group.displayName} - ${location}` : `Week ${weekNumber} - ${group.displayName}`;
 }
 
 /**

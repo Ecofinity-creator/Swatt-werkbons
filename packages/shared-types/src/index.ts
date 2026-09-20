@@ -226,6 +226,14 @@ export interface ProjectSummary {
    * InvoiceBatchProjectRateSummary).
    */
   hourlyRateCents: number | null;
+  /**
+   * Klantvraag 20/9/2026 — "plaats van tewerkstelling" op de hoofding van
+   * elke week op de Teamleader-conceptfactuur (zie sectionTitle() in
+   * teamleader-invoice.service.ts). Instelbaar door een SUPERVISOR. `null` =
+   * nog niet expliciet ingesteld — de factuur gebruikt dan `address`
+   * hierboven (het gesynchroniseerde klantadres) als default.
+   */
+  workLocationAddress: string | null;
 }
 
 export interface ListProjectsResponseBody {
@@ -301,6 +309,20 @@ export interface UpdateProjectHourlyRateBody {
 
 export interface UpdateProjectHourlyRateResponseBody {
   hourlyRateCents: number | null;
+}
+
+/**
+ * Body/response van POST /admin/projects/:id/work-location (klantvraag
+ * 20/9/2026 — SUPERVISOR, geen financiële impact). `workLocationAddress:
+ * null` wist de override weer (dan valt de factuurhoofding terug op het
+ * klantadres, ProjectSummary.address).
+ */
+export interface UpdateProjectWorkLocationBody {
+  workLocationAddress: string | null;
+}
+
+export interface UpdateProjectWorkLocationResponseBody {
+  workLocationAddress: string | null;
 }
 
 /** Response van GET /work-orders/pending-week?projectId=... (Phase 12, deel B) — enkel relevant op een project met signingMode='WEEKLY'. */

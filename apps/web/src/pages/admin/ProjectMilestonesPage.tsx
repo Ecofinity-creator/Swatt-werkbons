@@ -105,6 +105,7 @@ export function ProjectMilestonesPage() {
               <OvertimeSettingsPanel key={`overtime-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <SigningModePanel key={`signing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <KmPricingPanel key={`km-pricing-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
+              <WorkLocationPanel key={`work-location-${selectedProject.id}`} project={selectedProject} onUpdated={loadProjects} />
               <KmDistancePanel key={`km-${selectedProject.id}`} project={selectedProject} />
               <MilestonePanel key={selectedProject.id} project={selectedProject} />
             </>
@@ -791,6 +792,72 @@ function KmPricingPanel({ project, onUpdated }: { project: ProjectSummary; onUpd
       <p className="mt-3 text-xs text-neutral-500">
         Leeg bij "Vaste prijs" = km-vergoeding uitgeschakeld voor dit project. Drempel geldt op de heen-en-
         terug-afstand (zie Kilometerafstand hieronder).
+      </p>
+    </section>
+  );
+}
+
+/**
+ * Klantvraag 20/9/2026 — "de plaats van tewerkstelling ontbreekt nog op de
+ * hoofding van elke week, [...] moet kunnen ingesteld worden in het project
+ * door de supervisor. default wordt door de app al het klantadres ingevuld
+ * wat meestal ook juist is." Bewust SUPERVISOR+ (net als SigningModePanel/
+ * MilestonePanel), geen isAdmin-check zoals bij HourlyRatePanel/KmPricingPanel
+ * hierboven: dit raakt geen bedrag, enkel een adresvermelding op de
+ * Teamleader-conceptfactuur (zie sectionTitle() in
+ * teamleader-invoice.service.ts). Leeg input-veld = override wissen (valt
+ * terug op project.address, getoond als placeholder wanneer nog niet
+ * ingesteld).
+ */
+function WorkLocationPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
+  const [locationInput, setLocationInput] = useState(project.workLocationAddress ?? '');
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setLocationInput(project.workLocationAddress ?? '');
+  }, [project]);
+
+  async function save() {
+    const trimmed = locationInput.trim();
+    setIsSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await projectsApi.workLocation.update(project.id, { workLocationAddress: trimmed === '' ? null : trimmed });
+      setSaved(true);
+      onUpdated();
+    } catch (err) {
+      setError(err instanceof ApiRequestError ? err.message : 'Opslaan van de plaats van tewerkstelling is mislukt.');
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <section className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+      <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Plaats van tewerkstelling</h2>
+      <p className="mb-4 text-sm text-neutral-500">
+        {project.customerName} — {project.name}
+      </p>
+
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+      {saved && <p className="mb-3 text-sm text-emerald-700">Plaats van tewerkstelling opgeslagen.</p>}
+
+      <input
+        type="text"
+        value={locationInput}
+        onChange={(e) => setLocationInput(e.target.value)}
+        onBlur={() => void save()}
+        placeholder={project.address ?? 'Onbekend — nog geen klantadres gesynchroniseerd'}
+        disabled={isSaving}
+        className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
+      />
+      <p className="mt-3 text-xs text-neutral-500">
+        Verschijnt op de hoofding van elke week op de Teamleader-conceptfactuur. Leeg = gebruik het klantadres
+        (hierboven als voorbeeldtekst getoond); vul dit enkel in wanneer de werkelijke werf een ander adres heeft dan
+        het klantadres.
       </p>
     </section>
   );

@@ -665,6 +665,18 @@ model Project {
   /// verlaten.
   hourlyRateCents Int? @map("hourly_rate_cents")
 
+  /// Klantvraag 20/9/2026 — "de plaats van tewerkstelling ontbreekt nog op de
+  /// hoofding van elke week" (facturatie-PDF, zie sectionTitle() in
+  /// teamleader-invoice.service.ts). Instelbaar door een SUPERVISOR op het
+  /// backoffice-projectscherm (bewust géén ADMIN-only, in tegenstelling tot
+  /// hourlyRateCents/kmFlatFeeCents hierboven: dit raakt geen bedrag, enkel
+  /// een adresvermelding op de factuur). `null` = nog niet expliciet
+  /// ingesteld — de app valt dan terug op het klantadres (`address`
+  /// hierboven), wat volgens Steven "meestal ook juist is". Een supervisor
+  /// kan dit overschrijven wanneer de werkelijke werf een ander adres heeft
+  /// dan het klant-/factuuradres (bv. een filiaal of een tijdelijke werf).
+  workLocationAddress String? @map("work_location_address")
+
   /// Eenmalige tariefoverrides per factuurbatch, enkel gebruikt wanneer
   /// `hourlyRateCents` hierboven nog niet is ingevuld (zie
   /// InvoiceBatchProjectRate hieronder).

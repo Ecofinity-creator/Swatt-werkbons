@@ -65,6 +65,8 @@ import type {
   UpdateInvoiceBatchProjectRateResponseBody,
   UpdateProjectHourlyRateBody,
   UpdateProjectHourlyRateResponseBody,
+  UpdateProjectWorkLocationBody,
+  UpdateProjectWorkLocationResponseBody,
   UpdateTeamleaderSettingsBody,
   UpdateUserBody,
   UpdateUserResponseBody,
@@ -680,6 +682,14 @@ export const projectsApi = {
   hourlyRate: {
     update: (projectId: string, body: UpdateProjectHourlyRateBody) =>
       request<UpdateProjectHourlyRateResponseBody>(`/admin/projects/${projectId}/hourly-rate`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+  },
+  /** Klantvraag 20/9/2026 — plaats van tewerkstelling op de factuurhoofding. SUPERVISOR+. */
+  workLocation: {
+    update: (projectId: string, body: UpdateProjectWorkLocationBody) =>
+      request<UpdateProjectWorkLocationResponseBody>(`/admin/projects/${projectId}/work-location`, {
         method: 'POST',
         body: JSON.stringify(body),
       }),

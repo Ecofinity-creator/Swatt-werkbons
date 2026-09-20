@@ -84,3 +84,19 @@ export const updateProjectKmSettingsBodySchema = z.object({
 export const updateProjectHourlyRateBodySchema = z.object({
   hourlyRateCents: z.number().int().positive().nullable(),
 });
+
+/**
+ * Klantvraag 20/9/2026 — "plaats van tewerkstelling" op de factuurhoofding.
+ * `null`/leeg wist de override weer (dan valt de app terug op het
+ * klantadres). Trim + max-lengte is enkel typefoutbescherming, geen echte
+ * zakelijke limiet — een leeg getrimd veld wordt behandeld als "wissen"
+ * (null), niet als een lege string.
+ */
+export const updateProjectWorkLocationBodySchema = z.object({
+  workLocationAddress: z
+    .string()
+    .trim()
+    .max(500)
+    .nullable()
+    .transform((value) => (value === '' ? null : value)),
+});
