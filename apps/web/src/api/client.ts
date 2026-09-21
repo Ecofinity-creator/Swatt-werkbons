@@ -131,6 +131,31 @@ export class ApiRequestError extends Error {
   }
 }
 
+/**
+ * Klantvraag/bugreport 21/9/2026 — "ik krijg continu de melding dat ik niet
+ * ingelogd ben, niettegenstaande ik wel ben ingelogd" + "ik kan ook niet
+ * uitloggen, krijg daar ook die melding." Kernoorzaak: de PWA's service
+ * worker cachet `/auth/me` (zie vite.config.ts's `runtimeCaching`,
+ * NetworkFirst met een 4s-timeout) — bij een trage/wisselvallige
+ * mobiele verbinding valt die terug op een tot 7 dagen oud gecached
+ * "ingelogd"-antwoord, terwijl de échte sessie intussen al verlopen is.
+ * AuthContext.tsx zelf haalt `/auth/me` bovendien maar ÉÉN keer op (bij
+ * het laden), dus zonder deze events blijft de UI "Ingelogd als..." tonen
+ * terwijl elke ECHTE aanroep (Mijn projecten, Uitloggen, ...) intussen
+ * correct een 401 terugkrijgt van de backend — een doodlopend schermpje
+ * zonder weg terug naar het inlogscherm.
+ *
+ * Wanneer een NIET-gecachte aanroep (elke aanroep behalve `/auth/me` zelf,
+ * die altijd via het NetworkFirst-cache-pad kan lopen) een echte 401 met
+ * deze foutcode teruggeeft, dispatchen we dit event: AuthContext.tsx
+ * luistert hierop en wist meteen de lokale `user`-state, zodat
+ * `RequireAuth` (App.tsx) automatisch terugvalt op /login — in plaats van
+ * dat de gebruiker vastzit op een scherm dat "ingelogd" beweert.
+ */
+export const SESSION_EXPIRED_EVENT = 'swatt:session-expired';
+/** Zelfde probleem, maar voor het klantportaal (PortalAuthContext.tsx) — eigen sessie, eigen event. */
+export const PORTAL_SESSION_EXPIRED_EVENT = 'swatt:portal-session-expired';
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -174,10 +199,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     const errorBody = body as ApiErrorBody;
-    throw new ApiRequestError(
-      errorBody.error?.code ?? 'UNKNOWN_ERROR',
-      errorBody.error?.message ?? `Er ging iets mis (HTTP ${response.status}). Probeer het later opnieuw.`,
-    );
+    const code = errorBody.error?.code ?? 'UNKNOWN_ERROR';
+    // Zie SESSION_EXPIRED_EVENT hierboven — laat AuthContext/PortalAuthContext
+    // meteen hun lokale "ingelogd"-state opruimen bij een echte 401, i.p.v. te
+    // wachten tot een volgende (mogelijk nooit komende) /auth/me-herlaadbeurt.
+    if (code === 'NOT_AUTHENTICATED') {
+      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    } else if (code === 'CUSTOMER_PORTAL_NOT_AUTHENTICATED') {
+      window.dispatchEvent(new Event(PORTAL_SESSION_EXPIRED_EVENT));
+    }
+    throw new ApiRequestError(code, errorBody.error?.message ?? `Er ging iets mis (HTTP ${response.status}). Probeer het later opnieuw.`);
   }
 
   return body as T;

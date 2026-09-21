@@ -1,7 +1,7 @@
 import type { AuthenticatedUser } from '@swatt/shared-types';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ApiRequestError, authApi } from '../api/client';
+import { ApiRequestError, authApi, SESSION_EXPIRED_EVENT } from '../api/client';
 
 interface AuthContextValue {
   user: AuthenticatedUser | null;
@@ -25,14 +25,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setIsLoading(false));
   }, []);
 
+  // Bugreport 21/9/2026 ("ik krijg continu de melding dat ik niet ingelogd
+  // ben, niettegenstaande ik wel ben ingelogd" + "kan ook niet uitloggen")
+  // — zie SESSION_EXPIRED_EVENT in api/client.ts voor de volledige uitleg.
+  // Zonder deze listener bleef de UI "Ingelogd als ..." tonen (uit de
+  // eenmalige /auth/me hierboven, mogelijk via de service worker uit cache)
+  // terwijl elke echte aanroep intussen 401 gaf — een doodlopend schermpje.
+  // Deze listener wist de state meteen zodra ÉÉN echte aanroep bevestigt dat
+  // de sessie weg is, waarna RequireAuth (App.tsx) vanzelf naar /login valt.
+  useEffect(() => {
+    function handleSessionExpired() {
+      setUser(null);
+    }
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+  }, []);
+
   const login = useCallback(async (email: string, password: string, rememberMe = false) => {
     const response = await authApi.login(email, password, rememberMe);
     setUser(response.user);
   }, []);
 
   const logout = useCallback(async () => {
-    await authApi.logout();
-    setUser(null);
+    // Bewust try/finally: ook wanneer de server-aanroep zelf faalt (bv. de
+    // sessie was al verlopen — exact het "kan ook niet uitloggen"-scenario
+    // hierboven), moet de gebruiker lokaal alsnog uitgelogd geraken, anders
+    // biedt de "Uitloggen"-knop geen enkele uitweg meer.
+    try {
+      await authApi.logout();
+    } finally {
+      setUser(null);
+    }
   }, []);
 
   const value = useMemo(() => ({ user, isLoading, login, logout }), [user, isLoading, login, logout]);
