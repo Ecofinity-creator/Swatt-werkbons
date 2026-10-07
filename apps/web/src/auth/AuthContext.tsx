@@ -1,7 +1,8 @@
 import type { AuthenticatedUser } from '@swatt/shared-types';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ApiRequestError, authApi, SESSION_EXPIRED_EVENT } from '../api/client';
+import { roleAtLeast } from '@swatt/shared-types';
+import { ApiRequestError, authApi, SESSION_EXPIRED_EVENT, teamleaderApi } from '../api/client';
 
 interface AuthContextValue {
   user: AuthenticatedUser | null;
@@ -44,6 +45,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (email: string, password: string, rememberMe = false) => {
     const response = await authApi.login(email, password, rememberMe);
     setUser(response.user);
+
+    // Klantvraag 7/10/2026: bij elke login van een supervisor/admin de
+    // Teamleader-projecten synchroniseren. Bewust NIET afgewacht — inloggen
+    // mag hier nooit trager door worden, en een mislukte sync (bv. Teamleader
+    // (nog) niet gekoppeld of tijdelijk onbereikbaar) mag het inloggen nooit
+    // blokkeren. De manuele knop in Instellingen → Teamleader-integratie
+    // blijft de plek om een fout te zien en opnieuw te proberen.
+    if (roleAtLeast(response.user.role, 'SUPERVISOR')) {
+      teamleaderApi.syncProjects().catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn('Automatische projectensync na login mislukt:', err);
+      });
+    }
   }, []);
 
   const logout = useCallback(async () => {

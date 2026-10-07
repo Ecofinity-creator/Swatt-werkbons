@@ -122,7 +122,27 @@ export class ProjectSyncService {
     private readonly companySettingsService: CompanySettingsService | null = null,
   ) {}
 
+  /**
+   * Klantvraag 7/10/2026 ("als een supervisor inlogt mag elke keer de sync
+   * uitgevoerd worden"): de sync start nu ook automatisch bij elke login van
+   * een supervisor/admin. Twee aanvragen tegelijk (bv. twee supervisors die
+   * samen inloggen, of een login terwijl een admin net op "Synchroniseer
+   * projecten" klikt) delen daarom dezelfde lopende run i.p.v. dubbel
+   * tegen Teamleader (en de rate limits, sectie 28) aan te lopen.
+   */
+  private inFlightSync: Promise<ProjectSyncResult> | null = null;
+
   async syncAll(): Promise<ProjectSyncResult> {
+    if (this.inFlightSync) {
+      return this.inFlightSync;
+    }
+    this.inFlightSync = this.runSync().finally(() => {
+      this.inFlightSync = null;
+    });
+    return this.inFlightSync;
+  }
+
+  private async runSync(): Promise<ProjectSyncResult> {
     const { module, rows } = await this.fetchProjectRows();
 
     let skippedWithoutCustomerCount = 0;

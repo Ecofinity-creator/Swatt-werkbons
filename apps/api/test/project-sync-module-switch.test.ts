@@ -103,3 +103,46 @@ describe('ProjectSyncService — verouderde projectenmodule na accountwissel (bu
     expect(calls).not.toContain('accounts.projects-v2-status');
   });
 });
+
+describe('ProjectSyncService — sync bij elke supervisor-login (klantvraag 7/10/2026)', () => {
+  it('twee gelijktijdige syncs delen één run (geen dubbele Teamleader-aanroepen)', async () => {
+    const { prisma } = createFakePrisma('PROJECTS_V2');
+    const calls: string[] = [];
+    const service = new ProjectSyncService(prisma, fakeClient('projects-v2', calls));
+
+    const [first, second] = await Promise.all([service.syncAll(), service.syncAll()]);
+
+    expect(first).toBe(second);
+    expect(calls.filter((endpoint) => endpoint === 'projects-v2/projects.list')).toHaveLength(1);
+  });
+
+  it('start na afloop gewoon een nieuwe run (de gedeelde run blijft niet hangen)', async () => {
+    const { prisma } = createFakePrisma('PROJECTS_V2');
+    const calls: string[] = [];
+    const service = new ProjectSyncService(prisma, fakeClient('projects-v2', calls));
+
+    await service.syncAll();
+    await service.syncAll();
+
+    expect(calls.filter((endpoint) => endpoint === 'projects-v2/projects.list')).toHaveLength(2);
+  });
+
+  it('een mislukte run blokkeert de volgende niet', async () => {
+    const { prisma } = createFakePrisma('PROJECTS_V2');
+    let fail = true;
+    const client = {
+      post: async () => ({ data: { status: 'projects-v2' } }),
+      listAll: async (endpoint: string) => {
+        if (endpoint === 'projects-v2/projects.list' && fail) {
+          throw new TeamleaderApiError(500, endpoint, `${endpoint} gaf 500 terug`);
+        }
+        return [];
+      },
+    } as unknown as TeamleaderClient;
+    const service = new ProjectSyncService(prisma, client);
+
+    await expect(service.syncAll()).rejects.toBeInstanceOf(ApiError);
+    fail = false;
+    await expect(service.syncAll()).resolves.toMatchObject({ module: 'PROJECTS_V2' });
+  });
+});

@@ -216,9 +216,13 @@ export default async function teamleaderRoutes(app: FastifyInstance): Promise<vo
   // (MAX_KM_RECOMPUTES_PER_SYNC_RUN) om de totale wachttijd voorspelbaar te
   // houden — bij een grotere achterstand toont een volgende klik gewoon de
   // volgende portie.
+  //
+  // Klantvraag 7/10/2026: vanaf SUPERVISOR (niet enkel ADMIN) — de app start
+  // deze sync automatisch na elke login van een supervisor/admin (zie
+  // AuthContext.tsx). Read-only richting Teamleader, dus geen extra risico.
   app.post(
     '/admin/teamleader/sync/projects',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (): Promise<ProjectSyncResponseBody> => {
       const result = await app.projectSyncService.syncAll();
       return result;
