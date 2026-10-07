@@ -324,7 +324,6 @@ export class ProjectSyncService {
     // gearchiveerd, nooit verwijderd — bestaande werkbon-historiek blijft intact.
     const archived = await this.prisma.project.updateMany({
       where: {
-        teamleaderModule: module,
         isArchivedInTl: false,
         teamleaderId: { notIn: seenTeamleaderIds.length > 0 ? seenTeamleaderIds : ['__none_synced_this_run__'] },
       },

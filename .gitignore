@@ -10,3 +10,6 @@ apps/api/prisma/dev.db
 .turbo/
 .vercel/
 *.tsbuildinfo
+
+*.patch
+*.bundle
