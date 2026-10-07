@@ -99,6 +99,9 @@ export class TeamleaderAuthService {
       create: { id: TEAMLEADER_CONNECTION_SINGLETON_ID, status: 'DISCONNECTED' },
       update: {
         status: 'DISCONNECTED',
+        // Bugreport 7/10/2026: de gedetecteerde projectenmodule hoort bij het
+        // vorige account — na opnieuw koppelen (mogelijk ander account) opnieuw detecteren.
+        projectsModule: null,
         accessTokenEncrypted: null,
         refreshTokenEncrypted: null,
         tokenExpiresAt: null,
@@ -234,7 +237,9 @@ export class TeamleaderAuthService {
       },
       update: {
         ...sharedData,
-        ...(connectedByUserId ? { connectedAt: new Date(), connectedByUserId } : {}),
+        // Nieuwe autorisatie (niet een gewone token-refresh): mogelijk een
+        // ander Teamleader-account, dus projectenmodule opnieuw laten detecteren.
+        ...(connectedByUserId ? { connectedAt: new Date(), connectedByUserId, projectsModule: null } : {}),
       },
     });
   }

@@ -72,6 +72,13 @@ export const TeamleaderErrors = {
   /** Onverwacht antwoord van de Teamleader-API zelf (niet-2xx, of een onherkenbare response-vorm). */
   syncFailed: (detail: string) =>
     new ApiError(502, 'TEAMLEADER_SYNC_FAILED', `Synchroniseren met Teamleader is mislukt: ${detail}`),
+  /** Bugreport 7/10/2026 — Teamleader weigert de projectenmodule (403), ook na hernieuwde detectie van legacy vs. projects-v2. */
+  projectsModuleNoAccess: () =>
+    new ApiError(
+      502,
+      'TEAMLEADER_PROJECTS_NO_ACCESS',
+      'Teamleader geeft geen toegang tot de projecten. Controleer in Teamleader: (1) heeft dit account de module Projecten, (2) heeft de gebruiker die de koppeling goedkeurde toegangsrechten op Projecten, en (3) staat de scope "Projects" aangevinkt bij de integratie op developer.focus.teamleader.eu. Ontkoppel en verbind daarna opnieuw.',
+    ),
   /**
    * Phase 9 — een project heeft nog geen "werkbon-uren"-milestone (gekozen of
    * automatisch aangemaakt) én er is geen `defaultMilestoneResponsibleTeamleaderUserId`
@@ -133,6 +140,15 @@ export const UserErrors = {
       'USER_CANNOT_DELETE_WITH_HISTORY',
       'Deze medewerker heeft al tijdregistraties of werkbonnen en kan daarom niet volledig verwijderd worden. Gebruik "Deactiveren" in plaats daarvan.',
     ),
+  /** Klantvraag 7/10/2026 — zie user-management.policy.ts. */
+  cannotAssignRole: () =>
+    new ApiError(403, 'USER_CANNOT_ASSIGN_ROLE', 'Je kan deze rol niet toekennen. Enkel een administrator kan andere administrators aanmaken.'),
+  cannotManageAdmin: () =>
+    new ApiError(403, 'USER_CANNOT_MANAGE_ADMIN', 'Een administrator kan enkel door een andere administrator beheerd worden.'),
+  cannotChangeOwnAccess: () =>
+    new ApiError(403, 'USER_CANNOT_CHANGE_OWN_ACCESS', 'Je kan je eigen rol niet wijzigen en jezelf niet deactiveren of verwijderen. Vraag dit aan een andere administrator.'),
+  ratesAdminOnly: () =>
+    new ApiError(403, 'USER_RATES_ADMIN_ONLY', 'Tarieven kunnen enkel door een administrator ingesteld worden.'),
 };
 
 export const ProjectErrors = {

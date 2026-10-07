@@ -70,7 +70,11 @@ export function UsersPage() {
     }
   }
 
+  // Klantvraag 7/10/2026: ook een supervisor beheert medewerkers, maar kan
+  // geen administrators aanmaken (zie user-management.policy.ts in de API).
   const isAdmin = currentUser?.role === 'ADMIN';
+  const canManageUsers = isAdmin || currentUser?.role === 'SUPERVISOR';
+  const assignableRoles = USER_ROLES.filter((role) => isAdmin || role !== 'ADMIN');
 
   return (
     <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
@@ -99,7 +103,7 @@ export function UsersPage() {
         </p>
       )}
 
-      {isAdmin && (
+      {canManageUsers && (
         <div className="mb-6">
           {!showCreateForm ? (
             <button
@@ -139,7 +143,7 @@ export function UsersPage() {
                     onChange={(e) => setForm({ ...form, role: e.target.value as UserRole })}
                     className={inputClass}
                   >
-                    {USER_ROLES.map((role) => (
+                    {assignableRoles.map((role) => (
                       <option key={role} value={role}>
                         {ROLE_LABELS[role]}
                       </option>

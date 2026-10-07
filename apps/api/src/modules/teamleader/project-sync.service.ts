@@ -123,14 +123,7 @@ export class ProjectSyncService {
   ) {}
 
   async syncAll(): Promise<ProjectSyncResult> {
-    const module = await this.resolveProjectsModule();
-
-    let rows: NormalizedProjectRow[];
-    try {
-      rows = module === 'PROJECTS_V2' ? await this.fetchProjectsV2() : await this.fetchLegacyProjects();
-    } catch (err) {
-      throw this.wrapTeamleaderError(err);
-    }
+    const { module, rows } = await this.fetchProjectRows();
 
     let skippedWithoutCustomerCount = 0;
     const rowsWithCustomer: { row: NormalizedProjectRow; customer: TeamleaderCustomerRef }[] = [];
@@ -409,11 +402,11 @@ export class ProjectSyncService {
    * `accounts.projects-v2-status`-endpoint en cachen het resultaat op de
    * TeamleaderConnection-rij, zodat niet elke sync-run opnieuw moet detecteren.
    */
-  private async resolveProjectsModule(): Promise<TeamleaderProjectsModule> {
+  private async resolveProjectsModule(forceRedetect = false): Promise<TeamleaderProjectsModule> {
     const connection = await this.prisma.teamleaderConnection.findUnique({
       where: { id: TEAMLEADER_CONNECTION_SINGLETON_ID },
     });
-    if (connection?.projectsModule) {
+    if (connection?.projectsModule && !forceRedetect) {
       return connection.projectsModule;
     }
 
@@ -430,6 +423,43 @@ export class ProjectSyncService {
       data: { projectsModule: module },
     });
     return module;
+  }
+
+  /**
+   * Bugreport 7/10/2026 ("projects.list gaf 403 terug: You have no access to
+   * this module") na het overschakelen van het Ecofinity- naar het Swatt-
+   * Teamleader-account: de gecachte module (`projectsModule`) hoorde nog bij
+   * het vorige account. Bij een 403 detecteren we daarom één keer opnieuw en
+   * proberen we met de juiste module. Blijft het 403, dan ligt het echt aan
+   * rechten/abonnement aan Teamleader-kant — met een begrijpelijke uitleg.
+   */
+  private async fetchProjectRows(): Promise<{ module: TeamleaderProjectsModule; rows: NormalizedProjectRow[] }> {
+    const fetchFor = async (module: TeamleaderProjectsModule) => ({
+      module,
+      rows: module === 'PROJECTS_V2' ? await this.fetchProjectsV2() : await this.fetchLegacyProjects(),
+    });
+
+    const cachedModule = await this.resolveProjectsModule();
+    try {
+      return await fetchFor(cachedModule);
+    } catch (err) {
+      if (!(err instanceof TeamleaderApiError) || err.status !== 403) {
+        throw this.wrapTeamleaderError(err);
+      }
+    }
+
+    const detectedModule = await this.resolveProjectsModule(true);
+    if (detectedModule === cachedModule) {
+      throw TeamleaderErrors.projectsModuleNoAccess();
+    }
+    try {
+      return await fetchFor(detectedModule);
+    } catch (err) {
+      if (err instanceof TeamleaderApiError && err.status === 403) {
+        throw TeamleaderErrors.projectsModuleNoAccess();
+      }
+      throw this.wrapTeamleaderError(err);
+    }
   }
 
   private async fetchProjectsV2(): Promise<NormalizedProjectRow[]> {

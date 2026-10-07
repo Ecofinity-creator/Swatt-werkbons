@@ -3,7 +3,7 @@ import { EMPLOYMENT_TYPES, USER_ROLES } from '@swatt/shared-types';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { projectsApi, usersApi } from '../../api/client';
-import { ApiRequestError } from '../../auth/AuthContext';
+import { ApiRequestError, useAuth } from '../../auth/AuthContext';
 import { EMPLOYMENT_TYPE_LABELS, ROLE_LABELS } from '../../constants';
 
 /**
@@ -19,6 +19,7 @@ import { EMPLOYMENT_TYPE_LABELS, ROLE_LABELS } from '../../constants';
  */
 export function UserDetailPage() {
   const navigate = useNavigate();
+  const { user: currentUser } = useAuth();
   const { userId } = useParams<{ userId: string }>();
   const [user, setUser] = useState<AdminUserSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -262,6 +263,13 @@ export function UserDetailPage() {
     }
   }
 
+  // Klantvraag 7/10/2026 — zelfde grenzen als user-management.policy.ts in de
+  // API (die blijft de echte controle; dit verbergt enkel wat toch zou falen).
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const isSelf = currentUser?.id === user?.id;
+  const isReadOnly = !isAdmin && user?.role === 'ADMIN';
+  const assignableRoles = USER_ROLES.filter((role) => isAdmin || role !== 'ADMIN');
+
   return (
     <main className="min-h-screen bg-neutral-50 px-6 py-10 text-neutral-900">
       <header className="mb-8 flex items-center justify-between">
@@ -282,7 +290,14 @@ export function UserDetailPage() {
 
       {!user && !errorMessage && <p className="text-neutral-500">Laden...</p>}
 
-      {user && (
+      {user && isReadOnly && (
+        <p className="rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-600">
+          {user.employee?.displayName ?? user.email} is administrator. Een administrator kan enkel door een andere
+          administrator beheerd worden.
+        </p>
+      )}
+
+      {user && !isReadOnly && (
         <>
           <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
             <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-500">Rechten</h2>
@@ -291,11 +306,12 @@ export function UserDetailPage() {
                 <span className="mb-1 block text-neutral-600">Rol</span>
                 <select
                   value={user.role}
-                  disabled={isSavingUser}
+                  disabled={isSavingUser || isSelf}
+                  title={isSelf ? 'Je kan je eigen rol niet wijzigen.' : undefined}
                   onChange={(e) => void updateRole(e.target.value as UserRole)}
                   className="rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-swatt-gold"
                 >
-                  {USER_ROLES.map((role) => (
+                  {assignableRoles.map((role) => (
                     <option key={role} value={role}>
                       {ROLE_LABELS[role]}
                     </option>
@@ -303,18 +319,20 @@ export function UserDetailPage() {
                 </select>
               </label>
 
-              <button
-                type="button"
-                disabled={isSavingUser}
-                onClick={() => void toggleActive()}
-                className={`rounded-lg px-4 py-2 text-sm font-semibold ${
-                  user.isActive
-                    ? 'border border-neutral-300 text-neutral-700'
-                    : 'bg-swatt-gold text-swatt-black'
-                }`}
-              >
-                {user.isActive ? 'Deactiveren' : 'Heractiveren'}
-              </button>
+              {!isSelf && (
+                <button
+                  type="button"
+                  disabled={isSavingUser}
+                  onClick={() => void toggleActive()}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold ${
+                    user.isActive
+                      ? 'border border-neutral-300 text-neutral-700'
+                      : 'bg-swatt-gold text-swatt-black'
+                  }`}
+                >
+                  {user.isActive ? 'Deactiveren' : 'Heractiveren'}
+                </button>
+              )}
 
               {!user.hasSetPassword && (
                 <button
@@ -327,14 +345,16 @@ export function UserDetailPage() {
                 </button>
               )}
 
-              <button
-                type="button"
-                disabled={isDeleting}
-                onClick={() => void handleDelete()}
-                className="rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50"
-              >
-                {isDeleting ? 'Bezig...' : 'Volledig verwijderen'}
-              </button>
+              {!isSelf && (
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => void handleDelete()}
+                  className="rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-50"
+                >
+                  {isDeleting ? 'Bezig...' : 'Volledig verwijderen'}
+                </button>
+              )}
             </div>
             {resendInviteMessage && <p className="mt-3 text-sm text-neutral-600">{resendInviteMessage}</p>}
           </section>
@@ -363,7 +383,8 @@ export function UserDetailPage() {
             )}
           </section>
 
-          {user.employee && (
+          {/* Tarieven blijven ADMIN-only (boekhouding) — klantvraag 7/10/2026. */}
+          {user.employee && isAdmin && (
             <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
               <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Kostprijs</h2>
               <p className="mb-4 text-sm text-neutral-500">

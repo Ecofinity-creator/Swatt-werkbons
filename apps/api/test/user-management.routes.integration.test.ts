@@ -62,9 +62,9 @@ async function loginAsAdmin(): Promise<string> {
 }
 
 describe('Admin gebruikersbeheer (/admin/users)', () => {
-  it('GET en POST /admin/users vereisen de ADMIN-rol (niet enkel een sessie)', async () => {
-    await createUser({ email: 'supervisor@swatt.be', password: 'wachtwoord123', role: 'SUPERVISOR' });
-    const cookie = await loginAs('supervisor@swatt.be', 'wachtwoord123');
+  it('GET en POST /admin/users vereisen minstens de SUPERVISOR-rol (een werknemer krijgt 403)', async () => {
+    await createUser({ email: 'werknemer@swatt.be', password: 'wachtwoord123', role: 'EMPLOYEE' });
+    const cookie = await loginAs('werknemer@swatt.be', 'wachtwoord123');
 
     const list = await app.inject({ method: 'GET', url: '/admin/users', headers: { cookie } });
     expect(list.statusCode).toBe(403);
@@ -77,6 +77,64 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
       payload: { email: 'nieuw@swatt.be', displayName: 'Nieuw', role: 'EMPLOYEE' },
     });
     expect(create.statusCode).toBe(403);
+  });
+
+  it('een SUPERVISOR kan medewerkers aanmaken en beheren, maar geen admins en geen tarieven (klantvraag 7/10/2026)', async () => {
+    const admin = await createUser({ email: 'admin@swatt.be', password: 'Str0ngPassw0rd!', role: 'ADMIN' });
+    await prisma.employee.update({ where: { userId: admin.id }, data: { payrollRateCents: 5000 } });
+    await createUser({ email: 'supervisor@swatt.be', password: 'wachtwoord123', role: 'SUPERVISOR' });
+    const cookie = await loginAs('supervisor@swatt.be', 'wachtwoord123');
+
+    const create = await app.inject({
+      method: 'POST',
+      url: '/admin/users',
+      headers: { cookie },
+      payload: { email: 'peter@swatt.be', displayName: 'Peter', role: 'EMPLOYEE' },
+    });
+    expect(create.statusCode).toBe(201);
+    const peterId = create.json().user.id as string;
+
+    const createAdmin = await app.inject({
+      method: 'POST',
+      url: '/admin/users',
+      headers: { cookie },
+      payload: { email: 'baas@swatt.be', displayName: 'Baas', role: 'ADMIN' },
+    });
+    expect(createAdmin.statusCode).toBe(403);
+    expect(createAdmin.json().error.code).toBe('USER_CANNOT_ASSIGN_ROLE');
+
+    const deactivate = await app.inject({
+      method: 'POST',
+      url: `/admin/users/${peterId}/update`,
+      headers: { cookie },
+      payload: { isActive: false, displayName: 'Peter V.' },
+    });
+    expect(deactivate.statusCode).toBe(200);
+    expect(deactivate.json().user).toMatchObject({ isActive: false, employee: { displayName: 'Peter V.' } });
+
+    const setRate = await app.inject({
+      method: 'POST',
+      url: `/admin/users/${peterId}/update`,
+      headers: { cookie },
+      payload: { payrollRateCents: 4500 },
+    });
+    expect(setRate.statusCode).toBe(403);
+    expect(setRate.json().error.code).toBe('USER_RATES_ADMIN_ONLY');
+
+    const touchAdmin = await app.inject({
+      method: 'POST',
+      url: `/admin/users/${admin.id}/update`,
+      headers: { cookie },
+      payload: { isActive: false },
+    });
+    expect(touchAdmin.statusCode).toBe(403);
+    expect(touchAdmin.json().error.code).toBe('USER_CANNOT_MANAGE_ADMIN');
+
+    // Tarieven lekken ook niet via de lijst.
+    const list = await app.inject({ method: 'GET', url: '/admin/users', headers: { cookie } });
+    expect(list.statusCode).toBe(200);
+    const adminInList = list.json().users.find((u: { id: string }) => u.id === admin.id);
+    expect(adminInList.employee.payrollRateCents).toBeNull();
   });
 
   it('een ADMIN kan een nieuwe gebruiker aanmaken (met meteen een Employee-profiel, zonder wachtwoord) en die verschijnt in de lijst', async () => {

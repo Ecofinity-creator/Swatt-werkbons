@@ -1,5 +1,6 @@
 import type {
   AdminUserSummary,
+  AuthenticatedUser,
   CreateUserResponseBody,
   EmploymentType,
   ListTeamleaderUsersResponseBody,
@@ -12,16 +13,26 @@ import { Prisma } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuditLogService } from '../audit-log/audit-log.service';
-import { TeamleaderErrors, UserErrors } from '../../errors';
+import { AuthErrors, TeamleaderErrors, UserErrors } from '../../errors';
 import { buildInviteEmail } from '../auth/auth-emails';
 import { CompanySettingsService } from '../company-settings/company-settings.service';
 import { requireRole } from '../rbac/rbac.middleware';
+import {
+  assertCanCreate,
+  assertCanDelete,
+  assertCanManageTarget,
+  assertCanUpdate,
+  canManageRates,
+} from './user-management.policy';
 import { createUserBodySchema, updateUserBodySchema } from './user.schemas';
 
 const userIdParamsSchema = z.object({ id: z.string().uuid() });
 
 /**
- * Admin-only gebruikersbeheer (Stap 5.2, backoffice-scherm "Medewerkers").
+ * Gebruikersbeheer (Stap 5.2, backoffice-scherm "Medewerkers"). Sinds
+ * klantvraag 7/10/2026 open vanaf SUPERVISOR, met de grenzen uit
+ * user-management.policy.ts (geen admins beheren, geen tarieven, niet aan
+ * de eigen toegang komen).
  * Elke nieuwe gebruiker krijgt hier meteen een Employee-profiel (net als de
  * eenmalige /admin/seed-route) — er bestaat in deze app bewust geen apart
  * "gebruiker zonder werknemersprofiel"-pad; zie het commentaar bij het
@@ -39,21 +50,24 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
 
   app.get(
     '/admin/users',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
-    async (): Promise<ListUsersResponseBody> => {
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
+    async (request): Promise<ListUsersResponseBody> => {
       const users = await app.prisma.user.findMany({
         include: { employee: true },
         orderBy: { createdAt: 'asc' },
       });
-      return { users: users.map(toAdminUserSummary) };
+      const showRates = request.currentUser ? canManageRates(request.currentUser) : false;
+      return { users: users.map((user) => toAdminUserSummary(user, { showRates })) };
     },
   );
 
   app.post(
     '/admin/users',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply): Promise<CreateUserResponseBody> => {
       const body = createUserBodySchema.parse(request.body);
+      const actor = requireActor(request.currentUser);
+      assertCanCreate(actor, body.role);
 
       const existing = await app.prisma.user.findUnique({ where: { email: body.email } });
       if (existing) {
@@ -110,7 +124,7 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
       }
 
       reply.code(201);
-      return { user: toAdminUserSummary(user), inviteEmailSent, inviteEmailError };
+      return { user: toAdminUserSummary(user, { showRates: canManageRates(actor) }), inviteEmailSent, inviteEmailError };
     },
   );
 
@@ -119,7 +133,7 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
   // zie apps/api/src/app.ts).
   app.post(
     '/admin/users/:id/update',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateUserResponseBody> => {
       const params = userIdParamsSchema.parse(request.params);
       const body = updateUserBodySchema.parse(request.body);
@@ -128,6 +142,8 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
       if (!existing) {
         throw UserErrors.notFound();
       }
+      const actor = requireActor(request.currentUser);
+      assertCanUpdate(actor, existing, body);
 
       if (body.role !== undefined || body.isActive !== undefined) {
         await app.prisma.user.update({
@@ -206,7 +222,7 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
         where: { id: params.id },
         include: { employee: true },
       });
-      return { user: toAdminUserSummary(updated) };
+      return { user: toAdminUserSummary(updated, { showRates: canManageRates(actor) }) };
     },
   );
 
@@ -220,13 +236,14 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
    */
   app.post(
     '/admin/users/:id/resend-invite',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<ResendInviteResponseBody> => {
       const params = userIdParamsSchema.parse(request.params);
       const user = await app.prisma.user.findUnique({ where: { id: params.id }, include: { employee: true } });
       if (!user) {
         throw UserErrors.notFound();
       }
+      assertCanManageTarget(requireActor(request.currentUser), user);
       if (user.passwordHash !== null) {
         throw UserErrors.alreadyActivated();
       }
@@ -255,13 +272,14 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
    */
   app.post(
     '/admin/users/:id/delete',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = userIdParamsSchema.parse(request.params);
       const user = await app.prisma.user.findUnique({ where: { id: params.id }, include: { employee: true } });
       if (!user) {
         throw UserErrors.notFound();
       }
+      assertCanDelete(requireActor(request.currentUser), user);
 
       if (user.employee) {
         const [timeEntryCount, workOrderCount] = await Promise.all([
@@ -293,12 +311,12 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
 
   /**
    * Phase 9 — live opvraging van Teamleader-gebruikers voor de
-   * koppelingsdropdown hierboven (zie teamleader-user.service.ts). Bewust
-   * ADMIN-only, zelfde als de rest van het gebruikersbeheer.
+   * koppelingsdropdown hierboven (zie teamleader-user.service.ts). Zelfde
+   * rechtenniveau als de rest van het gebruikersbeheer (SUPERVISOR+).
    */
   app.get(
     '/admin/teamleader/users',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (): Promise<ListTeamleaderUsersResponseBody> => {
       const users = await app.teamleaderUserService.listActiveUsers();
       return { users };
@@ -310,7 +328,16 @@ export default async function userRoutes(app: FastifyInstance): Promise<void> {
 // User/Employee-type rechtstreeks te importeren — zelfde patroon als
 // `toAuthenticatedUser` in auth/auth.service.ts: deze mapper-functie is zo
 // onafhankelijk testbaar en geeft nooit per ongeluk een `passwordHash` e.d. door.
-function toAdminUserSummary(user: {
+/** `requireRole` heeft currentUser al gegarandeerd — dit maakt dat enkel expliciet voor TypeScript. */
+function requireActor(currentUser: AuthenticatedUser | null): AuthenticatedUser {
+  if (!currentUser) {
+    throw AuthErrors.notAuthenticated();
+  }
+  return currentUser;
+}
+
+function toAdminUserSummary(
+  user: {
   id: string;
   email: string;
   role: UserRole;
@@ -326,7 +353,11 @@ function toAdminUserSummary(user: {
     payrollRateCents: number | null;
     employmentType: EmploymentType;
   } | null;
-}): AdminUserSummary {
+  },
+  // Tarieven zijn ADMIN-only (user-management.policy.ts) — een supervisor
+  // krijgt ze als `null` terug, zodat ze ook niet via de netwerkrespons lekken.
+  options: { showRates: boolean },
+): AdminUserSummary {
   return {
     id: user.id,
     email: user.email,
@@ -337,8 +368,8 @@ function toAdminUserSummary(user: {
           id: user.employee.id,
           displayName: user.employee.displayName,
           phone: user.employee.phone,
-          defaultHourlyRateCents: user.employee.defaultHourlyRateCents,
-          payrollRateCents: user.employee.payrollRateCents,
+          defaultHourlyRateCents: options.showRates ? user.employee.defaultHourlyRateCents : null,
+          payrollRateCents: options.showRates ? user.employee.payrollRateCents : null,
           employmentType: user.employee.employmentType,
         }
       : null,
