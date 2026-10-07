@@ -224,7 +224,7 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
    */
   app.post(
     '/admin/projects/:id/invoicing-enabled',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateProjectInvoicingEnabledResponseBody> => {
       const params = projectIdParamsSchema.parse(request.params);
       const body: UpdateProjectInvoicingEnabledBody = updateProjectInvoicingEnabledBodySchema.parse(request.body);
@@ -251,7 +251,7 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
    */
   app.post(
     '/admin/projects/:id/overtime-settings',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateProjectOvertimeSettingsResponseBody> => {
       const params = projectIdParamsSchema.parse(request.params);
       const body = updateProjectOvertimeSettingsBodySchema.parse(request.body);
@@ -291,7 +291,7 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
    */
   app.post(
     '/admin/projects/:id/signing-mode',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateProjectSigningModeResponseBody> => {
       const params = projectIdParamsSchema.parse(request.params);
       const body = updateProjectSigningModeBodySchema.parse(request.body);
@@ -313,7 +313,7 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
    */
   app.post(
     '/admin/projects/:id/km-settings',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateProjectKmSettingsResponseBody> => {
       const params = projectIdParamsSchema.parse(request.params);
       const body = updateProjectKmSettingsBodySchema.parse(request.body);
@@ -345,7 +345,7 @@ export default async function projectRoutes(app: FastifyInstance): Promise<void>
    */
   app.post(
     '/admin/projects/:id/hourly-rate',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateProjectHourlyRateResponseBody> => {
       const params = projectIdParamsSchema.parse(request.params);
       const body = updateProjectHourlyRateBodySchema.parse(request.body);

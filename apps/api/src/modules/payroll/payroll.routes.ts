@@ -31,7 +31,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
 
   app.get(
     '/admin/payroll/payable',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<ListPayableSummaryResponseBody> => {
       const query = listPayableSummaryQuerySchema.parse(request.query);
       const employees = await service.listPayableSummary(query.periodLabel);
@@ -41,7 +41,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
 
   app.get(
     '/admin/payroll/batches',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<ListPayrollBatchesResponseBody> => {
       const query = listPayrollBatchesQuerySchema.parse(request.query);
       const batches = await service.list(query);
@@ -51,7 +51,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
 
   app.post(
     '/admin/payroll/batches',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply): Promise<CreatePayrollBatchResponseBody> => {
       const body: CreatePayrollBatchBody = createPayrollBatchBodySchema.parse(request.body);
       const userId = request.currentUser?.id;
@@ -73,7 +73,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
 
   app.post(
     '/admin/payroll/batches/:id/remove',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = payrollBatchIdParamsSchema.parse(request.params);
       await service.remove(params.id);
@@ -93,7 +93,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
   // Gebaseerd op de al bevroren batch-data, geen verse herberekening.
   app.get(
     '/admin/payroll/batches/:id/pdf',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = payrollBatchIdParamsSchema.parse(request.params);
       const batch = await service.getById(params.id);
@@ -122,7 +122,7 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
   // Zelfde totalisatie-met-detail als hierboven, als Excel-bestand.
   app.get(
     '/admin/payroll/batches/:id/excel',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = payrollBatchIdParamsSchema.parse(request.params);
       const batch = await service.getById(params.id);

@@ -130,7 +130,8 @@ export function ProjectMilestonesPage() {
  */
 function InvoicingPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
   const { user: currentUser } = useAuth();
-  const isAdmin = currentUser?.role === 'ADMIN';
+  // Klantvraag 7/10/2026: ook supervisors (alles behalve admins aanmaken en instellingen).
+  const isAdmin = currentUser?.role === 'ADMIN' || currentUser?.role === 'SUPERVISOR';
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -202,7 +203,8 @@ function InvoicingPanel({ project, onUpdated }: { project: ProjectSummary; onUpd
  */
 function HourlyRatePanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
   const { user: currentUser } = useAuth();
-  const isAdmin = currentUser?.role === 'ADMIN';
+  // Klantvraag 7/10/2026: ook supervisors (alles behalve admins aanmaken en instellingen).
+  const isAdmin = currentUser?.role === 'ADMIN' || currentUser?.role === 'SUPERVISOR';
   const [rateInput, setRateInput] = useState(project.hourlyRateCents !== null ? (project.hourlyRateCents / 100).toFixed(2) : '');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -285,7 +287,8 @@ function HourlyRatePanel({ project, onUpdated }: { project: ProjectSummary; onUp
  */
 function OvertimeSettingsPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
   const { user: currentUser } = useAuth();
-  const isAdmin = currentUser?.role === 'ADMIN';
+  // Klantvraag 7/10/2026: ook supervisors (alles behalve admins aanmaken en instellingen).
+  const isAdmin = currentUser?.role === 'ADMIN' || currentUser?.role === 'SUPERVISOR';
   const [thresholdType, setThresholdType] = useState<'DAILY' | 'WEEKLY'>(project.overtimeThresholdType);
   const [weeklyHoursInput, setWeeklyHoursInput] = useState(String(project.overtimeWeeklyThresholdHours ?? 39));
   const [overtimeApplies, setOvertimeApplies] = useState(project.overtimeApplies);
@@ -668,7 +671,8 @@ function MilestonePanel({ project }: { project: ProjectSummary }) {
  */
 function KmPricingPanel({ project, onUpdated }: { project: ProjectSummary; onUpdated: () => void }) {
   const { user: currentUser } = useAuth();
-  const isAdmin = currentUser?.role === 'ADMIN';
+  // Klantvraag 7/10/2026: ook supervisors (alles behalve admins aanmaken en instellingen).
+  const isAdmin = currentUser?.role === 'ADMIN' || currentUser?.role === 'SUPERVISOR';
   const [thresholdInput, setThresholdInput] = useState(String(project.kmFlatFeeThresholdKm));
   const [flatFeeInput, setFlatFeeInput] = useState(
     project.kmFlatFeeCents !== null ? (project.kmFlatFeeCents / 100).toFixed(2) : '',

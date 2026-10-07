@@ -45,7 +45,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
 
   app.get(
     '/admin/invoice-batches/invoiceable-work-orders',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<ListInvoiceableWorkOrdersResponseBody> => {
       const query = listInvoiceableWorkOrdersQuerySchema.parse(request.query);
       const workOrders = await service.listInvoiceable(query);
@@ -55,7 +55,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
 
   app.get(
     '/admin/invoice-batches',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<ListInvoiceBatchesResponseBody> => {
       const query = listInvoiceBatchesQuerySchema.parse(request.query);
       const batches = await service.list(query);
@@ -65,7 +65,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
 
   app.post(
     '/admin/invoice-batches',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply): Promise<CreateInvoiceBatchResponseBody> => {
       const body: CreateInvoiceBatchBody = createInvoiceBatchBodySchema.parse(request.body);
       const userId = request.currentUser?.id;
@@ -87,7 +87,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
 
   app.post(
     '/admin/invoice-batches/:id/remove',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = invoiceBatchIdParamsSchema.parse(request.params);
       await service.remove(params.id);
@@ -108,7 +108,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
   // TeamleaderInvoiceService.createDraftInvoice voor de volledige uitleg.
   app.post(
     '/admin/invoice-batches/:id/teamleader-draft',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<CreateTeamleaderDraftInvoiceResponseBody> => {
       const params = invoiceBatchIdParamsSchema.parse(request.params);
       const syncResult = await app.teamleaderInvoiceService.createDraftInvoice(params.id);
@@ -135,7 +135,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
   // standaardtarief heeft bij "Projecten" (zie InvoiceBatchService.setProjectRate).
   app.post(
     '/admin/invoice-batches/:id/project-rates/:projectId',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateInvoiceBatchProjectRateResponseBody> => {
       const params = invoiceBatchProjectRateParamsSchema.parse(request.params);
       const body: UpdateInvoiceBatchProjectRateBody = updateInvoiceBatchProjectRateBodySchema.parse(request.body);
@@ -149,7 +149,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
   // teamleader gaat". Zie InvoiceBatchService.setLineAdjustment.
   app.post(
     '/admin/invoice-batches/:id/lines/:lineId/adjustment',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<SetInvoiceBatchLineAdjustmentResponseBody> => {
       const params = invoiceBatchLineParamsSchema.parse(request.params);
       const body: SetInvoiceBatchLineAdjustmentBody = setInvoiceBatchLineAdjustmentBodySchema.parse(request.body);
@@ -170,7 +170,7 @@ export default async function invoiceBatchRoutes(app: FastifyInstance): Promise<
   // download-reply-patroon als GET /work-orders/:id/pdf.
   app.get(
     '/admin/invoice-batches/:id/work-order-pdf-bundle',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = invoiceBatchIdParamsSchema.parse(request.params);
       const query = workOrderPdfBundleQuerySchema.parse(request.query);

@@ -60,14 +60,15 @@ describe('Gebruikersbeheer door een supervisor (klantvraag 7/10/2026)', () => {
     expect(errorCode(() => assertCanDelete(supervisor, otherAdmin))).toBe('USER_CANNOT_MANAGE_ADMIN');
   });
 
-  it('kan geen tarieven zien of instellen', () => {
-    expect(canManageRates(supervisor)).toBe(false);
-    expect(errorCode(() => assertCanUpdate(supervisor, worker, { payrollRateCents: 4500 }))).toBe(
-      'USER_RATES_ADMIN_ONLY',
-    );
-    expect(errorCode(() => assertCanUpdate(supervisor, worker, { defaultHourlyRateCents: 6500 }))).toBe(
-      'USER_RATES_ADMIN_ONLY',
-    );
+  it('kan tarieven zien en instellen (klantvraag 7/10/2026: alles behalve admins en instellingen)', () => {
+    expect(canManageRates(supervisor)).toBe(true);
+    expect(errorCode(() => assertCanUpdate(supervisor, worker, { payrollRateCents: 4500 }))).toBeNull();
+    expect(errorCode(() => assertCanUpdate(supervisor, worker, { defaultHourlyRateCents: 6500 }))).toBeNull();
+  });
+
+  it('een werknemer kan nooit tarieven instellen', () => {
+    expect(canManageRates(worker)).toBe(false);
+    expect(errorCode(() => assertCanUpdate(worker, worker, { payrollRateCents: 4500 }))).toBe('USER_RATES_ADMIN_ONLY');
   });
 });
 

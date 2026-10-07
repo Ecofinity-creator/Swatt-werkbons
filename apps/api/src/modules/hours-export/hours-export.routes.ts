@@ -27,7 +27,7 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
 
   app.get(
     '/admin/hours-export/overview',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<HoursExportOverviewResponseBody> => {
       const query = hoursExportPeriodQuerySchema.parse(request.query);
       const employees = await service.listOverview(query.period);
@@ -44,7 +44,7 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
    */
   app.post(
     '/admin/hours-export/mark-exported',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<MarkHoursExportedResponseBody> => {
       const body = markHoursExportedBodySchema.parse(request.body);
       const markedCount = await service.markExported(body.employeeId, body.period);
@@ -65,7 +65,7 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
   // maandelijkse loonverwerkingsstap, geen document dat naar een derde gaat.
   app.get(
     '/admin/hours-export/employees/excel',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const query = hoursExportPeriodQuerySchema.parse(request.query);
       const employees = await service.listEntriesForEmployees(query.period);
@@ -80,7 +80,7 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
   // onderaannemer te sturen — zie subcontractor-statement-document.ts).
   app.get(
     '/admin/hours-export/subcontractors/:employeeId/pdf',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = hoursExportEmployeeParamsSchema.parse(request.params);
       const query = hoursExportPeriodQuerySchema.parse(request.query);
@@ -118,7 +118,7 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
   // gewoon bestaan), zie subcontractor-hours-workbook.ts.
   app.get(
     '/admin/hours-export/subcontractors/:employeeId/excel',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = hoursExportEmployeeParamsSchema.parse(request.params);
       const query = hoursExportPeriodQuerySchema.parse(request.query);
@@ -137,7 +137,7 @@ export default async function hoursExportRoutes(app: FastifyInstance): Promise<v
   // maandtabbladen), i.p.v. de bestaande periodegebonden exports hierboven.
   app.get(
     '/admin/hours-export/personal-timesheet/:employeeId/excel',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const params = hoursExportEmployeeParamsSchema.parse(request.params);
       const { buffer, displayName } = await personalTimesheetService.buildWorkbookForEmployee(params.employeeId);

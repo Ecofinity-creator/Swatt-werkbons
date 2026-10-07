@@ -35,7 +35,7 @@ export default async function dashboardRoutes(app: FastifyInstance): Promise<voi
 
   app.get(
     '/admin/dashboard/today',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<DashboardTodayResponseBody> => {
       const query = dashboardTodayQuerySchema.parse(request.query);
       const from = new Date(query.from);

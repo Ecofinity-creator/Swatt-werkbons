@@ -188,7 +188,7 @@ export function App() {
       <Route
         path="/backoffice/auditlog"
         element={
-          <RequireAuth minimumRole="ADMIN">
+          <RequireAuth minimumRole="SUPERVISOR">
             <AuditLogPage />
           </RequireAuth>
         }
@@ -196,7 +196,7 @@ export function App() {
       <Route
         path="/backoffice/dashboard"
         element={
-          <RequireAuth minimumRole="ADMIN">
+          <RequireAuth minimumRole="SUPERVISOR">
             <DashboardPage />
           </RequireAuth>
         }
@@ -228,7 +228,7 @@ export function App() {
       <Route
         path="/backoffice/facturatie"
         element={
-          <RequireAuth minimumRole="ADMIN">
+          <RequireAuth minimumRole="SUPERVISOR">
             <InvoicingPage />
           </RequireAuth>
         }
@@ -236,7 +236,7 @@ export function App() {
       <Route
         path="/backoffice/uren-export"
         element={
-          <RequireAuth minimumRole="ADMIN">
+          <RequireAuth minimumRole="SUPERVISOR">
             <HoursExportPage />
           </RequireAuth>
         }
@@ -244,7 +244,7 @@ export function App() {
       <Route
         path="/backoffice/personeelsuitbetaling"
         element={
-          <RequireAuth minimumRole="ADMIN">
+          <RequireAuth minimumRole="SUPERVISOR">
             <PayrollPage />
           </RequireAuth>
         }

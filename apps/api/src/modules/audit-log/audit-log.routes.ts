@@ -45,7 +45,7 @@ export default async function auditLogRoutes(app: FastifyInstance): Promise<void
 
   app.get(
     '/admin/audit-log',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<ListAuditLogResponseBody> => {
       const query = listAuditLogQuerySchema.parse(request.query);
       const entries = await service.list({
@@ -74,7 +74,7 @@ export default async function auditLogRoutes(app: FastifyInstance): Promise<void
    */
   app.get(
     '/admin/audit-log/export',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request, reply) => {
       const query = auditLogFilterQuerySchema.parse(request.query);
       const filters = {

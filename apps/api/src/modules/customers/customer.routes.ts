@@ -14,7 +14,7 @@ export default async function customerRoutes(app: FastifyInstance): Promise<void
 
   app.post(
     '/admin/customers/:id/hourly-rate',
-    { preHandler: [app.authenticate, requireRole('ADMIN')] },
+    { preHandler: [app.authenticate, requireRole('SUPERVISOR')] },
     async (request): Promise<UpdateCustomerHourlyRateResponseBody> => {
       const params = customerIdParamsSchema.parse(request.params);
       const body: UpdateCustomerHourlyRateBody = updateCustomerHourlyRateBodySchema.parse(request.body);

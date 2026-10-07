@@ -93,7 +93,8 @@ export function getMenuSections(role: UserRole): MenuSectionConfig[] {
       id: 'facturatie',
       title: 'Facturatie & rapportage',
       icon: EuroIcon,
-      items: isAdmin
+      // Klantvraag 7/10/2026: supervisor mag alles behalve admins aanmaken en instellingen aanpassen.
+      items: isSupervisorPlus
         ? [
             { to: '/backoffice/dashboard', label: 'Vandaag', icon: ChartBarIcon },
             { to: '/backoffice/facturatie', label: 'Facturatie', icon: EuroIcon },

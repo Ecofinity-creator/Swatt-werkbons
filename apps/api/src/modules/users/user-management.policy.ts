@@ -11,9 +11,10 @@ import type { UpdateUserBody } from './user.schemas';
  * 1. Een supervisor maakt/beheert enkel Werknemers en Supervisors — nooit een
  *    Administrator (aanmaken, promoveren of een bestaande beheerder wijzigen,
  *    deactiveren, verwijderen of opnieuw uitnodigen).
- * 2. Tarieven (kostprijs/verkoopprijs) blijven ADMIN-only: dat is
- *    boekhouding/facturatie (sectie 4), net als Facturatie en
- *    Personeelsuitbetaling. Supervisors krijgen die bedragen ook niet te zien.
+ * 2. Tarieven (kostprijs/verkoopprijs): sinds de tweede klantvraag van
+ *    7/10/2026 ("supervisor mag alles kunnen wat admin kan behalve
+ *    administrators aanmaken en instellingen aanpassen") ook voor
+ *    supervisors, net als Facturatie en Personeelsuitbetaling.
  * 3. Niemand (ook geen admin) wijzigt zijn eigen rol of deactiveert/verwijdert
  *    zichzelf — voorkomt dat de enige beheerder zichzelf buitensluit.
  *
@@ -29,9 +30,13 @@ function isAdmin(actor: Actor): boolean {
   return actor.role === 'ADMIN';
 }
 
-/** Mag deze gebruiker tarieven (kost-/verkoopprijs) zien en wijzigen? */
+/**
+ * Mag deze gebruiker tarieven (kost-/verkoopprijs) zien en wijzigen?
+ * Klantvraag 7/10/2026 ("supervisor mag alles kunnen wat admin kan behalve
+ * administrators aanmaken en instellingen aanpassen"): ook supervisors.
+ */
 export function canManageRates(actor: Actor): boolean {
-  return isAdmin(actor);
+  return actor.role === 'ADMIN' || actor.role === 'SUPERVISOR';
 }
 
 /** Welke rollen mag deze gebruiker toekennen (bij aanmaken of wijzigen)? */

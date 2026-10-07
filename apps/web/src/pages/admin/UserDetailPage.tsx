@@ -383,8 +383,8 @@ export function UserDetailPage() {
             )}
           </section>
 
-          {/* Tarieven blijven ADMIN-only (boekhouding) — klantvraag 7/10/2026. */}
-          {user.employee && isAdmin && (
+          {/* Klantvraag 7/10/2026: tarieven ook voor supervisors (deze pagina is SUPERVISOR+). */}
+          {user.employee && (
             <section className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
               <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-neutral-500">Kostprijs</h2>
               <p className="mb-4 text-sm text-neutral-500">

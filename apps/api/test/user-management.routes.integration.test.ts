@@ -79,7 +79,7 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
     expect(create.statusCode).toBe(403);
   });
 
-  it('een SUPERVISOR kan medewerkers aanmaken en beheren, maar geen admins en geen tarieven (klantvraag 7/10/2026)', async () => {
+  it('een SUPERVISOR kan medewerkers en tarieven beheren, maar geen admins (klantvraag 7/10/2026)', async () => {
     const admin = await createUser({ email: 'admin@swatt.be', password: 'Str0ngPassw0rd!', role: 'ADMIN' });
     await prisma.employee.update({ where: { userId: admin.id }, data: { payrollRateCents: 5000 } });
     await createUser({ email: 'supervisor@swatt.be', password: 'wachtwoord123', role: 'SUPERVISOR' });
@@ -118,8 +118,8 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
       headers: { cookie },
       payload: { payrollRateCents: 4500 },
     });
-    expect(setRate.statusCode).toBe(403);
-    expect(setRate.json().error.code).toBe('USER_RATES_ADMIN_ONLY');
+    expect(setRate.statusCode).toBe(200);
+    expect(setRate.json().user.employee.payrollRateCents).toBe(4500);
 
     const touchAdmin = await app.inject({
       method: 'POST',
@@ -130,11 +130,11 @@ describe('Admin gebruikersbeheer (/admin/users)', () => {
     expect(touchAdmin.statusCode).toBe(403);
     expect(touchAdmin.json().error.code).toBe('USER_CANNOT_MANAGE_ADMIN');
 
-    // Tarieven lekken ook niet via de lijst.
+    // Tarieven zijn voor een supervisor ook zichtbaar in de lijst.
     const list = await app.inject({ method: 'GET', url: '/admin/users', headers: { cookie } });
     expect(list.statusCode).toBe(200);
     const adminInList = list.json().users.find((u: { id: string }) => u.id === admin.id);
-    expect(adminInList.employee.payrollRateCents).toBeNull();
+    expect(adminInList.employee.payrollRateCents).toBe(5000);
   });
 
   it('een ADMIN kan een nieuwe gebruiker aanmaken (met meteen een Employee-profiel, zonder wachtwoord) en die verschijnt in de lijst', async () => {
